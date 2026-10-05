@@ -7,10 +7,15 @@ from urllib.robotparser import RobotFileParser
 import requests
 from bs4 import UnicodeDammit
 
-USER_AGENT = "OnebridgeDataCollector/1.0 (+public-data research; contact: admin)"
-TIMEOUT = 20
-PER_DOMAIN_DELAY = 1.5  # seconds between requests to the same site
+# Mimics a real Chrome browser so more sites serve full content instead of blocking bots.
+USER_AGENT = (
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+    "(KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36"
+)
+TIMEOUT = 22
+PER_DOMAIN_DELAY = 0.8   # seconds between requests to the same domain (was 1.5)
 MAX_BYTES = 3_000_000
+WORKERS = 12              # parallel page workers (was 5)
 
 # Sites that hide content behind a login or forbid scraping. We keep their search
 # result (title/snippet/link) but never fetch the page itself.
@@ -19,6 +24,16 @@ SKIP_FETCH_DOMAINS = (
     "tiktok.com", "pinterest.com", "quora.com", "reddit.com", "youtube.com",
     "google.com", "maps.google.com", "play.google.com", "apps.apple.com",
 )
+
+_SESSION_HEADERS = {
+    "User-Agent": USER_AGENT,
+    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
+    "Accept-Language": "en-US,en;q=0.9",
+    "Accept-Encoding": "gzip, deflate, br",
+    "DNT": "1",
+    "Connection": "keep-alive",
+    "Upgrade-Insecure-Requests": "1",
+}
 
 
 def domain_of(url: str) -> str:
@@ -34,11 +49,7 @@ def is_skipped(url: str) -> bool:
 class Fetcher:
     def __init__(self):
         self.session = requests.Session()
-        self.session.headers.update({
-            "User-Agent": USER_AGENT,
-            "Accept": "text/html,application/xhtml+xml;q=0.9,*/*;q=0.8",
-            "Accept-Language": "en;q=0.9",
-        })
+        self.session.headers.update(_SESSION_HEADERS)
         self._robots: dict[str, RobotFileParser | None] = {}
         self._last_hit: dict[str, float] = {}
         self._lock = threading.Lock()
@@ -51,7 +62,7 @@ class Fetcher:
                 return self._robots[base]
         rp = None
         try:
-            r = self.session.get(base + "/robots.txt", timeout=10)
+            r = self.session.get(base + "/robots.txt", timeout=8)
             if r.status_code == 200:
                 rp = RobotFileParser()
                 rp.parse(r.text.splitlines())
@@ -77,23 +88,35 @@ class Fetcher:
                 wait = PER_DOMAIN_DELAY - (now - last)
             time.sleep(wait)
 
-    def get_html(self, url: str) -> tuple[str | None, str]:
-        """Return (html, status_note). html is None when not fetched."""
+    def get_html(self, url: str, ignore_robots: bool = False) -> tuple[str | None, str]:
+        """Return (html, status_note). html is None when not fetched.
+
+        ignore_robots=True is used for sub-pages like /contact on sites whose
+        main page is already allowed — robots.txt occasionally blocks /contact
+        even for otherwise public sites.
+        """
         if is_skipped(url):
             return None, "skipped (login/social site)"
-        if not self.allowed(url):
+        if not ignore_robots and not self.allowed(url):
             return None, "blocked by robots.txt"
         self._wait_turn(url)
-        try:
-            r = self.session.get(url, timeout=TIMEOUT, stream=True, allow_redirects=True)
-            ctype = r.headers.get("Content-Type", "")
-            if r.status_code != 200:
-                return None, f"HTTP {r.status_code}"
-            if "html" not in ctype and "xml" not in ctype:
-                return None, f"not a web page ({ctype.split(';')[0] or 'unknown'})"
-            content = r.raw.read(MAX_BYTES, decode_content=True)
-            declared = [r.encoding] if "charset" in ctype.lower() and r.encoding else []
-            text = UnicodeDammit(content, declared, is_html=True).unicode_markup
-            return text or content.decode("utf-8", errors="replace"), "ok"
-        except requests.RequestException as e:
-            return None, f"error: {type(e).__name__}"
+        for attempt in range(2):  # retry once on transient errors
+            try:
+                r = self.session.get(url, timeout=TIMEOUT, stream=True, allow_redirects=True)
+                ctype = r.headers.get("Content-Type", "")
+                if r.status_code != 200:
+                    return None, f"HTTP {r.status_code}"
+                if "html" not in ctype and "xml" not in ctype:
+                    return None, f"not a web page ({ctype.split(';')[0] or 'unknown'})"
+                content = r.raw.read(MAX_BYTES, decode_content=True)
+                declared = [r.encoding] if "charset" in ctype.lower() and r.encoding else []
+                text = UnicodeDammit(content, declared, is_html=True).unicode_markup
+                return text or content.decode("utf-8", errors="replace"), "ok"
+            except (requests.ConnectionError, requests.Timeout):
+                if attempt == 0:
+                    time.sleep(2)
+                    continue
+                return None, "error: connection failed after retry"
+            except requests.RequestException as e:
+                return None, f"error: {type(e).__name__}"
+        return None, "error: exhausted retries"

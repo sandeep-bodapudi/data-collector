@@ -9,11 +9,10 @@ from datetime import datetime
 
 from . import ai_extract, extract, places
 from .excel import write_workbook
-from .fetch import Fetcher, domain_of
+from .fetch import WORKERS, Fetcher, domain_of
 from .search import web_search
 
 OUTPUT_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "outputs")
-WORKERS = 5
 
 REGIONS = {
     "wt-wt": "Worldwide", "in-en": "India", "us-en": "United States", "uk-en": "United Kingdom",
@@ -145,6 +144,15 @@ def _search(job: Job) -> list[dict]:
     return results
 
 
+def _merge_pages(base: dict, extra: dict):
+    """Merge email/phone/social/address from an extra page into the base page dict."""
+    for k in ("emails", "phones", "social"):
+        base[k] = list(dict.fromkeys(base[k] + extra[k]))
+    base["phones"] = extract.dedupe_phones(base["phones"])
+    base["address"] = base["address"] or extra["address"]
+    base["_text"] += "\n\n" + extra["_text"]
+
+
 def _process_page(job: Job, fetcher: Fetcher, hit: dict) -> dict:
     spec = job.spec
     row = {
@@ -154,15 +162,24 @@ def _process_page(job: Job, fetcher: Fetcher, hit: dict) -> dict:
     html, note = fetcher.get_html(hit["url"])
     page = extract.parse(html, hit["url"]) if html else None
 
-    if page and spec.get("follow_contact") and page["contact_page"] and page["contact_page"] != hit["url"]:
-        chtml, _ = fetcher.get_html(page["contact_page"])
-        if chtml:
-            cp = extract.parse(chtml, page["contact_page"])
-            for k in ("emails", "phones", "social"):
-                page[k] = list(dict.fromkeys(page[k] + cp[k]))
-            page["phones"] = extract.dedupe_phones(page["phones"])
-            page["address"] = page["address"] or cp["address"]
-            page["_text"] += "\n\n[Contact page]\n" + cp["_text"]
+    # Always try up to 3 contact/about/staff sub-pages to find more emails & phones.
+    # This runs regardless of the "follow_contact" toggle.
+    if page is not None:
+        candidates = extract.candidate_contact_urls(hit["url"], page.get("contact_page", ""))
+        visited = {hit["url"]}
+        for sub_url in candidates:
+            if job.cancelled.is_set():
+                break
+            if sub_url in visited:
+                continue
+            # We have enough data already; stop crawling sub-pages
+            if page["emails"] and page["phones"]:
+                break
+            visited.add(sub_url)
+            sub_html, _ = fetcher.get_html(sub_url, ignore_robots=True)
+            if sub_html:
+                sub_page = extract.parse(sub_html, sub_url)
+                _merge_pages(page, sub_page)
 
     for key in spec["fields"]:
         row[extract.STANDARD_FIELDS[key]] = page[key] if page else ""
@@ -224,13 +241,22 @@ def _enrich_place(job: Job, fetcher: Fetcher, row: dict) -> dict:
     if not html:
         return row
     page = extract.parse(html, url)
-    if page["contact_page"] and page["contact_page"] != url:
-        chtml, _ = fetcher.get_html(page["contact_page"])
-        if chtml:
-            cp = extract.parse(chtml, page["contact_page"])
-            page["emails"] += cp["emails"]
-            page["phones"] += cp["phones"]
-            page["_text"] += "\n\n" + cp["_text"]
+
+    # Visit up to 3 contact-type sub-pages automatically
+    candidates = extract.candidate_contact_urls(url, page.get("contact_page", ""))
+    visited = {url}
+    for sub_url in candidates:
+        if job.cancelled.is_set():
+            break
+        if sub_url in visited:
+            continue
+        if page["emails"] and page["phones"]:
+            break
+        visited.add(sub_url)
+        sub_html, _ = fetcher.get_html(sub_url, ignore_robots=True)
+        if sub_html:
+            _merge_pages(page, extract.parse(sub_html, sub_url))
+
     if page["emails"]:
         row["Email"] = "; ".join(dict.fromkeys(([row["Email"]] if row["Email"] else []) + page["emails"]))
     if not row["Phone"] and page["phones"]:
