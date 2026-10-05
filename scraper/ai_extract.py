@@ -7,7 +7,7 @@ MAX_PAGE_CHARS = 60_000
 def available() -> bool:
     return True
 
-def extract_fields(fields: list[str], page_text: str, url: str, topic: str, ai_provider: str="anthropic", ai_api_key: str="", ai_model: str="") -> dict:
+def extract_fields(fields: list[str], page_text: str, url: str, topic: str, ai_provider: str="anthropic", ai_api_key: str="", ai_model: str="", ai_base_url: str="") -> dict:
     if not ai_api_key:
         return {f: "Error: No API key provided" for f in fields}
 
@@ -35,6 +35,16 @@ def extract_fields(fields: list[str], page_text: str, url: str, topic: str, ai_p
             client = openai.OpenAI(api_key=ai_api_key, base_url="https://openrouter.ai/api/v1")
             resp = client.chat.completions.create(
                 model=ai_model or "openai/gpt-3.5-turbo",
+                response_format={"type": "json_object"},
+                messages=[{"role": "user", "content": prompt}],
+            )
+            text = resp.choices[0].message.content
+        elif ai_provider in ("groq", "custom"):
+            import openai
+            base_url = "https://api.groq.com/openai/v1" if ai_provider == "groq" else (ai_base_url or None)
+            client = openai.OpenAI(api_key=ai_api_key, base_url=base_url)
+            resp = client.chat.completions.create(
+                model=ai_model or ("llama3-8b-8192" if ai_provider == "groq" else "gpt-3.5-turbo"),
                 response_format={"type": "json_object"},
                 messages=[{"role": "user", "content": prompt}],
             )

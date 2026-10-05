@@ -116,6 +116,7 @@ def create_job():
     ai_provider = d.get("ai_provider", "anthropic")
     ai_api_key = (d.get("ai_api_key") or "").strip()
     ai_model = (d.get("ai_model") or "").strip()
+    ai_base_url = (d.get("ai_base_url") or "").strip()
 
     if custom and not ai_api_key:
         return jsonify(error="Custom fields need an API key. Please enter your API key in the Settings."), 400
@@ -135,7 +136,7 @@ def create_job():
             "name_filter": (d.get("name_filter") or "").strip(), "max_results": max_results,
             "enrich": bool(d.get("enrich")) or bool(custom), "custom_fields": custom,
             "file_name": (d.get("file_name") or "").strip(),
-            "ai_provider": ai_provider, "ai_api_key": ai_api_key, "ai_model": ai_model,
+            "ai_provider": ai_provider, "ai_api_key": ai_api_key, "ai_model": ai_model, "ai_base_url": ai_base_url,
         }
     else:
         # One search per line (commas are kept: "temples in Hyderabad, Telangana" is one search).
@@ -152,7 +153,7 @@ def create_job():
             "follow_contact": bool(d.get("follow_contact")), "one_per_site": bool(d.get("one_per_site")),
             "require": d.get("require") if d.get("require") in ("emails", "phones", "any_contact") else "",
             "file_name": (d.get("file_name") or "").strip(),
-            "ai_provider": ai_provider, "ai_api_key": ai_api_key, "ai_model": ai_model,
+            "ai_provider": ai_provider, "ai_api_key": ai_api_key, "ai_model": ai_model, "ai_base_url": ai_base_url,
         }
     job = start_job(spec)
     return jsonify(id=job.id)

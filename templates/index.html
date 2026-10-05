@@ -502,13 +502,19 @@
     <div class="opts" style="display:flex;flex-direction:column;gap:14px">
       <div class="field">
         <label class="l" for="ai_provider">AI Provider</label>
-        <select id="ai_provider">
+        <select id="ai_provider" onchange="document.getElementById('base_url_field').style.display = this.value === 'custom' ? 'block' : 'none'">
           <option value="anthropic">Anthropic (Claude)</option>
           <option value="openai">OpenAI (ChatGPT)</option>
-          <option value="openrouter">OpenRouter</option>
-          <option value="gemini">Google Gemini</option>
+          <option value="openrouter">OpenRouter (Free models available)</option>
+          <option value="gemini">Google Gemini (Free tier available)</option>
+          <option value="groq">Groq (Free fast models)</option>
+          <option value="custom">Custom (OpenAI Compatible / Local)</option>
         </select>
         <div class="h">Used only when you request custom details.</div>
+      </div>
+      <div class="field" id="base_url_field" style="display:none">
+        <label class="l" for="ai_base_url">Base URL</label>
+        <input type="text" id="ai_base_url" placeholder="e.g. http://localhost:11434/v1 for Ollama">
       </div>
       <div class="field">
         <label class="l" for="ai_api_key">API Key</label>
@@ -581,12 +587,15 @@ $("open-settings").onclick = () => {
   $("ai_provider").value = localStorage.getItem("ai_provider") || "anthropic";
   $("ai_api_key").value = localStorage.getItem("ai_api_key") || "";
   $("ai_model").value = localStorage.getItem("ai_model") || "";
+  $("ai_base_url").value = localStorage.getItem("ai_base_url") || "";
+  $("base_url_field").style.display = $("ai_provider").value === "custom" ? "block" : "none";
   $("settings-modal").classList.add("show");
 };
 $("save-settings").onclick = () => {
   localStorage.setItem("ai_provider", $("ai_provider").value);
   localStorage.setItem("ai_api_key", $("ai_api_key").value.trim());
   localStorage.setItem("ai_model", $("ai_model").value.trim());
+  localStorage.setItem("ai_base_url", $("ai_base_url").value.trim());
   $("settings-modal").classList.remove("show");
 };
 $("settings-modal").onclick = (e) => { if (e.target.id === "settings-modal") $("settings-modal").classList.remove("show"); };
@@ -694,7 +703,8 @@ $("start").onclick = async () => {
     mode, file_name: $("file_name").value,
     ai_provider: localStorage.getItem("ai_provider") || "anthropic",
     ai_api_key: localStorage.getItem("ai_api_key") || "",
-    ai_model: localStorage.getItem("ai_model") || ""
+    ai_model: localStorage.getItem("ai_model") || "",
+    ai_base_url: localStorage.getItem("ai_base_url") || ""
   };
   if (mode === "web") {
     if (!queries.items.length) { toast("Please type at least one search in step 1.", "err"); $("queries-box").querySelector("input").focus(); return; }
