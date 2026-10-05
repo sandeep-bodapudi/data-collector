@@ -259,6 +259,7 @@
       <div><h1>Data Collector</h1><p>Public internet data → Excel, in a few clicks</p></div>
     </div>
     <div style="display:flex;gap:8px">
+      <button class="help-btn" id="open-settings"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg><span>Settings</span></button>
       <button class="help-btn" id="open-help"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><circle cx="12" cy="12" r="10"/><path d="M9.1 9a3 3 0 0 1 5.8 1c0 2-3 3-3 3M12 17h.01"/></svg><span>How it works</span></button>
       {% if logged_in %}
       <form method="post" action="/logout" style="margin:0"><button class="help-btn" type="submit" title="Log out"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><path d="M15 4h3a2 2 0 0 1 2 2v12a2 2 0 0 1-2 2h-3M10 17l5-5-5-5M15 12H4"/></svg><span>Log out</span></button></form>
@@ -354,10 +355,7 @@
         <div style="margin-top:20px">
           <div style="font-weight:600;font-size:14.5px;margin-bottom:4px">Need something else? <span class="badge">AI</span></div>
           <div style="color:var(--muted);font-size:13px;margin-bottom:8px">Type any detail in your own words, such as <i>main deity</i>, <i>opening hours</i>, <i>founder name</i> or <i>services offered</i>. AI reads each page and fills it in.</div>
-          <div class="tags {% if not ai_enabled %}disabled{% endif %}" id="custom-box" data-placeholder="{% if ai_enabled %}Type a detail and press Enter{% else %}AI is not set up yet{% endif %}"></div>
-          {% if not ai_enabled %}
-          <div class="callout warn"><span>🔒</span><div><b>AI details are switched off.</b> Ask IT to add an Anthropic API key to the <code>.env</code> file. All the details above still work without it.</div></div>
-          {% endif %}
+          <div class="tags" id="custom-box" data-placeholder="Type a detail and press Enter"></div>
         </div>
       </div>
     </div>
@@ -452,7 +450,7 @@
               <span><b>Visit each place's website for emails &amp; phones</b><small>Slower, but finds contact details the map doesn't have.</small></span></label>
             <div class="field" style="grid-column:1/-1">
               <label class="l">More details from websites <span class="badge">AI</span></label>
-              <div class="tags {% if not ai_enabled %}disabled{% endif %}" id="custom-places-box" data-placeholder="{% if ai_enabled %}e.g. main deity, temple timings{% else %}AI is not set up yet{% endif %}"></div>
+              <div class="tags" id="custom-places-box" data-placeholder="e.g. main deity, temple timings"></div>
             </div>
           </div>
         </div>
@@ -498,10 +496,37 @@
   </div>
 </div>
 
+<div class="modal-bg" id="settings-modal">
+  <div class="modal">
+    <h3>⚙️ AI Settings</h3>
+    <div class="opts" style="display:flex;flex-direction:column;gap:14px">
+      <div class="field">
+        <label class="l" for="ai_provider">AI Provider</label>
+        <select id="ai_provider">
+          <option value="anthropic">Anthropic (Claude)</option>
+          <option value="openai">OpenAI (ChatGPT)</option>
+          <option value="openrouter">OpenRouter</option>
+          <option value="gemini">Google Gemini</option>
+        </select>
+        <div class="h">Used only when you request custom details.</div>
+      </div>
+      <div class="field">
+        <label class="l" for="ai_api_key">API Key</label>
+        <input type="text" id="ai_api_key" placeholder="Enter your API key">
+      </div>
+      <div class="field">
+        <label class="l" for="ai_model">Model name (optional)</label>
+        <input type="text" id="ai_model" placeholder="Leave empty for default">
+      </div>
+    </div>
+    <div style="text-align:right;margin-top:20px"><button class="btn btn-primary" id="save-settings">Save</button></div>
+  </div>
+</div>
+
 <script>
 const FIELDS = {{ fields | tojson }};
 const CATEGORIES = {{ categories | tojson }};
-const AI = {{ 'true' if ai_enabled else 'false' }};
+const AI = true;
 
 const FIELD_INFO = {
   // Listed in display order: most-used details first.
@@ -551,6 +576,20 @@ function toast(msg, kind) {
 $("open-help").onclick = () => $("help").classList.add("show");
 $("close-help").onclick = () => $("help").classList.remove("show");
 $("help").onclick = (e) => { if (e.target.id === "help") $("help").classList.remove("show"); };
+
+$("open-settings").onclick = () => {
+  $("ai_provider").value = localStorage.getItem("ai_provider") || "anthropic";
+  $("ai_api_key").value = localStorage.getItem("ai_api_key") || "";
+  $("ai_model").value = localStorage.getItem("ai_model") || "";
+  $("settings-modal").classList.add("show");
+};
+$("save-settings").onclick = () => {
+  localStorage.setItem("ai_provider", $("ai_provider").value);
+  localStorage.setItem("ai_api_key", $("ai_api_key").value.trim());
+  localStorage.setItem("ai_model", $("ai_model").value.trim());
+  $("settings-modal").classList.remove("show");
+};
+$("settings-modal").onclick = (e) => { if (e.target.id === "settings-modal") $("settings-modal").classList.remove("show"); };
 
 /* ---------- tag inputs ---------- */
 function TagInput(box, { disabled = false, onChange = () => {} } = {}) {
@@ -651,7 +690,12 @@ function updateSummary() {
 /* ---------- start / stop ---------- */
 $("start").onclick = async () => {
   queries.flush(); locations.flush(); custom.flush(); customPlaces.flush();
-  const body = { mode, file_name: $("file_name").value };
+  const body = {
+    mode, file_name: $("file_name").value,
+    ai_provider: localStorage.getItem("ai_provider") || "anthropic",
+    ai_api_key: localStorage.getItem("ai_api_key") || "",
+    ai_model: localStorage.getItem("ai_model") || ""
+  };
   if (mode === "web") {
     if (!queries.items.length) { toast("Please type at least one search in step 1.", "err"); $("queries-box").querySelector("input").focus(); return; }
     if (!selectedFields().length && !custom.items.length) { toast("Please tick at least one detail in step 2.", "err"); return; }

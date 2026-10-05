@@ -168,7 +168,7 @@ def _process_page(job: Job, fetcher: Fetcher, hit: dict) -> dict:
         row[extract.STANDARD_FIELDS[key]] = page[key] if page else ""
     if spec["custom_fields"]:
         text = page["_text"] if page else f'{hit["title"]}\n{hit["snippet"]}'
-        row.update(ai_extract.extract_fields(spec["custom_fields"], text, hit["url"], hit["query"]))
+        row.update(ai_extract.extract_fields(spec["custom_fields"], text, hit["url"], hit["query"], spec["ai_provider"], spec["ai_api_key"], spec["ai_model"]))
     row["Fetch Status"] = note
     return row
 
@@ -236,7 +236,7 @@ def _enrich_place(job: Job, fetcher: Fetcher, row: dict) -> dict:
     if not row["Phone"] and page["phones"]:
         row["Phone"] = "; ".join(extract.dedupe_phones(page["phones"]))
     if job.spec["custom_fields"]:
-        row.update(ai_extract.extract_fields(job.spec["custom_fields"], page["_text"], url, row["Name"]))
+        row.update(ai_extract.extract_fields(job.spec["custom_fields"], page["_text"], url, row["Name"], job.spec["ai_provider"], job.spec["ai_api_key"], job.spec["ai_model"]))
     return row
 
 
