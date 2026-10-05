@@ -154,6 +154,9 @@ def create_job():
             "require": d.get("require") if d.get("require") in ("emails", "phones", "any_contact") else "",
             "file_name": (d.get("file_name") or "").strip(),
             "ai_provider": ai_provider, "ai_api_key": ai_api_key, "ai_model": ai_model, "ai_base_url": ai_base_url,
+            "platforms": d.get("platforms") or ["web"],
+            "li_at_cookie": (d.get("li_at_cookie") or "").strip(),
+            "fb_cookie": (d.get("fb_cookie") or "").strip(),
         }
     job = start_job(spec)
     return jsonify(id=job.id)

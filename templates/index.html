@@ -336,7 +336,17 @@
       <div class="step-body">
         <div class="tags" id="queries-box" data-placeholder="e.g. software companies in Hyderabad contact email"></div>
         <div class="under"><span>Press <kbd>Enter</kbd> after each search</span><span id="queries-count"></span></div>
-        <div class="examples"><small>Try:</small>
+        <div style="margin-top:16px">
+          <div style="font-weight:600;font-size:13.5px;margin-bottom:8px">Where should we search?</div>
+          <div style="display:flex;gap:16px;flex-wrap:wrap;font-size:13px">
+            <label style="display:flex;align-items:center;gap:6px;cursor:pointer"><input type="checkbox" name="platform" value="web" checked> General Websites</label>
+            <label style="display:flex;align-items:center;gap:6px;cursor:pointer"><input type="checkbox" name="platform" value="linkedin.com"> LinkedIn</label>
+            <label style="display:flex;align-items:center;gap:6px;cursor:pointer"><input type="checkbox" name="platform" value="facebook.com"> Facebook</label>
+            <label style="display:flex;align-items:center;gap:6px;cursor:pointer"><input type="checkbox" name="platform" value="instagram.com"> Instagram</label>
+            <label style="display:flex;align-items:center;gap:6px;cursor:pointer"><input type="checkbox" name="platform" value="twitter.com"> Twitter/X</label>
+          </div>
+        </div>
+        <div class="examples" style="margin-top:20px"><small>Try:</small>
           <button class="ex" data-to="queries">real estate agents in Pune email</button>
           <button class="ex" data-to="queries">CBSE schools in Vijayawada contact</button>
           <button class="ex" data-to="queries">textile exporters in Tiruppur</button>
@@ -518,11 +528,22 @@
       </div>
       <div class="field">
         <label class="l" for="ai_api_key">API Key</label>
-        <input type="text" id="ai_api_key" placeholder="Enter your API key">
+        <input type="password" id="ai_api_key" placeholder="Enter your API key">
       </div>
       <div class="field">
         <label class="l" for="ai_model">Model name (optional)</label>
         <input type="text" id="ai_model" placeholder="Leave empty for default">
+      </div>
+
+      <div style="font-weight:600;font-size:14px;margin:10px 0 0;color:var(--muted)">Social Media Login (Optional)</div>
+      <div style="font-size:13px;color:var(--faint);margin-bottom:4px">To scrape profiles from LinkedIn or Facebook, provide your session cookies.</div>
+      <div class="field">
+        <label class="l" for="li_at_cookie">LinkedIn Cookie (li_at)</label>
+        <input type="password" id="li_at_cookie" placeholder="Paste your li_at cookie here">
+      </div>
+      <div class="field">
+        <label class="l" for="fb_cookie">Facebook Cookie (c_user & xs)</label>
+        <input type="password" id="fb_cookie" placeholder="Paste your complete Cookie string here">
       </div>
     </div>
     <div style="text-align:right;margin-top:20px"><button class="btn btn-primary" id="save-settings">Save</button></div>
@@ -588,7 +609,8 @@ $("open-settings").onclick = () => {
   $("ai_api_key").value = localStorage.getItem("ai_api_key") || "";
   $("ai_model").value = localStorage.getItem("ai_model") || "";
   $("ai_base_url").value = localStorage.getItem("ai_base_url") || "";
-  $("base_url_field").style.display = $("ai_provider").value === "custom" ? "block" : "none";
+  $("li_at_cookie").value = localStorage.getItem("li_at_cookie") || "";
+  $("fb_cookie").value = localStorage.getItem("fb_cookie") || "";
   $("settings-modal").classList.add("show");
 };
 $("save-settings").onclick = () => {
@@ -596,6 +618,8 @@ $("save-settings").onclick = () => {
   localStorage.setItem("ai_api_key", $("ai_api_key").value.trim());
   localStorage.setItem("ai_model", $("ai_model").value.trim());
   localStorage.setItem("ai_base_url", $("ai_base_url").value.trim());
+  localStorage.setItem("li_at_cookie", $("li_at_cookie").value.trim());
+  localStorage.setItem("fb_cookie", $("fb_cookie").value.trim());
   $("settings-modal").classList.remove("show");
 };
 $("settings-modal").onclick = (e) => { if (e.target.id === "settings-modal") $("settings-modal").classList.remove("show"); };
@@ -705,15 +729,18 @@ $("start").onclick = async () => {
     ai_provider: localStorage.getItem("ai_provider") || "anthropic",
     ai_api_key: localStorage.getItem("ai_api_key") || "",
     ai_model: localStorage.getItem("ai_model") || "",
-    ai_base_url: localStorage.getItem("ai_base_url") || ""
+    ai_base_url: localStorage.getItem("ai_base_url") || "",
+    li_at_cookie: localStorage.getItem("li_at_cookie") || "",
+    fb_cookie: localStorage.getItem("fb_cookie") || "",
   };
   if (mode === "web") {
     if (!queries.items.length) { toast("Please type at least one search in step 1.", "err"); $("queries-box").querySelector("input").focus(); return; }
     if (!selectedFields().length && !custom.items.length) { toast("Please tick at least one detail in step 2.", "err"); return; }
+    const platforms = Array.from(document.querySelectorAll('input[name="platform"]:checked')).map(cb => cb.value);
     Object.assign(body, {
       queries: queries.items.join("\n"), max_results: $("max_results").value, region: $("region").value,
       require: requireVal, follow_contact: $("follow_contact").checked, one_per_site: $("one_per_site").checked,
-      fields: selectedFields(), custom_fields: custom.items.join(","),
+      fields: selectedFields(), custom_fields: custom.items.join(","), platforms
     });
   } else {
     if (!locations.items.length) { toast("Please add at least one location in step 2.", "err"); $("locations-box").querySelector("input").focus(); return; }

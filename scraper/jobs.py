@@ -121,8 +121,17 @@ def _save(job: Job):
 
 def _search(job: Job) -> list[dict]:
     spec = job.spec
-    results, seen = [], set()
+    platforms = spec.get("platforms", ["web"])
+    expanded_queries = []
     for q in spec["queries"]:
+        if "web" in platforms:
+            expanded_queries.append(q)
+        for p in platforms:
+            if p != "web":
+                expanded_queries.append(f"{q} site:{p}")
+                
+    results, seen = [], set()
+    for q in expanded_queries:
         if job.cancelled.is_set():
             break
         job.say(f'Searching: "{q}"')
@@ -210,7 +219,7 @@ def _run_web(job: Job):
     job.total = len(hits)
     job.phase, job.activity = "visit", f"Reading {len(hits)} websites and picking out the details…"
     job.say(f"Visiting {len(hits)} pages…")
-    fetcher = Fetcher()
+    fetcher = Fetcher(spec)
     with ThreadPoolExecutor(WORKERS) as pool:
         futures = {pool.submit(_process_page, job, fetcher, h): h for h in hits}
         for fut in as_completed(futures):
@@ -304,7 +313,7 @@ def _run_places(job: Job):
     job.total, job.done = len(with_site), 0
     job.phase, job.activity = "visit", f"Visiting {len(with_site)} websites to find emails and phone numbers…"
     job.say(f"Visiting {len(with_site)} websites for emails/phones…")
-    fetcher = Fetcher()
+    fetcher = Fetcher(spec)
     with ThreadPoolExecutor(WORKERS) as pool:
         futures = {pool.submit(_enrich_place, job, fetcher, r): r for r in with_site}
         for fut in as_completed(futures):

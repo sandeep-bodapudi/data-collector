@@ -47,12 +47,33 @@ def is_skipped(url: str) -> bool:
 
 
 class Fetcher:
-    def __init__(self):
+    def __init__(self, spec: dict = None):
+        self.spec = spec or {}
         self.session = requests.Session()
         self.session.headers.update(_SESSION_HEADERS)
+        
+        # Inject social media cookies if provided
+        if self.spec.get("li_at_cookie"):
+            self.session.cookies.set("li_at", self.spec["li_at_cookie"], domain=".linkedin.com")
+        if self.spec.get("fb_cookie"):
+            # Facebook cookies are usually provided as a string "c_user=...; xs=..."
+            for pair in self.spec["fb_cookie"].split(";"):
+                if "=" in pair:
+                    k, v = pair.strip().split("=", 1)
+                    self.session.cookies.set(k, v, domain=".facebook.com")
+                    
         self._robots: dict[str, RobotFileParser | None] = {}
         self._last_hit: dict[str, float] = {}
         self._lock = threading.Lock()
+
+    def _is_skipped(self, url: str) -> bool:
+        d = domain_of(url)
+        # Don't skip if we have a cookie for this domain
+        if "linkedin.com" in d and self.spec.get("li_at_cookie"):
+            return False
+        if "facebook.com" in d and self.spec.get("fb_cookie"):
+            return False
+        return any(d == s or d.endswith("." + s) for s in SKIP_FETCH_DOMAINS)
 
     def _robots_for(self, url: str) -> RobotFileParser | None:
         p = urlparse(url)
@@ -95,7 +116,7 @@ class Fetcher:
         main page is already allowed — robots.txt occasionally blocks /contact
         even for otherwise public sites.
         """
-        if is_skipped(url):
+        if self._is_skipped(url):
             return None, "skipped (login/social site)"
         if not ignore_robots and not self.allowed(url):
             return None, "blocked by robots.txt"
