@@ -1,9 +1,11 @@
 """Web UI for the data collector. Run: python app.py  then open http://localhost:5000"""
+import hashlib
 import hmac
 import os
-from datetime import datetime
+import time
+from datetime import datetime, timedelta
 
-from flask import Flask, Response, abort, jsonify, render_template, request, send_from_directory
+from flask import Flask, abort, jsonify, redirect, render_template, request, send_from_directory, session, url_for
 
 
 def _load_env_file():
@@ -25,19 +27,66 @@ from scraper.jobs import JOBS, OUTPUT_DIR, REGIONS, start_job  # noqa: E402
 app = Flask(__name__)
 app.config["TEMPLATES_AUTO_RELOAD"] = True  # page edits show up without restarting
 
-# When APP_PASSWORD is set (always on the server), the browser asks for a login before showing anything.
+# When APP_PASSWORD is set (always on the server), people must sign in on the login page first.
 APP_USER = os.environ.get("APP_USER", "team")
 APP_PASSWORD = os.environ.get("APP_PASSWORD", "")
+# Signs the login cookie. Derived from the password when not set, so changing the password logs everyone out.
+app.secret_key = os.environ.get("SECRET_KEY") or hashlib.sha256(f"data-collector:{APP_PASSWORD}".encode()).hexdigest()
+app.config.update(PERMANENT_SESSION_LIFETIME=timedelta(days=30),  # "Keep me signed in"
+                  SESSION_COOKIE_HTTPONLY=True, SESSION_COOKIE_SAMESITE="Lax",
+                  SESSION_COOKIE_SECURE=bool(os.environ.get("RENDER")))
+
+MAX_FAILED, LOCK_SECONDS = 5, 600
+_failed: dict[str, list[float]] = {}
+
+
+def _client_ip() -> str:
+    return (request.headers.get("X-Forwarded-For") or request.remote_addr or "").split(",")[0].strip()
+
+
+def _locked(ip: str) -> bool:
+    recent = [t for t in _failed.get(ip, []) if time.time() - t < LOCK_SECONDS]
+    _failed[ip] = recent
+    return len(recent) >= MAX_FAILED
 
 
 @app.before_request
 def require_login():
-    if not APP_PASSWORD:
+    if not APP_PASSWORD or request.endpoint in ("login", "static") or session.get("user"):
         return None
-    auth = request.authorization
-    if auth and hmac.compare_digest(auth.username or "", APP_USER) and hmac.compare_digest(auth.password or "", APP_PASSWORD):
-        return None
-    return Response("Login required.", 401, {"WWW-Authenticate": 'Basic realm="Data Collector"'})
+    if request.path.startswith("/api/") or request.path.startswith("/download/"):
+        return jsonify(error="Your session has ended. Please refresh the page and sign in again."), 401
+    return redirect(url_for("login", next=request.path))
+
+
+@app.route("/login", methods=["GET", "POST"])
+def login():
+    if not APP_PASSWORD or session.get("user"):
+        return redirect(url_for("index"))
+    error, username = None, ""
+    if request.method == "POST":
+        ip = _client_ip()
+        username = (request.form.get("username") or "").strip()
+        password = request.form.get("password") or ""
+        if _locked(ip):
+            error = "Too many wrong attempts. Please wait 10 minutes and try again."
+        elif hmac.compare_digest(username.lower(), APP_USER.lower()) and hmac.compare_digest(password, APP_PASSWORD):
+            _failed.pop(ip, None)
+            session.clear()
+            session["user"] = APP_USER
+            session.permanent = bool(request.form.get("remember"))
+            nxt = request.args.get("next") or "/"
+            return redirect(nxt if nxt.startswith("/") and not nxt.startswith("//") else "/")
+        else:
+            _failed.setdefault(ip, []).append(time.time())
+            error = "Wrong username or password."
+    return render_template("login.html", error=error, username=username)
+
+
+@app.post("/logout")
+def logout():
+    session.clear()
+    return redirect(url_for("login"))
 
 
 def _list(text: str) -> list[str]:
@@ -55,6 +104,7 @@ def index():
         categories=list(places.CATEGORIES),
         regions=REGIONS,
         ai_enabled=ai_extract.available(),
+        logged_in=bool(APP_PASSWORD and session.get("user")),
     )
 
 

@@ -1,0 +1,78 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Sign in · Data Collector</title>
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><rect width='32' height='32' rx='8' fill='%234f46e5'/><path d='M9 11h14M9 16h14M9 21h9' stroke='white' stroke-width='2.5' stroke-linecap='round'/></svg>">
+<style>
+  :root {
+    --surface: #ffffff; --surface-2: #f8f9fc; --text: #171a2b; --muted: #636a85; --line-2: #d3d8e6;
+    --primary: #4f46e5; --primary-2: #6366f1; --primary-soft: #eef0ff; --red: #d0312d; --red-soft: #fdeceb;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root { --surface: #181b25; --surface-2: #1e2230; --text: #e8eaf3; --muted: #9ba2bd; --line-2: #363c51;
+      --primary: #7c78ff; --primary-2: #8b88ff; --primary-soft: #25264a; --red: #ff6b66; --red-soft: #3a1c1d; }
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; min-height: 100vh; font: 15px/1.55 "Segoe UI", -apple-system, system-ui, Roboto, sans-serif; color: var(--text);
+    background: linear-gradient(135deg, #312e81, #4f46e5 50%, #0e7490); display: flex; align-items: center; justify-content: center; padding: 24px 16px; }
+  .card { width: 100%; max-width: 410px; background: var(--surface); border-radius: 18px; box-shadow: 0 20px 60px rgba(10,12,40,.35); padding: 34px 30px 28px; }
+  .logo { width: 54px; height: 54px; border-radius: 15px; background: var(--primary); color: #fff; display: grid; place-items: center; margin: 0 auto 14px; box-shadow: 0 8px 20px rgba(79,70,229,.4); }
+  h1 { margin: 0; text-align: center; font-size: 22px; }
+  .sub { margin: 4px 0 24px; text-align: center; color: var(--muted); font-size: 14px; }
+  label { display: block; font-weight: 600; font-size: 14px; margin: 14px 0 6px; }
+  .input { position: relative; }
+  .input svg.i { position: absolute; left: 13px; top: 50%; transform: translateY(-50%); color: var(--muted); pointer-events: none; }
+  input[type=text], input[type=password] { width: 100%; padding: 12px 44px 12px 40px; border: 1.5px solid var(--line-2); border-radius: 11px; font: inherit; color: inherit; background: var(--surface); }
+  input:focus { outline: 0; border-color: var(--primary); box-shadow: 0 0 0 4px var(--primary-soft); }
+  .eye { position: absolute; right: 6px; top: 50%; transform: translateY(-50%); border: 0; background: transparent; color: var(--muted); cursor: pointer; width: 36px; height: 36px; border-radius: 8px; display: grid; place-items: center; }
+  .eye:hover { background: var(--surface-2); }
+  .row { display: flex; justify-content: space-between; align-items: center; margin: 16px 0 20px; font-size: 14px; }
+  .row label { display: flex; align-items: center; gap: 8px; margin: 0; font-weight: 400; cursor: pointer; }
+  .row input { width: 16px; height: 16px; accent-color: var(--primary); }
+  button.go { width: 100%; border: 0; border-radius: 11px; padding: 13px; font: inherit; font-weight: 650; color: #fff; background: var(--primary); cursor: pointer; box-shadow: 0 6px 18px rgba(79,70,229,.35); transition: .12s; }
+  button.go:hover { background: var(--primary-2); transform: translateY(-1px); }
+  button.go:disabled { opacity: .7; transform: none; cursor: default; }
+  .error { display: flex; gap: 8px; align-items: center; background: var(--red-soft); color: var(--red); padding: 10px 12px; border-radius: 10px; font-size: 14px; margin-bottom: 4px; }
+  .foot { margin-top: 22px; text-align: center; color: var(--muted); font-size: 12.5px; }
+  .caps { display: none; color: #b7791f; font-size: 12.5px; margin-top: 6px; }
+</style>
+</head>
+<body>
+  <form class="card" method="post" id="f" autocomplete="on">
+    <div class="logo"><svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><circle cx="11" cy="11" r="6.5"/><path d="m20 20-4.2-4.2"/><path d="M8.5 11h5M11 8.5v5"/></svg></div>
+    <h1>Data Collector</h1>
+    <p class="sub">Sign in to collect data into Excel</p>
+
+    {% if error %}<div class="error" role="alert"><span>⚠️</span>{{ error }}</div>{% endif %}
+
+    <label for="username">Username</label>
+    <div class="input">
+      <svg class="i" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="12" cy="8" r="4"/><path d="M4 21a8 8 0 0 1 16 0"/></svg>
+      <input type="text" id="username" name="username" value="{{ username }}" autocomplete="username" required {% if not username %}autofocus{% endif %}>
+    </div>
+
+    <label for="password">Password</label>
+    <div class="input">
+      <svg class="i" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><rect x="4" y="10.5" width="16" height="10" rx="2"/><path d="M8 10.5V7a4 4 0 0 1 8 0v3.5"/></svg>
+      <input type="password" id="password" name="password" autocomplete="current-password" required {% if username %}autofocus{% endif %}>
+      <button type="button" class="eye" id="eye" aria-label="Show password" title="Show password">
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M2 12s3.6-7 10-7 10 7 10 7-3.6 7-10 7S2 12 2 12Z"/><circle cx="12" cy="12" r="3"/></svg>
+      </button>
+    </div>
+    <div class="caps" id="caps">⇪ Caps Lock is on</div>
+
+    <div class="row"><label><input type="checkbox" name="remember" checked> Keep me signed in</label></div>
+
+    <button class="go" type="submit" id="go">Sign in</button>
+    <p class="foot">Don't have the login? Ask your team admin.</p>
+  </form>
+<script>
+  const pw = document.getElementById("password");
+  document.getElementById("eye").onclick = () => { pw.type = pw.type === "password" ? "text" : "password"; pw.focus(); };
+  pw.addEventListener("keyup", (e) => { document.getElementById("caps").style.display = e.getModifierState && e.getModifierState("CapsLock") ? "block" : "none"; });
+  document.getElementById("f").addEventListener("submit", () => { const b = document.getElementById("go"); b.disabled = true; b.textContent = "Signing in…"; });
+</script>
+</body>
+</html>
