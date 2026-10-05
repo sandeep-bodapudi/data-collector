@@ -40,11 +40,15 @@ def extract_fields(fields: list[str], page_text: str, url: str, topic: str, ai_p
             )
             text = resp.choices[0].message.content
         elif ai_provider == "gemini":
-            import google.generativeai as genai
-            genai.configure(api_key=ai_api_key)
-            m = genai.GenerativeModel(ai_model or "gemini-1.5-flash")
-            resp = m.generate_content(prompt, generation_config=genai.types.GenerationConfig(response_mime_type="application/json"))
-            text = resp.text
+            import requests
+            url = f"https://generativelanguage.googleapis.com/v1beta/models/{ai_model or 'gemini-1.5-flash'}:generateContent?key={ai_api_key}"
+            payload = {
+                "contents": [{"parts": [{"text": prompt}]}],
+                "generationConfig": {"responseMimeType": "application/json"}
+            }
+            resp = requests.post(url, headers={"Content-Type": "application/json"}, json=payload)
+            resp.raise_for_status()
+            text = resp.json()["candidates"][0]["content"]["parts"][0]["text"]
         else: # anthropic
             import anthropic
             client = anthropic.Anthropic(api_key=ai_api_key)

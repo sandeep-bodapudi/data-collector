@@ -280,7 +280,7 @@ def _run_places(job: Job):
     job.say(f"Visiting {len(with_site)} websites for emails/phones…")
     fetcher = Fetcher()
     with ThreadPoolExecutor(WORKERS) as pool:
-        futures = [pool.submit(_enrich_place, job, fetcher, r) for r in with_site]
+        futures = {pool.submit(_enrich_place, job, fetcher, r): r for r in with_site}
         for fut in as_completed(futures):
             if job.cancelled.is_set():
                 pool.shutdown(wait=False, cancel_futures=True)
@@ -291,3 +291,4 @@ def _run_places(job: Job):
                 job.rows.append(fut.result())
             except Exception as e:
                 job.say(f"  website failed: {e}")
+                job.rows.append(futures[fut])
