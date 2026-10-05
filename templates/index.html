@@ -886,13 +886,58 @@ async function downloadLocalFile(name) {
   }
 }
 
+async function previewLocalFile(name) {
+  if (!window.XLSX) {
+    const btn = event.target;
+    const oldText = btn.textContent;
+    btn.textContent = "Loading...";
+    await new Promise(r => {
+      const s = document.createElement('script');
+      s.src = "https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js";
+      s.onload = r;
+      document.head.appendChild(s);
+    });
+    btn.textContent = oldText;
+  }
+  const db = await dbPromise;
+  const file = await new Promise(res => {
+    const r = db.transaction("excel_files").objectStore("excel_files").get(name);
+    r.onsuccess = () => res(r.result);
+  });
+  if (!file || !file.blob) return alert("File not found locally. Download it instead.");
+  
+  const arrayBuffer = await file.blob.arrayBuffer();
+  const workbook = XLSX.read(arrayBuffer);
+  const sheet = workbook.Sheets[workbook.SheetNames[0]];
+  const json = XLSX.utils.sheet_to_json(sheet, { defval: "" });
+  
+  if (!json.length) return alert("This Excel file is empty.");
+  
+  const columns = Object.keys(json[0]);
+  lastJob = { preview: json.slice().reverse(), columns }; // reverse because renderPreview reverses it again
+  
+  $("run").hidden = false;
+  $("result").innerHTML = `<div class="result-banner ok"><div class="big">👁</div><div class="txt"><b>Previewing: ${esc(name)}</b><span>${json.length} rows in this file</span></div></div>`;
+  $("run-title").textContent = "File Preview";
+  document.body.classList.add("running");
+  $("stepper").innerHTML = ""; // hide stepper
+  $("activity").textContent = "Viewing older file";
+  $("bar-left").textContent = ""; $("bar-right").textContent = ""; $("barfill").style.width = "100%";
+  
+  renderPreview(lastJob);
+  document.getElementById("preview-area").scrollIntoView();
+}
+
 const prettyName = (n) => n.replace(/\.xlsx$/, "").replace(/_\d{8}_\d{6}$/, "").replace(/_/g, " ");
 function renderFiles() {
   const q = $("file-filter").value.trim().toLowerCase();
   const list = allFiles.filter(f => !q || f.name.toLowerCase().includes(q));
   $("files").innerHTML = list.length ? list.map(f => `<li class="file"><div class="xl">XL</div>
       <div class="meta"><b title="${esc(f.name)}">${esc(prettyName(f.name))}</b><small>${f.created} · ${f.size_kb} KB</small></div>
-      <a class="dl" href="javascript:void(0)" onclick="downloadLocalFile('${esc(f.name)}')">⬇ Download</a></li>`).join("")
+      <div style="display:flex;flex-direction:column;gap:5px;align-items:flex-end;margin-left:auto;">
+        <a class="dl" href="javascript:void(0)" onclick="downloadLocalFile('${esc(f.name)}')">⬇ Download</a>
+        <a class="dl" href="javascript:void(0)" onclick="previewLocalFile('${esc(f.name)}')">👁 Preview</a>
+      </div></li>`).join("")
     : `<li class="nofiles">${allFiles.length ? "No file matches your search." : "Your Excel files will appear here after your first collection."}</li>`;
 }
 $("file-filter").oninput = renderFiles;
