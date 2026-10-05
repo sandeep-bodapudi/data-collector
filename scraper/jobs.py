@@ -8,11 +8,10 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 
 from . import ai_extract, extract, places
-from .excel import write_workbook
+from .excel import SECRET_KEYS
 from .fetch import WORKERS, Fetcher, domain_of
-from .search import web_search
+from .search import SearchBlocked, web_search
 
-OUTPUT_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "outputs")
 
 REGIONS = {
     "wt-wt": "Worldwide", "in-en": "India", "us-en": "United States", "uk-en": "United Kingdom",
@@ -22,10 +21,16 @@ REGIONS = {
 JOBS: dict[str, "Job"] = {}
 
 
+def public_spec(spec: dict) -> dict:
+    """The run settings without any secrets (safe to store in the database or show in the UI)."""
+    return {k: v for k, v in spec.items() if k not in SECRET_KEYS}
+
+
 class Job:
-    def __init__(self, spec: dict):
+    def __init__(self, spec: dict, owner_id: int | None = None):
         self.id = uuid.uuid4().hex[:10]
         self.spec = spec
+        self.owner_id = owner_id
         self.status = "queued"
         self.total = 0
         self.done = 0
@@ -39,6 +44,7 @@ class Job:
         self.phase = "search"  # search -> visit -> save -> done
         self.activity = "Getting ready…"
         self.cancelled = threading.Event()
+        self.problems: list[str] = []  # service errors; shown when a run ends with no rows
 
     def say(self, msg: str):
         self.log.append(f"{datetime.now():%H:%M:%S}  {msg}")
@@ -60,7 +66,7 @@ class Job:
             "count": len(self.rows), "columns": self.columns,
             "preview": [{c: _short(r.get(c)) for c in self.columns} for r in self.rows[-preview_rows:]],
             "log": self.log[-60:], "file": os.path.basename(self.file) if self.file else None,
-            "error": self.error,
+            "sheet_id": getattr(self, "sheet_id", None), "error": self.error,
         }
 
 
@@ -76,45 +82,69 @@ def _safe_name(s: str) -> str:
     return s[:50] or "scrape"
 
 
-def start_job(spec: dict) -> Job:
-    job = Job(spec)
+def start_job(spec: dict, app, user_id: int) -> Job:
+    job = Job(spec, user_id)
     JOBS[job.id] = job
-    threading.Thread(target=_run, args=(job,), daemon=True).start()
+    threading.Thread(target=_run, args=(job, app, user_id), daemon=True).start()
     return job
 
 
-def _run(job: Job):
-    job.status = "running"
-    try:
-        if job.spec["mode"] == "places":
-            _run_places(job)
-        else:
-            _run_web(job)
-        final = "cancelled" if job.cancelled.is_set() else "done"
-    except Exception as e:  # report any failure to the UI instead of crashing the thread
-        job.error = f"{type(e).__name__}: {e}"
-        final = "error"
-        job.say("ERROR: " + job.error)
-    if job.rows:
-        job.phase, job.activity = "save", "Saving your Excel file…"
+def _run(job: Job, app, user_id: int):
+    from models import db, Run
+    import json
+    with app.app_context():
+        title = job.spec.get("file_name") or (job.spec.get("queries") or [job.spec.get("category", "scrape")])[0]
+        run = Run(id=job.id, name=title, connector=job.spec["mode"], spec_json=json.dumps(public_spec(job.spec)),
+                  owner_id=user_id, status="running")
+        db.session.add(run)
+        db.session.commit()
+
+        job.status = "running"
         try:
-            _save(job)
-        except Exception as e:
-            job.error, final = f"Could not save Excel: {e}", "error"
-    job.phase, job.finished = "done", datetime.now()
-    job.activity = {"done": "All done!", "cancelled": "Stopped. Your data so far was saved.",
-                    "error": "Something went wrong."}[final]
-    job.status = final
+            if job.spec["mode"] == "places":
+                _run_places(job)
+            else:
+                _run_web(job)
+            final = "cancelled" if job.cancelled.is_set() else "done"
+            if final == "done" and not job.rows and job.problems:
+                job.error, final = job.problems[-1], "error"
+        except Exception as e:  # report any failure to the UI instead of crashing the thread
+            job.error = f"{type(e).__name__}: {e}"
+            final = "error"
+            job.say("ERROR: " + job.error)
+        
+        if job.rows:
+            job.phase, job.activity = "save", "Saving your Excel file…"
+            try:
+                _save(job, user_id)
+            except Exception as e:
+                job.error, final = f"Could not save Excel: {e}", "error"
+        
+        job.phase, job.finished = "done", datetime.now()
+        job.activity = {"done": "All done!", "cancelled": "Stopped. Your data so far was saved.",
+                        "error": "Something went wrong."}[final]
+        job.status = final
+        
+        # update run record
+        run = Run.query.get(job.id)
+        if run:
+            run.status = final
+            run.total_items = job.total
+            run.done_items = job.done
+            run.row_count = len(job.rows)
+            run.error = job.error
+            run.completed_at = job.finished
+            db.session.commit()
 
 
-def _save(job: Job):
-    os.makedirs(OUTPUT_DIR, exist_ok=True)
+def _save(job: Job, user_id: int):
+    from . import sheets
     title = job.spec.get("file_name") or (job.spec.get("queries") or [job.spec.get("category", "scrape")])[0]
-    path = os.path.join(OUTPUT_DIR, f"{_safe_name(title)}_{datetime.now():%Y%m%d_%H%M%S}.xlsx")
-    info = {k: v for k, v in job.spec.items() if v not in (None, "", [], False)}
-    write_workbook(path, job.columns, job.rows, info)
-    job.file = path
-    job.say(f"Saved {len(job.rows)} rows to {os.path.basename(path)}")
+    name = f"{_safe_name(title)}_{datetime.now():%Y%m%d_%H%M%S}.xlsx"
+    info = {k: v for k, v in public_spec(job.spec).items() if v not in (None, "", [], False)}
+    sheet = sheets.save(name, job.columns, job.rows, user_id, source="run", info=info, run_id=job.id)
+    job.file, job.sheet_id = name, sheet.id
+    job.say(f"Saved {len(job.rows)} rows to {name}")
 
 
 # ---------------------------------------------------------------- web search mode
@@ -136,7 +166,11 @@ def _search(job: Job) -> list[dict]:
             break
         job.say(f'Searching: "{q}"')
         job.activity = f'Searching the internet for "{q}"'
-        hits = web_search(q, spec.get("region", "wt-wt"), spec["max_results"], job.say)
+        try:
+            hits = web_search(q, spec.get("region", "wt-wt"), spec["max_results"], job.say)
+        except SearchBlocked as e:
+            job.problems.append(str(e))
+            hits = []
         new = 0
         for h in hits:
             url = h.get("href", "")
@@ -171,9 +205,8 @@ def _process_page(job: Job, fetcher: Fetcher, hit: dict) -> dict:
     html, note = fetcher.get_html(hit["url"])
     page = extract.parse(html, hit["url"]) if html else None
 
-    # Always try up to 3 contact/about/staff sub-pages to find more emails & phones.
-    # This runs regardless of the "follow_contact" toggle.
-    if page is not None:
+    # Check contact/about/staff pages for more emails & phones (the "Contact Us pages" switch).
+    if page is not None and spec.get("follow_contact", True):
         candidates = extract.candidate_contact_urls(hit["url"], page.get("contact_page", ""))
         visited = {hit["url"]}
         for sub_url in candidates:
@@ -185,7 +218,7 @@ def _process_page(job: Job, fetcher: Fetcher, hit: dict) -> dict:
             if page["emails"] and page["phones"]:
                 break
             visited.add(sub_url)
-            sub_html, _ = fetcher.get_html(sub_url, ignore_robots=True)
+            sub_html, _ = fetcher.get_html(sub_url)
             if sub_html:
                 sub_page = extract.parse(sub_html, sub_url)
                 _merge_pages(page, sub_page)
@@ -194,7 +227,7 @@ def _process_page(job: Job, fetcher: Fetcher, hit: dict) -> dict:
         row[extract.STANDARD_FIELDS[key]] = page[key] if page else ""
     if spec["custom_fields"]:
         text = page["_text"] if page else f'{hit["title"]}\n{hit["snippet"]}'
-        row.update(ai_extract.extract_fields(spec["custom_fields"], text, hit["url"], hit["query"], spec["ai_provider"], spec["ai_api_key"], spec["ai_model"], spec.get("ai_base_url", "")))
+        row.update(ai_extract.extract_fields(spec["custom_fields"], text, hit["url"], hit["query"], spec["ai"]))
     row["Fetch Status"] = note
     return row
 
@@ -262,7 +295,7 @@ def _enrich_place(job: Job, fetcher: Fetcher, row: dict) -> dict:
         if page["emails"] and page["phones"]:
             break
         visited.add(sub_url)
-        sub_html, _ = fetcher.get_html(sub_url, ignore_robots=True)
+        sub_html, _ = fetcher.get_html(sub_url)
         if sub_html:
             _merge_pages(page, extract.parse(sub_html, sub_url))
 
@@ -271,7 +304,7 @@ def _enrich_place(job: Job, fetcher: Fetcher, row: dict) -> dict:
     if not row["Phone"] and page["phones"]:
         row["Phone"] = "; ".join(extract.dedupe_phones(page["phones"]))
     if job.spec["custom_fields"]:
-        row.update(ai_extract.extract_fields(job.spec["custom_fields"], page["_text"], url, row["Name"], job.spec["ai_provider"], job.spec["ai_api_key"], job.spec["ai_model"], job.spec.get("ai_base_url", "")))
+        row.update(ai_extract.extract_fields(job.spec["custom_fields"], page["_text"], url, row["Name"], job.spec["ai"]))
     return row
 
 
@@ -288,12 +321,15 @@ def _run_places(job: Job):
         job.say(f'Finding "{spec["category"]}" in {loc}…')
         job.activity = f'Looking up {spec["category"].lower()} in {loc}…'
         try:
-            found = places.search_places(spec["category"], loc, spec.get("name_filter", ""), spec["max_results"])
+            found = places.search_places(spec["category"], loc, spec.get("name_filter", ""), spec["max_results"],
+                                         notify=lambda msg: setattr(job, "activity", msg))
         except places.PlaceError as e:
             job.say(f"  {e}")
+            job.problems.append(str(e))
             found = []
         except Exception as e:  # network problems with one location shouldn't stop the others
             job.say(f"  failed: {type(e).__name__}: {e}")
+            job.problems.append(f"Could not reach the map service ({type(e).__name__}). Please try again.")
             found = []
         for r in found:
             r["Search Location"] = loc

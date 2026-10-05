@@ -1,55 +1,59 @@
-# Data Collector
+# OneBridge Data Collector
 
-A web app that collects **public** information from the internet into **Excel**. No logins needed.
+An internal web app that collects **public** information from the web into spreadsheets, then lets you merge, dedupe and export it. No logins to the target websites are needed.
 
-## Two ways to collect
+- **Web search:** emails, phones, addresses, social links and page details from websites matching your searches. Optional AI columns fill any detail you describe, using **each person's own AI key** (OpenAI, Gemini, Claude, OpenRouter, Groq or any OpenAI-compatible service).
+- **Places:** lists of temples, hospitals, schools, hotels, banks… in any city, from OpenStreetMap.
+- **Sheets:** every run saves a sheet. You can search it, open single rows, and export it as Excel, CSV or JSON. Excel, CSV and JSON files can also be imported.
+- **Merge & Dedupe:** combine sheets and remove duplicates using smart matching for phones, emails and websites.
+- **Admin:** users with Admin, Member and Viewer roles, plus the connector policy.
 
-| Mode | Use it for | Where data comes from |
-|---|---|---|
-| **🔎 Search the web** | Emails, phone numbers, addresses, social links, or *any detail you describe* (AI) | DuckDuckGo search results, then each website is visited |
-| **📍 Find places** | Lists of temples, hospitals, schools, hotels, banks, offices… in any city | OpenStreetMap (free, open map data), optionally plus each place's website |
+Product requirements: [docs/OneBridge Scraper_ Product Requirements Document.md](docs/OneBridge%20Scraper_%20Product%20Requirements%20Document.md). What's built so far: [docs/PRD-status.md](docs/PRD-status.md).
 
-Every run creates an `.xlsx` file in the `outputs/` folder with:
-- a **Data** sheet (filters, frozen header, clickable links)
-- a **Run Info** sheet (what was searched, when, and with which settings)
+## Run it locally (Windows)
 
-## Starting it (Windows)
+Double-click **`start.bat`** and open http://localhost:5000.
 
-Double-click **`start.bat`**. On the first run it installs everything (Python 3.10+ is required) and then opens http://localhost:5000.
+On first start you create the admin account. Add your team under **Admin**.
 
-To let colleagues use it from their own PCs, run it on one machine and share `http://<that-pc's-IP>:5000`. The app listens on the whole network by default. Only do this on a trusted office network, because the app has no login.
+**Database.** Set `DATABASE_URL` in `.env`. The XAMPP MySQL example is in `.env.example`. Without it, the app uses `instance/data.db` (SQLite).
 
-## Turning on AI fields (optional)
+## Run it on a server (Render)
 
-"Other details (AI)" lets staff type *any* details they need, for example `main deity, darshan timings` or `services offered, founder name`. The AI reads each page and fills one column per detail.
+- **Build command:** `pip install -r requirements.txt`
+- **Start command:** `gunicorn app:app --workers 1 --threads 8 --timeout 180 --bind 0.0.0.0:$PORT`
 
-1. Copy `.env.example` to `.env`
-2. Put the company's Anthropic API key after `ANTHROPIC_API_KEY=`
-3. Restart the app
+Keep `--workers 1`: live runs are tracked in memory.
 
-Each page read with AI costs a small amount of API usage, so keep "Results per search" sensible.
+Environment variables:
 
-## What it will and won't do
+| Variable | Why |
+|---|---|
+| `SECRET_KEY` | A long random value. **Never change it**, because it encrypts saved AI keys. |
+| `APP_USER`, `APP_PASSWORD` | The first admin, created when the database has no users. |
+| `DATABASE_URL` | PostgreSQL or MySQL. **Without it, users and sheets are lost on every redeploy.** |
+| `BRAVE_API_KEY` | Optional, but recommended. Free search engines often block cloud servers. |
 
-- Collects only pages anyone can open without logging in.
-- Follows each site's `robots.txt` and waits between requests to the same site.
-- Skips login-walled or social sites (Facebook, Instagram, LinkedIn, X, etc.). Their search result is kept, but the page isn't opened.
-- Some sites block automated visitors (`HTTP 403` in the *Fetch Status* column). The tool does not try to get around this.
-- Doesn't solve CAPTCHAs or bypass paywalls.
+## Responsible use
 
-**Compliance:** emails and phone numbers of people are personal data under privacy laws such as India's DPDP Act and GDPR. Check with your compliance team before using collected contacts for marketing, and don't send unsolicited bulk email.
+- **Robots.txt.** The app follows each site's robots.txt and waits between requests to the same site.
+- **Social sites.** LinkedIn, Facebook, Instagram and X are never opened by default; only their public search results are used. Logged-in collection is a restricted connector: an admin must enable it, and only after legal review.
+- **Personal data.** Emails and phone numbers of people are personal data under India's DPDP Act. Use them in line with company policy, and don't send spam.
 
-## For developers
+## Code map
 
 ```
-app.py                 Flask web server + API
-templates/index.html   The web page
-scraper/fetch.py       Polite fetcher (robots.txt, per-site delay, skip list)
-scraper/extract.py     Emails, phones, address, social links, title… from any page
-scraper/ai_extract.py  Custom fields via Claude (structured JSON output)
-scraper/places.py      OpenStreetMap categories (add new ones in CATEGORIES)
-scraper/jobs.py        Background jobs, progress, Excel saving
-scraper/excel.py       Workbook formatting
+app.py                 Flask app: login, roles, APIs (runs, sheets, merge, settings, admin)
+models.py              Database models + AES-256-GCM vault encryption
+templates/             index.html (app shell), login.html
+static/app.css         Design system (light/dark tokens, components)
+static/app.js          Single-page front end (Home, New run, Runs, Sheets, Merge, Settings, Admin)
+scraper/search.py      Web search (Brave API, else free engines with fallbacks)
+scraper/fetch.py       Polite fetcher (robots.txt, per-site delay, restricted-site rules)
+scraper/extract.py     Email / phone / address / social extraction
+scraper/places.py      OpenStreetMap places (categories, geocoding, mirrors)
+scraper/ai_extract.py  Bring-your-own-key AI providers
+scraper/jobs.py        Background runs, progress, saving results
+scraper/sheets.py      Sheet storage, import, Merge & Dedupe
+scraper/excel.py       Excel formatting (no secrets, no formula injection)
 ```
-
-Manual setup: `python -m venv .venv`, then `.venv\Scripts\pip install -r requirements.txt`, then `.venv\Scripts\python app.py`.

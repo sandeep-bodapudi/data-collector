@@ -14,6 +14,10 @@ BRAVE_URL = "https://api.search.brave.com/res/v1/web/search"
 FREE_ENGINES = ["duckduckgo", "bing", "brave", "mojeek", "yahoo", "startpage", "google"]
 
 
+class SearchBlocked(Exception):
+    """Every search engine refused the request (common from cloud servers)."""
+
+
 def _brave(query: str, region: str, max_results: int, key: str) -> list[dict]:
     country = "ALL" if region == "wt-wt" else region.split("-")[0].upper()
     out = []
@@ -45,7 +49,7 @@ def web_search(query: str, region: str, max_results: int, say) -> list[dict]:
             try:
                 hits = ddgs.text(query, region=region, max_results=max_results, backend=engine) or []
             except Exception as e:  # each engine fails in its own way (blocked, rate limited, no results)
-                failed.append(f"{engine}: {str(e)[:60]}")
+                failed.append(f"{engine}: no results" if "no results" in str(e).lower() else f"{engine}: {str(e)[:60]}")
                 continue
             if hits:
                 if failed:
@@ -53,4 +57,6 @@ def web_search(query: str, region: str, max_results: int, say) -> list[dict]:
                 return hits
             failed.append(f"{engine}: no results")
     say("  all search engines refused: " + "; ".join(failed))
+    if all(not f.endswith("no results") for f in failed):
+        raise SearchBlocked("The search engines refused the request. Try again later, or ask your admin to add a Brave Search API key.")
     return []

@@ -1,4 +1,8 @@
-"""Polite HTTP fetcher: respects robots.txt, rate-limits per domain, never logs in."""
+"""Polite HTTP fetcher: respects robots.txt and rate-limits per domain.
+
+It only sends login cookies for LinkedIn/Facebook when an admin has enabled restricted
+connectors (PRD section 6: "Restricted - disabled by default; legal approval needed").
+"""
 import threading
 import time
 from urllib.parse import urlparse
@@ -52,10 +56,11 @@ class Fetcher:
         self.session = requests.Session()
         self.session.headers.update(_SESSION_HEADERS)
         
-        # Inject social media cookies if provided
-        if self.spec.get("li_at_cookie"):
+        # Logged-in social scraping: only when an admin enabled restricted connectors.
+        self.restricted = bool(self.spec.get("allow_restricted"))
+        if self.restricted and self.spec.get("li_at_cookie"):
             self.session.cookies.set("li_at", self.spec["li_at_cookie"], domain=".linkedin.com")
-        if self.spec.get("fb_cookie"):
+        if self.restricted and self.spec.get("fb_cookie"):
             # Facebook cookies are usually provided as a string "c_user=...; xs=..."
             for pair in self.spec["fb_cookie"].split(";"):
                 if "=" in pair:
@@ -69,9 +74,9 @@ class Fetcher:
     def _is_skipped(self, url: str) -> bool:
         d = domain_of(url)
         # Don't skip if we have a cookie for this domain
-        if "linkedin.com" in d and self.spec.get("li_at_cookie"):
+        if self.restricted and "linkedin.com" in d and self.spec.get("li_at_cookie"):
             return False
-        if "facebook.com" in d and self.spec.get("fb_cookie"):
+        if self.restricted and "facebook.com" in d and self.spec.get("fb_cookie"):
             return False
         return any(d == s or d.endswith("." + s) for s in SKIP_FETCH_DOMAINS)
 
@@ -109,16 +114,11 @@ class Fetcher:
                 wait = PER_DOMAIN_DELAY - (now - last)
             time.sleep(wait)
 
-    def get_html(self, url: str, ignore_robots: bool = False) -> tuple[str | None, str]:
-        """Return (html, status_note). html is None when not fetched.
-
-        ignore_robots=True is used for sub-pages like /contact on sites whose
-        main page is already allowed — robots.txt occasionally blocks /contact
-        even for otherwise public sites.
-        """
+    def get_html(self, url: str) -> tuple[str | None, str]:
+        """Return (html, status_note). html is None when not fetched."""
         if self._is_skipped(url):
             return None, "skipped (login/social site)"
-        if not ignore_robots and not self.allowed(url):
+        if not self.allowed(url):
             return None, "blocked by robots.txt"
         self._wait_turn(url)
         for attempt in range(2):  # retry once on transient errors

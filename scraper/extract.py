@@ -18,11 +18,15 @@ STANDARD_FIELDS = {
 }
 
 EMAIL_RE = re.compile(r"[A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+\.[A-Za-z]{2,24}")
-# Obfuscated email patterns: "info [at] school.edu", "info(at)school.edu", "info AT domain DOT edu"
+# Obfuscated emails: "info [at] school [dot] edu", "info(at)school.edu", "info AT school DOT edu".
+# Only explicit markers count, so ordinary text like "Great place.Visit" is never read as an email.
+_AT = r"(?P<at>\s*[\[\(\{]\s*at\s*[\]\)\}]\s*|\s+AT\s+|\s+at\s+)"
+_DOT = r"(?:\s*[\[\(\{]\s*dot\s*[\]\)\}]\s*|\s+DOT\s+|\s+dot\s+|\.)"
 EMAIL_OBFUSCATED_RE = re.compile(
-    r"([A-Za-z0-9._%+\-]+)\s*[\[\(]?\s*(?:at|AT|@)\s*[\]\)]?\s*([A-Za-z0-9.\-]+)"
-    r"\s*[\[\(]?\s*(?:dot|DOT|\.)\s*[\]\)]?\s*([A-Za-z]{2,24})"
+    r"\b(?P<local>[A-Za-z0-9._%+\-]+)" + _AT
+    + r"(?P<domain>[A-Za-z0-9\-]+(?:" + _DOT + r"[A-Za-z0-9\-]+)*)" + _DOT + r"(?P<tld>[A-Za-z]{2,24})\b"
 )
+_WORD_DOT = re.compile(r"[\[\(\{]\s*dot\s*[\]\)\}]|\s(?:dot|DOT)\s")
 EMAIL_JUNK_TLDS = (".png", ".jpg", ".jpeg", ".gif", ".webp", ".svg", ".css", ".js")
 EMAIL_JUNK_DOMAINS = ("example.com", "domain.com", "email.com", "sentry.io", "wixpress.com",
                       "sentry-next.wixpress.com", "yourdomain.com", "company.com", "schema.org",
@@ -80,7 +84,7 @@ def _clean_phone(raw: str) -> str | None:
     digits = re.sub(r"\D", "", raw)
     if not 8 <= len(digits) <= 15:
         return None
-    if len(set(digits)) <= 2:  # 0000000000, 1111111111 ...
+    if len(set(digits)) <= 2 or re.search(r"(\d)\1{6,}", digits):  # 0000000000, +91-8888888888 placeholders
         return None
     if re.fullmatch(r"(19|20)\d{2}(19|20)\d{2}.*", digits):  # year ranges like 2019-2024
         return None
@@ -149,8 +153,12 @@ def _extract_obfuscated_emails(text: str) -> list[str]:
     """Find emails written as 'info[at]school[dot]edu' or 'info AT school DOT edu'."""
     out = []
     for m in EMAIL_OBFUSCATED_RE.finditer(text):
-        reconstructed = f"{m.group(1)}@{m.group(2)}.{m.group(3)}"
-        cleaned = _clean_email(reconstructed)
+        marker = m.group("at")
+        # A plain " at " is common English ("we are at Banjara Hills.com"); only trust it with a word "dot".
+        if marker.strip() == "at" and not _WORD_DOT.search(m.group(0)):
+            continue
+        domain = re.sub(_DOT, ".", m.group("domain"))
+        cleaned = _clean_email(f"{m.group('local')}@{domain}.{m.group('tld')}")
         if cleaned:
             out.append(cleaned)
     return out

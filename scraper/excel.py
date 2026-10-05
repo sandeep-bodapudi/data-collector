@@ -6,6 +6,8 @@ from openpyxl.styles import Alignment, Font, PatternFill
 from openpyxl.utils import get_column_letter
 
 HEADER_FILL = PatternFill("solid", fgColor="1F4E78")
+# Settings that must never appear in an exported file.
+SECRET_KEYS = {"ai_api_key", "ai_key", "li_at_cookie", "fb_cookie", "ai", "allow_restricted"}
 HEADER_FONT = Font(bold=True, color="FFFFFF")
 LINK_FONT = Font(color="0563C1", underline="single")
 
@@ -31,6 +33,11 @@ def write_workbook(path: str, columns: list[str], rows: list[dict], run_info: di
 
     for row in rows:
         ws.append([_cell_value(row.get(col)) for col in columns])
+    # Scraped text that starts with "=" must stay text, never become a live Excel formula.
+    for row in ws.iter_rows(min_row=2):
+        for cell in row:
+            if isinstance(cell.value, str) and cell.value.startswith("="):
+                cell.data_type = "s"
 
     for idx, col in enumerate(columns, start=1):
         letter = get_column_letter(idx)
@@ -54,7 +61,8 @@ def write_workbook(path: str, columns: list[str], rows: list[dict], run_info: di
     info.append(["Created", datetime.now().strftime("%Y-%m-%d %H:%M")])
     info.append(["Total rows", len(rows)])
     for k, v in run_info.items():
-        info.append([k, _cell_value(v)])
+        if k not in SECRET_KEYS:
+            info.append([k.replace("_", " ").capitalize(), _cell_value(v)])
     info.column_dimensions["A"].width = 28
     info.column_dimensions["B"].width = 90
 

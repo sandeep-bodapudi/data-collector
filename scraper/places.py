@@ -3,7 +3,6 @@ import time
 
 import requests
 
-from .fetch import USER_AGENT
 
 NOMINATIM = "https://nominatim.openstreetmap.org/search"
 PHOTON = "https://photon.komoot.io/api/"
@@ -12,8 +11,11 @@ OVERPASS_SERVERS = [
     "https://overpass-api.de/api/interpreter",
     "https://overpass.kumi.systems/api/interpreter",
     "https://overpass.private.coffee/api/interpreter",
+    "https://maps.mail.ru/osm/tools/overpass/api/interpreter",
 ]
-HEADERS = {"User-Agent": USER_AGENT}
+SERVER_TIMEOUT = 75  # seconds to wait for one server before trying the next
+# OpenStreetMap services require an honest, identifying User-Agent (fake browser agents get HTTP 406).
+HEADERS = {"User-Agent": "OneBridgeDataCollector/2.0 (internal business research tool)"}
 
 # Category label -> list of OSM tag filters (any match counts).
 CATEGORIES = {
@@ -95,12 +97,14 @@ def _area_clause(geo: dict) -> tuple[str, str]:
     return "", f"({s},{w},{n},{e})"
 
 
-def _overpass(query: str) -> list[dict]:
+def _overpass(query: str, notify=None) -> list[dict]:
     last = ""
     for attempt in range(2):
-        for server in OVERPASS_SERVERS:
+        for i, server in enumerate(OVERPASS_SERVERS):
+            if notify and (attempt or i):
+                notify(f"The map service is busy - trying backup server {attempt * len(OVERPASS_SERVERS) + i + 1} of {2 * len(OVERPASS_SERVERS)}…")
             try:
-                r = requests.post(server, data={"data": query}, headers=HEADERS, timeout=180)
+                r = requests.post(server, data={"data": query}, headers=HEADERS, timeout=SERVER_TIMEOUT)
             except requests.RequestException as e:
                 last = type(e).__name__
                 continue
@@ -109,7 +113,7 @@ def _overpass(query: str) -> list[dict]:
             last = f"HTTP {r.status_code}"
             if r.status_code not in (429, 502, 503, 504):
                 break
-        time.sleep(10)
+        time.sleep(15)
     raise PlaceError(f"OpenStreetMap servers are busy ({last}). Please try again in a few minutes.")
 
 
@@ -120,13 +124,13 @@ def _addr(tags: dict) -> str:
     return ", ".join(p for p in parts if p)
 
 
-def search_places(category: str, location: str, name_filter: str = "", limit: int = 500) -> list[dict]:
+def search_places(category: str, location: str, name_filter: str = "", limit: int = 500, notify=None) -> list[dict]:
     geo = geocode(location)
     prefix, area = _area_clause(geo)
     name_part = f'[name~"{name_filter.replace(chr(34), "")}",i]' if name_filter else "[name]"
     stmts = "".join(f"nwr{f}{name_part}{area};" for f in CATEGORIES[category])
-    query = f"[out:json][timeout:120];{prefix}({stmts});out center tags {int(limit)};"
-    elements = _overpass(query)
+    query = f"[out:json][timeout:{SERVER_TIMEOUT}];{prefix}({stmts});out center tags {int(limit)};"
+    elements = _overpass(query, notify)
 
     rows, seen = [], set()
     for el in elements:
