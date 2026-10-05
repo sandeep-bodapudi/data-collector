@@ -1,0 +1,784 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Data Collector</title>
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><rect width='32' height='32' rx='8' fill='%234f46e5'/><path d='M9 11h14M9 16h14M9 21h9' stroke='white' stroke-width='2.5' stroke-linecap='round'/></svg>">
+<style>
+  :root {
+    --bg: #f5f6fb; --surface: #ffffff; --surface-2: #f8f9fc; --text: #171a2b; --muted: #636a85; --faint: #9aa0b8;
+    --line: #e4e7f0; --line-2: #d3d8e6;
+    --primary: #4f46e5; --primary-2: #6366f1; --primary-soft: #eef0ff; --primary-text: #3b33c9;
+    --green: #0f9d63; --green-soft: #e5f7ef; --amber: #b7791f; --amber-soft: #fdf4e3; --red: #d0312d; --red-soft: #fdeceb;
+    --shadow: 0 1px 2px rgba(20,24,60,.05), 0 4px 16px rgba(20,24,60,.06);
+    --shadow-lg: 0 10px 40px rgba(20,24,60,.12);
+    --radius: 14px;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #0f1117; --surface: #181b25; --surface-2: #1e2230; --text: #e8eaf3; --muted: #9ba2bd; --faint: #6b7290;
+      --line: #2a2f40; --line-2: #363c51;
+      --primary: #7c78ff; --primary-2: #8b88ff; --primary-soft: #25264a; --primary-text: #b3b1ff;
+      --green: #34c98a; --green-soft: #15302a; --amber: #e6b04f; --amber-soft: #352c17; --red: #ff6b66; --red-soft: #3a1c1d;
+      --shadow: 0 1px 2px rgba(0,0,0,.3), 0 4px 16px rgba(0,0,0,.25); --shadow-lg: 0 10px 40px rgba(0,0,0,.5);
+    }
+  }
+  * { box-sizing: border-box; }
+  html { scroll-behavior: smooth; }
+  body { margin: 0; font: 15px/1.55 "Segoe UI", -apple-system, system-ui, Roboto, sans-serif; background: var(--bg); color: var(--text); padding-bottom: 110px; }
+  button, input, select, textarea { font: inherit; color: inherit; }
+  a { color: var(--primary-text); }
+  .wrap { max-width: 1080px; margin: 0 auto; padding: 0 16px; }
+
+  /* top bar */
+  .topbar { background: linear-gradient(120deg, #312e81, #4f46e5 55%, #0e7490); color: #fff; }
+  .topbar .wrap { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding-top: 14px; padding-bottom: 14px; }
+  .brand { display: flex; align-items: center; gap: 12px; }
+  .logo { width: 40px; height: 40px; border-radius: 11px; background: rgba(255,255,255,.18); display: grid; place-items: center; }
+  .brand h1 { margin: 0; font-size: 19px; letter-spacing: .2px; }
+  .brand p { margin: 0; font-size: 13px; opacity: .85; }
+  .help-btn { background: rgba(255,255,255,.16); border: 1px solid rgba(255,255,255,.3); color: #fff; padding: 8px 14px; border-radius: 9px; cursor: pointer; display: flex; gap: 6px; align-items: center; white-space: nowrap; }
+  .help-btn:hover { background: rgba(255,255,255,.26); }
+  .hero { background: linear-gradient(120deg, #312e81, #4f46e5 55%, #0e7490); color: #fff; padding: 18px 0 74px; }
+  .hero h2 { margin: 0 0 4px; font-size: 26px; }
+  .hero p { margin: 0; opacity: .88; }
+
+  /* mode cards */
+  .modes { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; margin-top: -54px; }
+  .mode { position: relative; text-align: left; background: var(--surface); border: 2px solid transparent; border-radius: var(--radius); padding: 18px 18px 18px 78px; cursor: pointer; box-shadow: var(--shadow); transition: .15s; min-height: 96px; }
+  .mode:hover { transform: translateY(-2px); box-shadow: var(--shadow-lg); }
+  .mode .ico { position: absolute; left: 18px; top: 18px; width: 46px; height: 46px; border-radius: 12px; display: grid; place-items: center; background: var(--primary-soft); color: var(--primary); }
+  .mode b { display: block; font-size: 17px; margin-bottom: 2px; }
+  .mode span { color: var(--muted); font-size: 13.5px; }
+  .mode .check { position: absolute; right: 14px; top: 14px; width: 22px; height: 22px; border-radius: 50%; border: 2px solid var(--line-2); display: grid; place-items: center; }
+  .mode.active { border-color: var(--primary); }
+  .mode.active .check { background: var(--primary); border-color: var(--primary); }
+  .mode.active .check::after { content: ""; width: 9px; height: 5px; border: 2px solid #fff; border-top: 0; border-right: 0; transform: rotate(-45deg) translate(1px,-1px); }
+
+  /* step panels */
+  .panel { background: var(--surface); border-radius: var(--radius); box-shadow: var(--shadow); margin-top: 18px; overflow: hidden; }
+  .step { padding: 22px 24px; border-top: 1px solid var(--line); }
+  .step:first-child { border-top: 0; }
+  .step-head { display: flex; gap: 14px; align-items: flex-start; margin-bottom: 14px; }
+  .num { flex: none; width: 30px; height: 30px; border-radius: 50%; background: var(--primary); color: #fff; font-weight: 700; display: grid; place-items: center; font-size: 14px; }
+  .num.opt { background: var(--surface-2); color: var(--muted); border: 1px solid var(--line-2); }
+  .step-head h3 { margin: 2px 0 0; font-size: 16.5px; }
+  .step-head p { margin: 2px 0 0; color: var(--muted); font-size: 13.5px; }
+  .step-body { padding-left: 44px; }
+
+  /* tag input */
+  .tags { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; min-height: 52px; padding: 8px 10px; border: 1.5px solid var(--line-2); border-radius: 11px; background: var(--surface); cursor: text; transition: .15s; }
+  .tags:focus-within { border-color: var(--primary); box-shadow: 0 0 0 4px var(--primary-soft); }
+  .tags.disabled { background: var(--surface-2); cursor: not-allowed; opacity: .7; }
+  .tag { display: inline-flex; align-items: center; gap: 6px; background: var(--primary-soft); color: var(--primary-text); padding: 5px 6px 5px 12px; border-radius: 999px; font-size: 14px; font-weight: 500; max-width: 100%; }
+  .tag span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .tag button { border: 0; background: transparent; color: inherit; width: 22px; height: 22px; border-radius: 50%; cursor: pointer; font-size: 16px; line-height: 1; display: grid; place-items: center; }
+  .tag button:hover { background: rgba(79,70,229,.15); }
+  .tags input { flex: 1; min-width: 200px; border: 0; outline: 0; background: transparent; padding: 6px 4px; }
+  .tags input:disabled { cursor: not-allowed; }
+  .under { display: flex; justify-content: space-between; gap: 10px; flex-wrap: wrap; margin-top: 8px; font-size: 13px; color: var(--muted); }
+  kbd { font: 12px Consolas, monospace; background: var(--surface-2); border: 1px solid var(--line-2); border-bottom-width: 2px; border-radius: 5px; padding: 0 5px; }
+  .examples { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin-top: 12px; }
+  .examples small { color: var(--muted); font-weight: 600; margin-right: 2px; }
+  .ex { border: 1px dashed var(--line-2); background: transparent; border-radius: 999px; padding: 5px 12px; font-size: 13px; cursor: pointer; color: var(--muted); }
+  .ex:hover { border-color: var(--primary); color: var(--primary-text); background: var(--primary-soft); }
+
+  /* field tiles */
+  .tiles { display: grid; grid-template-columns: repeat(auto-fill, minmax(195px, 1fr)); gap: 10px; }
+  .tile { position: relative; display: flex; gap: 10px; align-items: flex-start; padding: 12px; border: 1.5px solid var(--line); border-radius: 11px; cursor: pointer; background: var(--surface); transition: .12s; user-select: none; }
+  .tile:hover { border-color: var(--line-2); background: var(--surface-2); }
+  .tile input { position: absolute; opacity: 0; pointer-events: none; }
+  .tile .ti { flex: none; font-size: 20px; line-height: 1; margin-top: 2px; }
+  .tile b { display: block; font-size: 14px; font-weight: 600; }
+  .tile small { color: var(--muted); font-size: 12.5px; line-height: 1.35; display: block; }
+  .tile .tick { position: absolute; right: 9px; top: 9px; width: 18px; height: 18px; border-radius: 5px; border: 1.5px solid var(--line-2); }
+  .tile:has(input:checked) { border-color: var(--primary); background: var(--primary-soft); }
+  .tile:has(input:checked) .tick { background: var(--primary); border-color: var(--primary); }
+  .tile:has(input:checked) .tick::after { content: ""; position: absolute; left: 5px; top: 2px; width: 4px; height: 8px; border: solid #fff; border-width: 0 2px 2px 0; transform: rotate(45deg); }
+  .tile:has(input:focus-visible) { outline: 3px solid var(--primary-soft); }
+
+  /* category picker */
+  .cat-tools { display: flex; gap: 10px; margin-bottom: 12px; flex-wrap: wrap; }
+  .search { flex: 1; min-width: 220px; position: relative; }
+  .search input { width: 100%; padding: 10px 12px 10px 36px; border: 1.5px solid var(--line-2); border-radius: 10px; background: var(--surface); }
+  .search input:focus { outline: 0; border-color: var(--primary); box-shadow: 0 0 0 4px var(--primary-soft); }
+  .search svg { position: absolute; left: 11px; top: 50%; transform: translateY(-50%); color: var(--faint); }
+  .cat-group { margin-bottom: 12px; }
+  .cat-group h4 { margin: 0 0 6px; font-size: 12px; text-transform: uppercase; letter-spacing: .6px; color: var(--faint); }
+  .cats { display: flex; flex-wrap: wrap; gap: 8px; }
+  .cat { display: inline-flex; gap: 7px; align-items: center; border: 1.5px solid var(--line); background: var(--surface); border-radius: 999px; padding: 7px 14px; cursor: pointer; font-size: 14px; transition: .12s; }
+  .cat:hover { border-color: var(--line-2); background: var(--surface-2); }
+  .cat.active { border-color: var(--primary); background: var(--primary); color: #fff; }
+
+  /* options */
+  .opts { display: grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); gap: 16px 22px; }
+  .field label.l { display: block; font-weight: 600; font-size: 14px; margin-bottom: 6px; }
+  .field .h { color: var(--muted); font-size: 12.5px; margin-top: 5px; }
+  .field input[type=text], .field select { width: 100%; padding: 10px 12px; border: 1.5px solid var(--line-2); border-radius: 10px; background: var(--surface); }
+  .field input[type=text]:focus, .field select:focus { outline: 0; border-color: var(--primary); box-shadow: 0 0 0 4px var(--primary-soft); }
+  .range { display: flex; align-items: center; gap: 12px; }
+  .range input { flex: 1; accent-color: var(--primary); }
+  .range output { min-width: 46px; text-align: center; font-weight: 700; background: var(--primary-soft); color: var(--primary-text); padding: 3px 8px; border-radius: 8px; }
+  .seg { display: flex; background: var(--surface-2); border: 1px solid var(--line); border-radius: 10px; padding: 3px; gap: 3px; flex-wrap: wrap; }
+  .seg button { flex: 1; border: 0; background: transparent; border-radius: 7px; padding: 7px 8px; cursor: pointer; font-size: 13px; color: var(--muted); white-space: nowrap; }
+  .seg button.active { background: var(--surface); color: var(--text); font-weight: 600; box-shadow: var(--shadow); }
+  .switch { display: flex; gap: 12px; align-items: flex-start; cursor: pointer; padding: 4px 0; }
+  .switch input { position: absolute; opacity: 0; }
+  .switch .sw { flex: none; width: 40px; height: 23px; border-radius: 999px; background: var(--line-2); position: relative; transition: .15s; margin-top: 1px; }
+  .switch .sw::after { content: ""; position: absolute; left: 3px; top: 3px; width: 17px; height: 17px; border-radius: 50%; background: #fff; transition: .15s; box-shadow: 0 1px 3px rgba(0,0,0,.25); }
+  .switch input:checked + .sw { background: var(--primary); }
+  .switch input:checked + .sw::after { left: 20px; }
+  .switch input:focus-visible + .sw { outline: 3px solid var(--primary-soft); }
+  .switch b { display: block; font-size: 14px; font-weight: 600; }
+  .switch small { color: var(--muted); font-size: 12.5px; }
+  .callout { display: flex; gap: 10px; align-items: flex-start; padding: 11px 14px; border-radius: 10px; font-size: 13.5px; margin-top: 12px; }
+  .callout.info { background: var(--primary-soft); color: var(--primary-text); }
+  .callout.warn { background: var(--amber-soft); color: var(--amber); }
+  .badge { display: inline-block; font-size: 11px; font-weight: 700; letter-spacing: .4px; padding: 2px 7px; border-radius: 6px; background: linear-gradient(90deg,#7c3aed,#4f46e5); color: #fff; vertical-align: 2px; margin-left: 6px; }
+  details.more summary { cursor: pointer; list-style: none; display: flex; align-items: center; gap: 14px; }
+  details.more summary::-webkit-details-marker { display: none; }
+  details.more summary .chev { margin-left: auto; transition: .2s; color: var(--muted); }
+  details.more[open] summary .chev { transform: rotate(180deg); }
+  details.more[open] summary { margin-bottom: 16px; }
+
+  /* sticky action bar */
+  .actionbar { position: fixed; left: 0; right: 0; bottom: 0; background: color-mix(in srgb, var(--surface) 92%, transparent); backdrop-filter: blur(10px); border-top: 1px solid var(--line); z-index: 20; }
+  .actionbar .wrap { display: flex; align-items: center; gap: 14px; padding-top: 12px; padding-bottom: 12px; }
+  .summary { flex: 1; min-width: 0; font-size: 14px; color: var(--muted); }
+  .summary b { color: var(--text); }
+  .fname { width: 220px; padding: 10px 12px; border: 1.5px solid var(--line-2); border-radius: 10px; background: var(--surface); }
+  .fname:focus { outline: 0; border-color: var(--primary); }
+  .btn { border: 0; border-radius: 11px; padding: 12px 22px; font-weight: 650; cursor: pointer; display: inline-flex; align-items: center; gap: 8px; text-decoration: none; white-space: nowrap; transition: .12s; }
+  .btn-primary { background: var(--primary); color: #fff; box-shadow: 0 4px 14px rgba(79,70,229,.35); }
+  .btn-primary:hover { background: var(--primary-2); transform: translateY(-1px); }
+  .btn-primary:disabled { opacity: .55; cursor: not-allowed; transform: none; box-shadow: none; }
+  .btn-green { background: var(--green); color: #fff; box-shadow: 0 4px 14px rgba(15,157,99,.3); }
+  .btn-green:hover { filter: brightness(1.07); }
+  .btn-ghost { background: var(--surface); border: 1.5px solid var(--line-2); color: var(--text); }
+  .btn-ghost:hover { background: var(--surface-2); }
+  .btn-danger { background: var(--red-soft); color: var(--red); }
+
+  /* run panel */
+  .run { padding: 24px; }
+  .run-top { display: flex; justify-content: space-between; align-items: flex-start; gap: 12px; flex-wrap: wrap; }
+  .run-top h3 { margin: 0; font-size: 18px; }
+  .activity { display: flex; align-items: center; gap: 10px; color: var(--muted); margin-top: 4px; }
+  .spinner { width: 16px; height: 16px; border: 2.5px solid var(--primary-soft); border-top-color: var(--primary); border-radius: 50%; animation: spin .8s linear infinite; flex: none; }
+  @keyframes spin { to { transform: rotate(360deg); } }
+  .stepper { display: flex; margin: 22px 0 18px; }
+  .st { flex: 1; text-align: center; position: relative; font-size: 13px; color: var(--faint); }
+  .st::before { content: ""; position: absolute; top: 14px; left: -50%; right: 50%; height: 3px; background: var(--line); }
+  .st:first-child::before { display: none; }
+  .st .dot { position: relative; z-index: 1; width: 31px; height: 31px; border-radius: 50%; margin: 0 auto 6px; display: grid; place-items: center; background: var(--surface); border: 2.5px solid var(--line-2); font-weight: 700; font-size: 13px; }
+  .st.doing { color: var(--text); font-weight: 600; }
+  .st.doing .dot { border-color: var(--primary); color: var(--primary); box-shadow: 0 0 0 5px var(--primary-soft); }
+  .st.did { color: var(--muted); }
+  .st.did .dot { background: var(--green); border-color: var(--green); color: #fff; }
+  .st.did::before, .st.doing::before { background: var(--green); }
+  .bar { height: 12px; background: var(--surface-2); border: 1px solid var(--line); border-radius: 999px; overflow: hidden; }
+  .bar > div { height: 100%; width: 0; background: linear-gradient(90deg, var(--primary), #06b6d4); border-radius: 999px; transition: width .5s; }
+  .bar.indeterminate > div { width: 35% !important; animation: slide 1.4s ease-in-out infinite; }
+  @keyframes slide { 0% { margin-left: -35%; } 100% { margin-left: 100%; } }
+  .bar-meta { display: flex; justify-content: space-between; font-size: 13px; color: var(--muted); margin-top: 6px; }
+  .stats { display: grid; grid-template-columns: repeat(4, 1fr); gap: 12px; margin-top: 18px; }
+  .stat { background: var(--surface-2); border: 1px solid var(--line); border-radius: 12px; padding: 14px; }
+  .stat small { color: var(--muted); font-size: 12.5px; display: flex; gap: 6px; align-items: center; }
+  .stat b { display: block; font-size: 26px; line-height: 1.2; margin-top: 4px; font-variant-numeric: tabular-nums; }
+  .result-banner { display: flex; align-items: center; gap: 16px; padding: 18px; border-radius: 12px; margin-top: 18px; flex-wrap: wrap; }
+  .result-banner.ok { background: var(--green-soft); }
+  .result-banner.bad { background: var(--red-soft); color: var(--red); }
+  .result-banner.empty { background: var(--amber-soft); color: var(--amber); }
+  .result-banner .big { font-size: 30px; }
+  .result-banner .txt { flex: 1; min-width: 200px; }
+  .result-banner .txt b { display: block; font-size: 16px; color: var(--text); }
+  .result-banner.bad .txt b, .result-banner.empty .txt b { color: inherit; }
+  .result-banner .txt span { font-size: 13.5px; color: var(--muted); }
+  .preview-head { display: flex; justify-content: space-between; align-items: center; gap: 10px; margin-top: 22px; flex-wrap: wrap; }
+  .preview-head h4 { margin: 0; font-size: 15px; }
+  .tablewrap { overflow: auto; max-height: 420px; margin-top: 10px; border: 1px solid var(--line); border-radius: 11px; }
+  table { border-collapse: collapse; width: 100%; font-size: 13px; }
+  th, td { padding: 8px 11px; border-bottom: 1px solid var(--line); text-align: left; vertical-align: top; white-space: nowrap; max-width: 300px; overflow: hidden; text-overflow: ellipsis; }
+  th { background: var(--surface-2); position: sticky; top: 0; font-weight: 600; z-index: 1; }
+  tr:hover td { background: var(--surface-2); }
+  td.empty { color: var(--faint); }
+  .tlog { margin-top: 16px; }
+  .tlog summary { cursor: pointer; color: var(--muted); font-size: 13px; }
+  .log { background: #0d1020; color: #aab4d4; font: 12px/1.6 Consolas, monospace; padding: 12px; border-radius: 10px; max-height: 200px; overflow: auto; white-space: pre-wrap; margin-top: 8px; }
+
+  /* files */
+  .files-head { display: flex; justify-content: space-between; align-items: center; gap: 10px; padding: 20px 24px 6px; flex-wrap: wrap; }
+  .files-head h3 { margin: 0; font-size: 17px; }
+  .files { list-style: none; margin: 0; padding: 6px 12px 14px; }
+  .file { display: flex; align-items: center; gap: 14px; padding: 10px 12px; border-radius: 10px; }
+  .file:hover { background: var(--surface-2); }
+  .xl { flex: none; width: 38px; height: 38px; border-radius: 9px; background: #1d6f42; color: #fff; display: grid; place-items: center; font-weight: 800; font-size: 13px; }
+  .file .meta { flex: 1; min-width: 0; }
+  .file .meta b { display: block; font-size: 14px; font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .file .meta small { color: var(--muted); font-size: 12.5px; }
+  .file a.dl { flex: none; text-decoration: none; font-size: 13px; font-weight: 600; padding: 7px 12px; border-radius: 8px; border: 1.5px solid var(--line-2); color: var(--text); }
+  .file a.dl:hover { border-color: var(--green); color: var(--green); }
+  .nofiles { text-align: center; color: var(--muted); padding: 22px; font-size: 14px; }
+  .foot { color: var(--faint); font-size: 12.5px; text-align: center; margin: 22px auto 0; max-width: 720px; }
+
+  /* toast + modal */
+  .toast { position: fixed; left: 50%; bottom: 96px; transform: translateX(-50%) translateY(20px); background: #1f2240; color: #fff; padding: 12px 18px; border-radius: 11px; box-shadow: var(--shadow-lg); opacity: 0; pointer-events: none; transition: .2s; z-index: 50; max-width: calc(100% - 32px); display: flex; gap: 10px; align-items: center; }
+  .toast.show { opacity: 1; transform: translateX(-50%); }
+  .toast.err { background: var(--red); }
+  .modal-bg { position: fixed; inset: 0; background: rgba(10,12,30,.5); display: none; align-items: center; justify-content: center; z-index: 60; padding: 16px; }
+  .modal-bg.show { display: flex; }
+  .modal { background: var(--surface); border-radius: 16px; max-width: 560px; width: 100%; padding: 24px; box-shadow: var(--shadow-lg); max-height: 90vh; overflow: auto; }
+  .modal h3 { margin: 0 0 14px; }
+  .how { display: grid; gap: 14px; margin: 0; padding: 0; list-style: none; }
+  .how li { display: flex; gap: 14px; }
+  .how p { margin: 2px 0 0; color: var(--muted); font-size: 14px; }
+  body.running #form-area { display: none; }
+  body.running .mode:not(.active) { opacity: .45; pointer-events: none; }
+  body.running .mode.active { pointer-events: none; }
+  [hidden] { display: none !important; }
+
+  @media (max-width: 760px) {
+    .modes { grid-template-columns: 1fr; }
+    .stats { grid-template-columns: 1fr 1fr; }
+    .step { padding: 18px 16px; }
+    .step-body { padding-left: 0; }
+    .fname { display: none; }
+    .summary { font-size: 13px; }
+    .hero h2 { font-size: 21px; }
+    .help-btn span { display: none; }
+    .st { font-size: 11.5px; }
+  }
+</style>
+</head>
+<body>
+
+<div class="topbar">
+  <div class="wrap">
+    <div class="brand">
+      <div class="logo"><svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><circle cx="11" cy="11" r="6.5"/><path d="m20 20-4.2-4.2"/><path d="M8.5 11h5M11 8.5v5"/></svg></div>
+      <div><h1>Data Collector</h1><p>Public internet data → Excel, in a few clicks</p></div>
+    </div>
+    <button class="help-btn" id="open-help"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><circle cx="12" cy="12" r="10"/><path d="M9.1 9a3 3 0 0 1 5.8 1c0 2-3 3-3 3M12 17h.01"/></svg><span>How it works</span></button>
+  </div>
+</div>
+
+<div class="hero"><div class="wrap">
+  <h2>What would you like to collect today?</h2>
+  <p>Choose one option below, fill in the steps, and press <b>Start collecting</b>. You'll get an Excel file.</p>
+</div></div>
+
+<main class="wrap">
+  <div class="modes" role="tablist">
+    <button class="mode active" data-mode="web" role="tab">
+      <div class="ico"><svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="12" cy="12" r="9.5"/><path d="M2.5 12h19M12 2.5c2.6 2.8 3.9 6 3.9 9.5s-1.3 6.7-3.9 9.5c-2.6-2.8-3.9-6-3.9-9.5S9.4 5.3 12 2.5Z"/></svg></div>
+      <span class="check"></span>
+      <b>Search the web</b>
+      <span>Find emails, phone numbers, addresses or any other details from websites that match your search.</span>
+    </button>
+    <button class="mode" data-mode="places" role="tab">
+      <div class="ico"><svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M12 21.5s-7-6.1-7-12a7 7 0 0 1 14 0c0 5.9-7 12-7 12Z"/><circle cx="12" cy="9.5" r="2.6"/></svg></div>
+      <span class="check"></span>
+      <b>Find places on the map</b>
+      <span>Get a full list of temples, hospitals, schools, hotels, shops… in any city, with address and location.</span>
+    </button>
+  </div>
+
+  <!-- ===================== RUN PANEL ===================== -->
+  <section class="panel" id="run" hidden>
+    <div class="run">
+      <div class="run-top">
+        <div>
+          <h3 id="run-title">Collecting your data…</h3>
+          <div class="activity"><div class="spinner" id="run-spin"></div><span id="activity">Getting ready…</span></div>
+        </div>
+        <button class="btn btn-danger" id="stop"><svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor"><rect x="5" y="5" width="14" height="14" rx="2"/></svg>Stop &amp; save what we have</button>
+      </div>
+
+      <div class="stepper" id="stepper"></div>
+
+      <div class="bar" id="bar"><div id="barfill"></div></div>
+      <div class="bar-meta"><span id="bar-left"></span><span id="bar-right"></span></div>
+
+      <div class="stats">
+        <div class="stat"><small>📋 Rows collected</small><b id="s-rows">0</b></div>
+        <div class="stat"><small>✉️ With email</small><b id="s-email">0</b></div>
+        <div class="stat"><small>📞 With phone</small><b id="s-phone">0</b></div>
+        <div class="stat"><small>⏱️ Time</small><b id="s-time">0:00</b></div>
+      </div>
+
+      <div id="result"></div>
+
+      <div id="preview-area" hidden>
+        <div class="preview-head">
+          <h4>Latest rows <span style="font-weight:400;color:var(--muted);font-size:13px">(the Excel file has all of them)</span></h4>
+          <div class="search" style="max-width:260px"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round"><circle cx="11" cy="11" r="7"/><path d="m20 20-3.5-3.5"/></svg><input type="text" id="row-filter" placeholder="Filter these rows…"></div>
+        </div>
+        <div class="tablewrap"><table id="preview"></table></div>
+      </div>
+
+      <details class="tlog"><summary>Show technical log</summary><div class="log" id="log"></div></details>
+    </div>
+  </section>
+
+  <div id="form-area">
+  <!-- ===================== WEB MODE ===================== -->
+  <section class="panel" id="web-form">
+    <div class="step">
+      <div class="step-head"><div class="num">1</div><div>
+        <h3>What should we search for?</h3>
+        <p>Write it the way you would in Google. Add as many searches as you like.</p></div></div>
+      <div class="step-body">
+        <div class="tags" id="queries-box" data-placeholder="e.g. software companies in Hyderabad contact email"></div>
+        <div class="under"><span>Press <kbd>Enter</kbd> after each search</span><span id="queries-count"></span></div>
+        <div class="examples"><small>Try:</small>
+          <button class="ex" data-to="queries">real estate agents in Pune email</button>
+          <button class="ex" data-to="queries">CBSE schools in Vijayawada contact</button>
+          <button class="ex" data-to="queries">textile exporters in Tiruppur</button>
+          <button class="ex" data-to="queries">famous temples in Tamil Nadu timings</button>
+        </div>
+      </div>
+    </div>
+
+    <div class="step">
+      <div class="step-head"><div class="num">2</div><div>
+        <h3>Which details do you need?</h3>
+        <p>Tick everything you want as columns in the Excel file.</p></div></div>
+      <div class="step-body">
+        <div class="tiles" id="field-tiles"></div>
+
+        <div style="margin-top:20px">
+          <div style="font-weight:600;font-size:14.5px;margin-bottom:4px">Need something else? <span class="badge">AI</span></div>
+          <div style="color:var(--muted);font-size:13px;margin-bottom:8px">Type any detail in your own words, such as <i>main deity</i>, <i>opening hours</i>, <i>founder name</i> or <i>services offered</i>. AI reads each page and fills it in.</div>
+          <div class="tags {% if not ai_enabled %}disabled{% endif %}" id="custom-box" data-placeholder="{% if ai_enabled %}Type a detail and press Enter{% else %}AI is not set up yet{% endif %}"></div>
+          {% if not ai_enabled %}
+          <div class="callout warn"><span>🔒</span><div><b>AI details are switched off.</b> Ask IT to add an Anthropic API key to the <code>.env</code> file. All the details above still work without it.</div></div>
+          {% endif %}
+        </div>
+      </div>
+    </div>
+
+    <div class="step">
+      <details class="more">
+        <summary><div class="num opt">3</div><div class="step-head" style="margin:0"><div>
+          <h3>Fine-tune <span style="font-weight:400;color:var(--muted);font-size:14px">(optional)</span></h3>
+          <p>How many results, which country, and what to keep. The defaults work well.</p></div></div>
+          <svg class="chev" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><path d="m6 9 6 6 6-6"/></svg>
+        </summary>
+        <div class="step-body">
+          <div class="opts">
+            <div class="field">
+              <label class="l">Websites per search</label>
+              <div class="range"><input type="range" id="max_results" min="5" max="200" step="5" value="30"><output id="max_results_out">30</output></div>
+              <div class="h">More websites = more data, but takes longer.</div>
+            </div>
+            <div class="field">
+              <label class="l" for="region">Country</label>
+              <select id="region">{% for k, v in regions.items() %}<option value="{{ k }}" {% if k == 'in-en' %}selected{% endif %}>{{ v }}</option>{% endfor %}</select>
+              <div class="h">Shows search results from this country first.</div>
+            </div>
+            <div class="field" style="grid-column:1/-1">
+              <label class="l">Keep only rows that have…</label>
+              <div class="seg" id="require">
+                <button data-v="" class="active">Keep everything</button>
+                <button data-v="emails">An email</button>
+                <button data-v="phones">A phone number</button>
+                <button data-v="any_contact">Email or phone</button>
+              </div>
+            </div>
+            <label class="switch"><input type="checkbox" id="follow_contact" checked><span class="sw"></span>
+              <span><b>Also check "Contact Us" pages</b><small>Finds many more emails and phone numbers.</small></span></label>
+            <label class="switch"><input type="checkbox" id="one_per_site" checked><span class="sw"></span>
+              <span><b>One row per website</b><small>Skips duplicate pages from the same site.</small></span></label>
+          </div>
+        </div>
+      </details>
+    </div>
+  </section>
+
+  <!-- ===================== PLACES MODE ===================== -->
+  <section class="panel" id="places-form" hidden>
+    <div class="step">
+      <div class="step-head"><div class="num">1</div><div>
+        <h3>What kind of place?</h3>
+        <p>Pick one category.</p></div></div>
+      <div class="step-body">
+        <div class="cat-tools"><div class="search">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round"><circle cx="11" cy="11" r="7"/><path d="m20 20-3.5-3.5"/></svg>
+          <input type="text" id="cat-filter" placeholder="Search categories… e.g. hospital"></div></div>
+        <div id="cat-list"></div>
+      </div>
+    </div>
+
+    <div class="step">
+      <div class="step-head"><div class="num">2</div><div>
+        <h3>Where?</h3>
+        <p>Add a city, district, state or country. You can add several.</p></div></div>
+      <div class="step-body">
+        <div class="tags" id="locations-box" data-placeholder="e.g. Hyderabad, India"></div>
+        <div class="under"><span>Press <kbd>Enter</kbd> after each place. Adding the country gives better matches.</span><span id="locations-count"></span></div>
+        <div class="examples"><small>Try:</small>
+          <button class="ex" data-to="locations">Hyderabad, India</button>
+          <button class="ex" data-to="locations">Tirupati, India</button>
+          <button class="ex" data-to="locations">Vijayawada, India</button>
+          <button class="ex" data-to="locations">Chennai, India</button>
+        </div>
+      </div>
+    </div>
+
+    <div class="step">
+      <details class="more">
+        <summary><div class="num opt">3</div><div class="step-head" style="margin:0"><div>
+          <h3>Extra details <span style="font-weight:400;color:var(--muted);font-size:14px">(optional)</span></h3>
+          <p>Filter by name, get emails from websites, or ask AI for more.</p></div></div>
+          <svg class="chev" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><path d="m6 9 6 6 6-6"/></svg>
+        </summary>
+        <div class="step-body">
+          <div class="opts">
+            <div class="field">
+              <label class="l" for="name_filter">Name contains</label>
+              <input type="text" id="name_filter" placeholder="e.g. Venkateswara, Apollo">
+              <div class="h">Leave empty to get all places.</div>
+            </div>
+            <div class="field">
+              <label class="l">Max places per location</label>
+              <div class="range"><input type="range" id="max_results_places" min="10" max="500" step="10" value="300"><output id="max_results_places_out">300</output></div>
+            </div>
+            <label class="switch" style="grid-column:1/-1"><input type="checkbox" id="enrich"><span class="sw"></span>
+              <span><b>Visit each place's website for emails &amp; phones</b><small>Slower, but finds contact details the map doesn't have.</small></span></label>
+            <div class="field" style="grid-column:1/-1">
+              <label class="l">More details from websites <span class="badge">AI</span></label>
+              <div class="tags {% if not ai_enabled %}disabled{% endif %}" id="custom-places-box" data-placeholder="{% if ai_enabled %}e.g. main deity, temple timings{% else %}AI is not set up yet{% endif %}"></div>
+            </div>
+          </div>
+        </div>
+      </details>
+      <div class="callout info"><span>🗺️</span><div>Places come from <b>OpenStreetMap</b>, a free public map. Big and well-known places are almost always there. Very small ones may be missing.</div></div>
+    </div>
+  </section>
+  </div>
+
+  <!-- ===================== FILES ===================== -->
+  <section class="panel">
+    <div class="files-head">
+      <h3>📁 Your Excel files</h3>
+      <div class="search" style="max-width:260px"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round"><circle cx="11" cy="11" r="7"/><path d="m20 20-3.5-3.5"/></svg><input type="text" id="file-filter" placeholder="Find a file…"></div>
+    </div>
+    <ul class="files" id="files"></ul>
+  </section>
+
+  <p class="foot">Collects only public pages that don't need a login. It follows each website's rules (robots.txt) and waits between visits.
+    Collected emails and phone numbers are personal data, so use them in line with company policy and privacy law. No spam.</p>
+</main>
+
+<!-- sticky action bar -->
+<div class="actionbar"><div class="wrap">
+  <div class="summary" id="summary"></div>
+  <input class="fname" id="file_name" type="text" placeholder="Excel file name (optional)" title="Name for the Excel file">
+  <button class="btn btn-primary" id="start"><svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor"><path d="M7 4.5v15l12-7.5z"/></svg>Start collecting</button>
+</div></div>
+
+<div class="toast" id="toast"></div>
+
+<div class="modal-bg" id="help">
+  <div class="modal">
+    <h3>How it works</h3>
+    <ol class="how">
+      <li><div class="num">1</div><div><b>Choose what to collect</b><p><i>Search the web</i> finds details on websites (emails, phones, addresses…). <i>Find places</i> gives you a list of places, like all temples in a city.</p></div></li>
+      <li><div class="num">2</div><div><b>Fill in the steps</b><p>Type your search or location and press Enter. Tick the details you need. You can skip the optional steps.</p></div></li>
+      <li><div class="num">3</div><div><b>Press "Start collecting"</b><p>You'll see live progress. A big search can take a few minutes, and you can stop anytime and still keep what was found.</p></div></li>
+      <li><div class="num">4</div><div><b>Download your Excel file</b><p>All your files stay under <i>Your Excel files</i> at the bottom of the page.</p></div></li>
+    </ol>
+    <div class="callout info" style="margin-top:18px"><span>💡</span><div><b>Tips:</b> add words like "contact" or "email" to your search to find more contact details. Use several smaller searches instead of one very broad one.</div></div>
+    <div style="text-align:right;margin-top:18px"><button class="btn btn-primary" id="close-help">Got it</button></div>
+  </div>
+</div>
+
+<script>
+const FIELDS = {{ fields | tojson }};
+const CATEGORIES = {{ categories | tojson }};
+const AI = {{ 'true' if ai_enabled else 'false' }};
+
+const FIELD_INFO = {
+  // Listed in display order: most-used details first.
+  title: ["🏷️", "Page title / name"], emails: ["✉️", "Email addresses"],
+  phones: ["📞", "Phone & mobile numbers"], address: ["📍", "Postal address"],
+  description: ["📝", "Short description of the site"], social: ["🔗", "Facebook, Instagram, LinkedIn…"],
+  contact_page: ["📇", "Link to the Contact page"], text_snippet: ["📄", "First lines of the page text"],
+};
+const DEFAULT_FIELDS = ["title", "emails", "phones", "address"];
+const CAT_GROUPS = [
+  ["Religious", "🛕", ["Hindu temples", "Churches", "Mosques", "Gurudwaras", "Buddhist / Jain temples", "All places of worship"]],
+  ["Health", "🏥", ["Hospitals", "Clinics & doctors", "Pharmacies"]],
+  ["Education", "🎓", ["Schools", "Colleges & universities"]],
+  ["Food & stay", "🍽️", ["Restaurants", "Cafes", "Hotels"]],
+  ["Business", "🏢", ["Offices / companies", "IT companies", "Factories / industrial", "Supermarkets & shops", "Banks", "ATMs", "Petrol pumps"]],
+  ["Public", "🏛️", ["Government offices", "Police stations", "Tourist attractions"]],
+];
+const CAT_ICON = {
+  "Hindu temples": "🛕", "Churches": "⛪", "Mosques": "🕌", "Gurudwaras": "🪯", "Buddhist / Jain temples": "☸️", "All places of worship": "🙏",
+  "Hospitals": "🏥", "Clinics & doctors": "🩺", "Pharmacies": "💊", "Schools": "🏫", "Colleges & universities": "🎓",
+  "Restaurants": "🍽️", "Cafes": "☕", "Hotels": "🏨", "Offices / companies": "🏢", "IT companies": "💻", "Factories / industrial": "🏭",
+  "Supermarkets & shops": "🛒", "Banks": "🏦", "ATMs": "🏧", "Petrol pumps": "⛽", "Government offices": "🏛️", "Police stations": "🚓", "Tourist attractions": "📸",
+};
+
+const $ = (id) => document.getElementById(id);
+const START_HTML = '<svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor"><path d="M7 4.5v15l12-7.5z"/></svg>Start collecting';
+const setStartBusy = (busy) => {
+  $("start").disabled = busy;
+  $("start").innerHTML = busy ? '<div class="spinner" style="border-color:rgba(255,255,255,.35);border-top-color:#fff"></div>Collecting…' : START_HTML;
+};
+const esc = (s) => String(s ?? "").replace(/[&<>"]/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
+let mode = "web", category = CATEGORIES[0], requireVal = "", jobId = null, timer = null, lastJob = null;
+
+/* ---------- toast & help ---------- */
+let toastTimer;
+function toast(msg, kind) {
+  const t = $("toast"); t.textContent = msg; t.className = "toast show " + (kind || "");
+  clearTimeout(toastTimer); toastTimer = setTimeout(() => t.className = "toast", 4200);
+}
+$("open-help").onclick = () => $("help").classList.add("show");
+$("close-help").onclick = () => $("help").classList.remove("show");
+$("help").onclick = (e) => { if (e.target.id === "help") $("help").classList.remove("show"); };
+
+/* ---------- tag inputs ---------- */
+function TagInput(box, { disabled = false, onChange = () => {} } = {}) {
+  const items = [];
+  const input = document.createElement("input");
+  input.placeholder = box.dataset.placeholder || ""; input.disabled = disabled;
+  box.appendChild(input);
+  const render = (silent) => {
+    box.querySelectorAll(".tag").forEach(t => t.remove());
+    items.forEach((v, i) => {
+      const t = document.createElement("span"); t.className = "tag";
+      t.innerHTML = `<span title="${esc(v)}">${esc(v)}</span><button type="button" aria-label="Remove">×</button>`;
+      t.querySelector("button").onclick = (e) => { e.stopPropagation(); items.splice(i, 1); render(); };
+      box.insertBefore(t, input);
+    });
+    input.placeholder = items.length ? "Add another…" : (box.dataset.placeholder || "");
+    if (!silent) onChange(items);
+  };
+  const add = (v) => { v = v.trim(); if (v && !items.includes(v)) { items.push(v); render(); } };
+  input.addEventListener("keydown", (e) => {
+    if (e.key === "Enter") { e.preventDefault(); add(input.value); input.value = ""; }
+    else if (e.key === "Backspace" && !input.value && items.length) { items.pop(); render(); }
+  });
+  input.addEventListener("blur", () => { if (input.value.trim()) { add(input.value); input.value = ""; } });
+  input.addEventListener("paste", (e) => {
+    const text = e.clipboardData.getData("text");
+    if (text.includes("\n")) { e.preventDefault(); text.split(/\r?\n/).forEach(add); }
+  });
+  box.addEventListener("click", () => input.focus());
+  render(true);
+  return { add, items, pending: () => input.value.trim(), flush: () => { if (input.value.trim()) { add(input.value); input.value = ""; } } };
+}
+const queries = TagInput($("queries-box"), { onChange: (it) => { $("queries-count").textContent = it.length ? `${it.length} search${it.length > 1 ? "es" : ""}` : ""; updateSummary(); } });
+const locations = TagInput($("locations-box"), { onChange: (it) => { $("locations-count").textContent = it.length ? `${it.length} location${it.length > 1 ? "s" : ""}` : ""; updateSummary(); } });
+const custom = TagInput($("custom-box"), { disabled: !AI, onChange: () => updateSummary() });
+const customPlaces = TagInput($("custom-places-box"), { disabled: !AI, onChange: () => updateSummary() });
+document.querySelectorAll(".ex").forEach(b => b.onclick = () => (b.dataset.to === "queries" ? queries : locations).add(b.textContent));
+
+/* ---------- field tiles ---------- */
+const FIELD_ORDER = [...Object.keys(FIELD_INFO).filter(k => k in FIELDS), ...Object.keys(FIELDS).filter(k => !(k in FIELD_INFO))];
+$("field-tiles").innerHTML = FIELD_ORDER.map(k => [k, FIELDS[k]]).map(([k, label]) => {
+  const [ico, desc] = FIELD_INFO[k] || ["•", ""];
+  return `<label class="tile"><input type="checkbox" name="field" value="${k}" ${DEFAULT_FIELDS.includes(k) ? "checked" : ""}>
+    <span class="ti">${ico}</span><span><b>${esc(label)}</b><small>${esc(desc)}</small></span><span class="tick"></span></label>`;
+}).join("");
+document.querySelectorAll("input[name=field]").forEach(c => c.onchange = updateSummary);
+
+/* ---------- category picker ---------- */
+function renderCats() {
+  const q = $("cat-filter").value.trim().toLowerCase();
+  const known = new Set(CAT_GROUPS.flatMap(g => g[2]));
+  const groups = [...CAT_GROUPS, ["Other", "📌", CATEGORIES.filter(c => !known.has(c))]];
+  $("cat-list").innerHTML = groups.map(([name, , cats]) => {
+    const list = cats.filter(c => CATEGORIES.includes(c) && (!q || c.toLowerCase().includes(q) || name.toLowerCase().includes(q)));
+    if (!list.length) return "";
+    return `<div class="cat-group"><h4>${esc(name)}</h4><div class="cats">${list.map(c =>
+      `<button type="button" class="cat ${c === category ? "active" : ""}" data-c="${esc(c)}">${CAT_ICON[c] || "📌"} ${esc(c)}</button>`).join("")}</div></div>`;
+  }).join("") || '<div style="color:var(--muted)">No category matches. Try another word.</div>';
+  document.querySelectorAll(".cat").forEach(b => b.onclick = () => { category = b.dataset.c; renderCats(); updateSummary(); });
+}
+$("cat-filter").oninput = renderCats;
+renderCats();
+
+/* ---------- options ---------- */
+[["max_results", "max_results_out"], ["max_results_places", "max_results_places_out"]].forEach(([i, o]) => {
+  $(i).oninput = () => { $(o).textContent = $(i).value; updateSummary(); };
+});
+document.querySelectorAll("#require button").forEach(b => b.onclick = () => {
+  document.querySelectorAll("#require button").forEach(x => x.classList.remove("active"));
+  b.classList.add("active"); requireVal = b.dataset.v;
+});
+["enrich", "follow_contact"].forEach(id => $(id).onchange = updateSummary);
+
+/* ---------- mode switch ---------- */
+document.querySelectorAll(".mode").forEach(m => m.onclick = () => {
+  document.querySelectorAll(".mode").forEach(x => x.classList.remove("active"));
+  m.classList.add("active"); mode = m.dataset.mode;
+  $("web-form").hidden = mode !== "web"; $("places-form").hidden = mode !== "places";
+  updateSummary();
+});
+
+/* ---------- summary ---------- */
+function selectedFields() { return [...document.querySelectorAll("input[name=field]:checked")].map(x => x.value); }
+function updateSummary() {
+  let html;
+  if (mode === "web") {
+    const n = queries.items.length, f = selectedFields().map(k => FIELDS[k]).concat(custom.items);
+    html = n ? `We'll run <b>${n} search${n > 1 ? "es" : ""}</b>, visit up to <b>${n * +$("max_results").value} websites</b> and collect <b>${f.length ? esc(f.slice(0, 4).join(", ")) + (f.length > 4 ? ` +${f.length - 4} more` : "") : "nothing yet"}</b>.`
+             : "👆 Start by typing what to search for in step 1.";
+  } else {
+    const n = locations.items.length;
+    html = n ? `We'll find <b>${esc(category.toLowerCase())}</b> in <b>${esc(locations.items.slice(0, 3).join(", "))}${n > 3 ? ` +${n - 3} more` : ""}</b>${$("enrich").checked || customPlaces.items.length ? " and check their websites" : ""}.`
+             : `👆 Pick a category, then add a location in step 2.`;
+  }
+  $("summary").innerHTML = html;
+}
+
+/* ---------- start / stop ---------- */
+$("start").onclick = async () => {
+  queries.flush(); locations.flush(); custom.flush(); customPlaces.flush();
+  const body = { mode, file_name: $("file_name").value };
+  if (mode === "web") {
+    if (!queries.items.length) { toast("Please type at least one search in step 1.", "err"); $("queries-box").querySelector("input").focus(); return; }
+    if (!selectedFields().length && !custom.items.length) { toast("Please tick at least one detail in step 2.", "err"); return; }
+    Object.assign(body, {
+      queries: queries.items.join("\n"), max_results: $("max_results").value, region: $("region").value,
+      require: requireVal, follow_contact: $("follow_contact").checked, one_per_site: $("one_per_site").checked,
+      fields: selectedFields(), custom_fields: custom.items.join(","),
+    });
+  } else {
+    if (!locations.items.length) { toast("Please add at least one location in step 2.", "err"); $("locations-box").querySelector("input").focus(); return; }
+    Object.assign(body, {
+      category, locations: locations.items.join("\n"), name_filter: $("name_filter").value,
+      max_results: $("max_results_places").value, enrich: $("enrich").checked, custom_fields: customPlaces.items.join(","),
+    });
+  }
+  $("start").disabled = true;
+  try {
+    const r = await fetch("/api/jobs", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
+    const d = await r.json();
+    if (!r.ok) { toast(d.error || "Could not start.", "err"); $("start").disabled = false; return; }
+    jobId = d.id; lastJob = null; setStartBusy(true);
+    document.body.classList.add("running");
+    $("run").hidden = false; $("result").innerHTML = ""; $("preview-area").hidden = true; $("row-filter").value = "";
+    $("stop").hidden = false; $("stop").disabled = false; $("run-spin").hidden = false;
+    $("run-title").textContent = "Collecting your data…";
+    window.scrollTo({ top: 0 });
+    poll();
+  } catch (e) { toast("Can't reach the app. Is it still running?", "err"); $("start").disabled = false; }
+};
+$("stop").onclick = async () => {
+  if (!jobId) return;
+  $("stop").disabled = true; $("activity").textContent = "Stopping… finishing the pages already open.";
+  await fetch(`/api/jobs/${jobId}/stop`, { method: "POST" });
+};
+
+/* ---------- progress ---------- */
+const fmtTime = (s) => `${Math.floor(s / 60)}:${String(s % 60).padStart(2, "0")}`;
+function stepsFor(j) {
+  if (j.mode === "places") {
+    const visiting = j.phase === "visit" || (j.columns || []).includes("Website Status");
+    return visiting ? [["search", "Find places"], ["visit", "Check websites"], ["save", "Save Excel"], ["done", "Done"]]
+                    : [["search", "Find places"], ["save", "Save Excel"], ["done", "Done"]];
+  }
+  return [["search", "Search"], ["visit", "Read websites"], ["save", "Save Excel"], ["done", "Done"]];
+}
+function renderStepper(j) {
+  const steps = stepsFor(j), cur = steps.findIndex(s => s[0] === j.phase);
+  $("stepper").innerHTML = steps.map(([, label], i) => {
+    const cls = j.status !== "running" && j.status !== "queued" ? "did" : i < cur ? "did" : i === cur ? "doing" : "";
+    return `<div class="st ${cls}"><div class="dot">${cls === "did" ? "✓" : i + 1}</div>${label}</div>`;
+  }).join("");
+}
+
+async function poll() {
+  clearTimeout(timer);
+  let j;
+  try { const r = await fetch(`/api/jobs/${jobId}`); if (!r.ok) throw 0; j = await r.json(); }
+  catch { timer = setTimeout(poll, 3000); return; }
+  lastJob = j;
+  const finished = ["done", "cancelled", "error"].includes(j.status);
+  renderStepper(j);
+  $("activity").textContent = j.activity;
+  $("s-rows").textContent = j.count.toLocaleString();
+  $("s-email").textContent = j.with_email.toLocaleString();
+  $("s-phone").textContent = j.with_phone.toLocaleString();
+  $("s-time").textContent = fmtTime(j.elapsed);
+
+  const bar = $("bar"), unit = j.mode === "places" && j.phase !== "visit" ? "locations" : "websites";
+  const indeterminate = !finished && (!j.total || j.phase === "search" && j.mode === "web");
+  bar.classList.toggle("indeterminate", indeterminate);
+  const pct = finished ? 100 : j.total ? Math.round(100 * j.done / j.total) : 0;
+  $("barfill").style.width = pct + "%";
+  if (finished) { $("bar-left").textContent = ""; $("bar-right").textContent = ""; }
+  else if (indeterminate) { $("bar-left").textContent = j.mode === "web" ? "Searching…" : "Looking up the map…"; $("bar-right").textContent = ""; }
+  else {
+    $("bar-left").textContent = `${j.done} of ${j.total} ${unit} · ${pct}%`;
+    const left = j.done > 2 ? Math.round(j.elapsed / j.done * (j.total - j.done)) : null;
+    $("bar-right").textContent = left != null ? (left < 60 ? "less than a minute left" : `about ${Math.round(left / 60)} min left`) : "estimating time…";
+  }
+
+  renderPreview(j);
+  $("log").textContent = j.log.join("\n");
+
+  if (finished) {
+    document.body.classList.remove("running");
+    setStartBusy(false); $("stop").hidden = true; $("run-spin").hidden = true;
+    const titles = { done: "Finished!", cancelled: "Stopped", error: "Something went wrong" };
+    $("run-title").textContent = titles[j.status];
+    if (j.file) {
+      $("result").innerHTML = `<div class="result-banner ok"><div class="big">🎉</div>
+        <div class="txt"><b>Your Excel file is ready: ${j.count.toLocaleString()} rows</b>
+        <span>${j.with_email} with email · ${j.with_phone} with phone · took ${fmtTime(j.elapsed)}</span></div>
+        <a class="btn btn-green" href="/download/${encodeURIComponent(j.file)}"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round"><path d="M12 4v11m0 0-4.5-4.5M12 15l4.5-4.5M5 20h14"/></svg>Download Excel</a>
+        <button class="btn btn-ghost" onclick="document.getElementById('form-area').scrollIntoView()">Change search</button></div>`;
+    } else if (j.status === "error") {
+      $("result").innerHTML = `<div class="result-banner bad"><div class="big">⚠️</div><div class="txt"><b>The collection stopped because of an error.</b>
+        <span>${esc(j.error || "")}. Please try again in a few minutes. If it keeps happening, open "Show technical log" and share it with IT.</span></div></div>`;
+    } else {
+      $("result").innerHTML = `<div class="result-banner empty"><div class="big">🔍</div><div class="txt"><b>No results this time.</b>
+        <span>Try different or broader words, add the city or country, or choose "Keep everything" under Fine-tune.</span></div></div>`;
+    }
+    loadFiles();
+    return;
+  }
+  timer = setTimeout(poll, 1500);
+}
+
+function renderPreview(j) {
+  if (!j || !j.preview.length) { $("preview-area").hidden = true; return; }
+  $("preview-area").hidden = false;
+  const q = $("row-filter").value.trim().toLowerCase();
+  const rows = j.preview.slice().reverse().filter(r => !q || j.columns.some(c => String(r[c] || "").toLowerCase().includes(q)));
+  const cell = (v) => {
+    if (!v) return `<td class="empty">–</td>`;
+    if (/^https?:\/\//.test(v)) return `<td><a href="${esc(v)}" target="_blank" rel="noopener" title="${esc(v)}">${esc(v.replace(/^https?:\/\/(www\.)?/, ""))}</a></td>`;
+    return `<td title="${esc(v)}">${esc(v)}</td>`;
+  };
+  $("preview").innerHTML = `<thead><tr>${j.columns.map(c => `<th>${esc(c)}</th>`).join("")}</tr></thead><tbody>` +
+    (rows.length ? rows.map(r => `<tr>${j.columns.map(c => cell(r[c])).join("")}</tr>`).join("")
+                 : `<tr><td colspan="${j.columns.length}" class="empty">No rows match your filter.</td></tr>`) + "</tbody>";
+}
+$("row-filter").oninput = () => renderPreview(lastJob);
+
+/* ---------- files ---------- */
+let allFiles = [];
+const prettyName = (n) => n.replace(/\.xlsx$/, "").replace(/_\d{8}_\d{6}$/, "").replace(/_/g, " ");
+function renderFiles() {
+  const q = $("file-filter").value.trim().toLowerCase();
+  const list = allFiles.filter(f => !q || f.name.toLowerCase().includes(q));
+  $("files").innerHTML = list.length ? list.map(f => `<li class="file"><div class="xl">XL</div>
+      <div class="meta"><b title="${esc(f.name)}">${esc(prettyName(f.name))}</b><small>${f.created} · ${f.size_kb} KB</small></div>
+      <a class="dl" href="/download/${encodeURIComponent(f.name)}">⬇ Download</a></li>`).join("")
+    : `<li class="nofiles">${allFiles.length ? "No file matches your search." : "Your Excel files will appear here after your first collection."}</li>`;
+}
+async function loadFiles() { try { allFiles = await (await fetch("/api/files")).json(); } catch { allFiles = []; } renderFiles(); }
+$("file-filter").oninput = renderFiles;
+
+updateSummary();
+loadFiles();
+</script>
+</body>
+</html>
