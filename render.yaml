@@ -1,0 +1,15 @@
+services:
+  - type: web
+    name: onebridge-data-collector
+    env: python
+    buildCommand: pip install -r requirements.txt
+    startCommand: gunicorn app:app --workers 1 --threads 8 --timeout 180 --bind 0.0.0.0:$PORT
+    envVars:
+      - key: SECRET_KEY
+        value: 19879eae876afb0dbb883c2b2623beed641003d0157d2ba0fb09b28953c49cfd
+      - key: APP_USER
+        value: admin@onebridge.com
+      - key: APP_PASSWORD
+        value: OnebridgeAdmin2026!
+      - key: PYTHON_VERSION
+        value: 3.10.0
