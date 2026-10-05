@@ -610,7 +610,8 @@ function TagInput(box, { disabled = false, onChange = () => {} } = {}) {
     box.querySelectorAll(".tag").forEach(t => t.remove());
     items.forEach((v, i) => {
       const t = document.createElement("span"); t.className = "tag";
-      t.innerHTML = `<span title="${esc(v)}">${esc(v)}</span><button type="button" aria-label="Remove">×</button>`;
+      t.innerHTML = `<span title="${esc(v)}" style="cursor:pointer" aria-label="Edit">${esc(v)}</span><button type="button" aria-label="Remove">×</button>`;
+      t.querySelector("span").onclick = (e) => { e.stopPropagation(); input.value = items.splice(i, 1)[0]; render(); input.focus(); };
       t.querySelector("button").onclick = (e) => { e.stopPropagation(); items.splice(i, 1); render(); };
       box.insertBefore(t, input);
     });
@@ -798,7 +799,7 @@ async function poll() {
       $("result").innerHTML = `<div class="result-banner ok"><div class="big">🎉</div>
         <div class="txt"><b>Your Excel file is ready: ${j.count.toLocaleString()} rows</b>
         <span>${j.with_email} with email · ${j.with_phone} with phone · took ${fmtTime(j.elapsed)}</span></div>
-        <a class="btn btn-green" href="/download/${encodeURIComponent(j.file)}"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round"><path d="M12 4v11m0 0-4.5-4.5M12 15l4.5-4.5M5 20h14"/></svg>Download Excel</a>
+        <a class="btn btn-green" href="javascript:void(0)" onclick="downloadLocalFile('${esc(j.file)}')"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round"><path d="M12 4v11m0 0-4.5-4.5M12 15l4.5-4.5M5 20h14"/></svg>Download Excel</a>
         <button class="btn btn-ghost" onclick="document.getElementById('form-area').scrollIntoView()">Change search</button></div>`;
     } else if (j.status === "error") {
       $("result").innerHTML = `<div class="result-banner bad"><div class="big">⚠️</div><div class="txt"><b>The collection stopped because of an error.</b>
@@ -807,7 +808,7 @@ async function poll() {
       $("result").innerHTML = `<div class="result-banner empty"><div class="big">🔍</div><div class="txt"><b>No results this time.</b>
         <span>Try different or broader words, add the city or country, or choose "Keep everything" under Fine-tune.</span></div></div>`;
     }
-    loadFiles();
+    syncAndLoadFiles();
     return;
   }
   timer = setTimeout(poll, 1500);
@@ -829,22 +830,75 @@ function renderPreview(j) {
 }
 $("row-filter").oninput = () => renderPreview(lastJob);
 
-/* ---------- files ---------- */
+/* ---------- files (IndexedDB local storage) ---------- */
 let allFiles = [];
+const dbPromise = new Promise((resolve) => {
+  const req = indexedDB.open("DataCollectorDB", 1);
+  req.onupgradeneeded = () => req.result.createObjectStore("excel_files", { keyPath: "name" });
+  req.onsuccess = () => resolve(req.result);
+  req.onerror = () => resolve(null);
+});
+
+async function syncAndLoadFiles() {
+  const db = await dbPromise;
+  if (!db) return; 
+  
+  let serverFiles = [];
+  try { serverFiles = await (await fetch("/api/files")).json(); } catch (e) {}
+  
+  const localFiles = await new Promise(res => {
+    const r = db.transaction("excel_files").objectStore("excel_files").getAll();
+    r.onsuccess = () => res(r.result || []);
+  });
+  
+  const localNames = new Set(localFiles.map(f => f.name));
+  for (const sf of serverFiles) {
+    if (!localNames.has(sf.name)) {
+      try {
+        const blob = await (await fetch(`/download/${encodeURIComponent(sf.name)}`)).blob();
+        await new Promise(res => {
+          const tx = db.transaction("excel_files", "readwrite");
+          tx.objectStore("excel_files").put({ ...sf, blob });
+          tx.oncomplete = res;
+        });
+        localFiles.push({ ...sf, blob });
+      } catch (e) { console.error("Could not sync file to local DB:", sf.name); }
+    }
+  }
+  
+  allFiles = localFiles.sort((a, b) => b.created.localeCompare(a.created));
+  renderFiles();
+}
+
+async function downloadLocalFile(name) {
+  const db = await dbPromise;
+  const file = await new Promise(res => {
+    const r = db.transaction("excel_files").objectStore("excel_files").get(name);
+    r.onsuccess = () => res(r.result);
+  });
+  if (file && file.blob) {
+    const url = URL.createObjectURL(file.blob);
+    const a = document.createElement("a");
+    a.href = url; a.download = name; a.click();
+    setTimeout(() => URL.revokeObjectURL(url), 5000);
+  } else {
+    window.location.href = `/download/${encodeURIComponent(name)}`;
+  }
+}
+
 const prettyName = (n) => n.replace(/\.xlsx$/, "").replace(/_\d{8}_\d{6}$/, "").replace(/_/g, " ");
 function renderFiles() {
   const q = $("file-filter").value.trim().toLowerCase();
   const list = allFiles.filter(f => !q || f.name.toLowerCase().includes(q));
   $("files").innerHTML = list.length ? list.map(f => `<li class="file"><div class="xl">XL</div>
       <div class="meta"><b title="${esc(f.name)}">${esc(prettyName(f.name))}</b><small>${f.created} · ${f.size_kb} KB</small></div>
-      <a class="dl" href="/download/${encodeURIComponent(f.name)}">⬇ Download</a></li>`).join("")
+      <a class="dl" href="javascript:void(0)" onclick="downloadLocalFile('${esc(f.name)}')">⬇ Download</a></li>`).join("")
     : `<li class="nofiles">${allFiles.length ? "No file matches your search." : "Your Excel files will appear here after your first collection."}</li>`;
 }
-async function loadFiles() { try { allFiles = await (await fetch("/api/files")).json(); } catch { allFiles = []; } renderFiles(); }
 $("file-filter").oninput = renderFiles;
 
 updateSummary();
-loadFiles();
+syncAndLoadFiles();
 </script>
 </body>
 </html>
