@@ -6,6 +6,7 @@ import requests
 from .fetch import USER_AGENT
 
 NOMINATIM = "https://nominatim.openstreetmap.org/search"
+PHOTON = "https://photon.komoot.io/api/"
 # Public Overpass servers; tried in order when one is busy.
 OVERPASS_SERVERS = [
     "https://overpass-api.de/api/interpreter",
@@ -50,13 +51,37 @@ class PlaceError(Exception):
     pass
 
 
-def geocode(location: str) -> dict:
+def _geocode_nominatim(location: str) -> dict | None:
     r = requests.get(NOMINATIM, params={"q": location, "format": "json", "limit": 1}, headers=HEADERS, timeout=30)
     r.raise_for_status()
     data = r.json()
-    if not data:
-        raise PlaceError(f"Location not found: {location}")
-    return data[0]
+    return data[0] if data else None
+
+
+def _geocode_photon(location: str) -> dict | None:
+    """Backup geocoder (also OpenStreetMap data); used when Nominatim limits cloud servers."""
+    r = requests.get(PHOTON, params={"q": location, "limit": 1}, headers=HEADERS, timeout=30)
+    r.raise_for_status()
+    feats = r.json().get("features", [])
+    if not feats:
+        return None
+    p = feats[0]["properties"]
+    lon, lat = feats[0]["geometry"]["coordinates"]
+    # Photon extent is [minLon, maxLat, maxLon, minLat]; fall back to ~10 km around the point.
+    w, n, e, s = p.get("extent") or [lon - 0.1, lat + 0.1, lon + 0.1, lat - 0.1]
+    return {"osm_id": p["osm_id"], "osm_type": {"R": "relation", "W": "way", "N": "node"}.get(p.get("osm_type"), "node"),
+            "boundingbox": [s, n, w, e]}
+
+
+def geocode(location: str) -> dict:
+    for finder in (_geocode_nominatim, _geocode_photon):
+        try:
+            found = finder(location)
+        except requests.RequestException:
+            continue
+        if found:
+            return found
+    raise PlaceError(f"Location not found: {location}. Try adding the state or country, e.g. 'Tirupati, India'.")
 
 
 def _area_clause(geo: dict) -> tuple[str, str]:

@@ -7,11 +7,10 @@ import uuid
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 
-from ddgs import DDGS
-
 from . import ai_extract, extract, places
 from .excel import write_workbook
 from .fetch import Fetcher, domain_of
+from .search import web_search
 
 OUTPUT_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "outputs")
 WORKERS = 5
@@ -124,30 +123,25 @@ def _save(job: Job):
 def _search(job: Job) -> list[dict]:
     spec = job.spec
     results, seen = [], set()
-    with DDGS() as ddgs:
-        for q in spec["queries"]:
-            if job.cancelled.is_set():
-                break
-            job.say(f'Searching: "{q}"')
-            job.activity = f'Searching the internet for "{q}"'
-            try:
-                hits = ddgs.text(q, region=spec.get("region", "wt-wt"), max_results=spec["max_results"]) or []
-            except Exception as e:
-                job.say(f"  search failed: {e}")
-                hits = []
-            new = 0
-            for h in hits:
-                url = h.get("href", "")
-                key = url.rstrip("/").lower()
-                if spec.get("one_per_site"):
-                    key = domain_of(url)
-                if not url or key in seen:
-                    continue
-                seen.add(key)
-                results.append({"query": q, "title": h.get("title", ""), "url": url, "snippet": h.get("body", "")})
-                new += 1
-            job.say(f"  {new} new results")
-            time.sleep(1)
+    for q in spec["queries"]:
+        if job.cancelled.is_set():
+            break
+        job.say(f'Searching: "{q}"')
+        job.activity = f'Searching the internet for "{q}"'
+        hits = web_search(q, spec.get("region", "wt-wt"), spec["max_results"], job.say)
+        new = 0
+        for h in hits:
+            url = h.get("href", "")
+            key = url.rstrip("/").lower()
+            if spec.get("one_per_site"):
+                key = domain_of(url)
+            if not url or key in seen:
+                continue
+            seen.add(key)
+            results.append({"query": q, "title": h.get("title", ""), "url": url, "snippet": h.get("body", "")})
+            new += 1
+        job.say(f"  {new} new results")
+        time.sleep(1)
     return results
 
 
