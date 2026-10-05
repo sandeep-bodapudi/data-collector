@@ -435,7 +435,7 @@ async function viewNewRun(mode) {
     </div>`;
   $$("[data-mode]", v).forEach((b) => b.onclick = () => { location.hash = `#/new/${b.dataset.mode}`; });
 
-  const state = { require: "", category: CFG.categories[0] };
+  const state = { require: "", category: "" };
   let queries, locations, custom;
   const update = () => {
     const rows = [], checks = [];
@@ -501,6 +501,7 @@ async function viewNewRun(mode) {
       if (!body.fields.length && !custom.items.length) return toast("Pick at least one detail in step 2.", "err");
     } else {
       locations.flush();
+      if (!state.category) { toast("Choose a category in step 1.", "err"); return $("#cat-filter").focus(); }
       Object.assign(body, { category: state.category, locations: locations.items.join("\n"), name_filter: $("#name_filter").value,
         max_results: $("#max_places").value, enrich: $("#enrich").checked });
       if (!locations.items.length) { toast("Add at least one location in step 2.", "err"); return locations.input.focus(); }
