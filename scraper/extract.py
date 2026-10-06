@@ -88,7 +88,10 @@ def normalize_phone(raw: str) -> str:
       whitespace collapsed, because splitting an STD code from the subscriber number needs a lookup table of
       codes to do safely, and guessing wrong is worse than leaving the original formatting.
     """
-    raw = re.sub(r"\s+", " ", raw.strip())
+    # Some sites use an en-dash/em-dash or a non-breaking space as the separator instead of a plain "-" or " ".
+    # Same number either way, but a customer scanning a column wants one consistent look, not three.
+    raw = re.sub(r"[‐-―−]", "-", raw.strip())
+    raw = re.sub(r"[\s ]+", " ", raw)
     digits = re.sub(r"\D", "", raw)
     core = digits[2:] if digits.startswith("91") and len(digits) == 12 else digits[1:] if digits.startswith("0") and len(digits) == 11 else digits
     if len(core) == 10 and core[0] in "6789":
@@ -96,6 +99,22 @@ def normalize_phone(raw: str) -> str:
     if re.match(r"^1(800|860)\d{6,7}$", core):
         return f"{core[:4]}-{core[4:7]}-{core[7:]}"
     return raw
+
+
+def _looks_like_bare_phone(digits: str) -> bool:
+    """A run of digits with NO separators and no + is only trusted as a phone number in the shapes a real Indian
+    phone number actually takes - a bare mobile, a trunk-prefixed landline, or a toll-free number. Anything else
+    unseparated (a roll number, an order ID, a reference number sitting in ordinary sentence text - e.g. a college
+    news page mentioning a 12-digit student ID) is rejected rather than guessed at."""
+    if len(digits) == 10 and digits[0] in "6789":                       # bare mobile: 9848012345
+        return True
+    if len(digits) == 11 and digits[0] == "0":  # trunk-prefixed: 09848012345 (mobile) or 04023146077 (STD + landline)
+        return True
+    if len(digits) == 12 and digits.startswith("91") and digits[2] in "6789":  # country code, no +: 919848012345
+        return True
+    if re.fullmatch(r"1(800|860)\d{6,7}", digits):                      # toll-free: 1800123456(7)
+        return True
+    return False
 
 
 def _clean_phone(raw: str) -> str | None:
@@ -110,6 +129,12 @@ def _clean_phone(raw: str) -> str | None:
         return None
     # Reject pure date-like patterns (e.g. 01012024)
     if re.fullmatch(r"0[1-9]0[1-9]\d{4}", digits):
+        return None
+    has_separator = bool(re.search(r"[\s.\-()]", raw.strip())) or raw.strip().startswith("+")
+    if not has_separator and not _looks_like_bare_phone(digits):
+        # No spacing/dashes to suggest a human formatted this as a phone number, and it's not a shape a real
+        # Indian number takes unseparated - almost always a roll number, order ID or similar run of digits that
+        # happened to sit next to other text (seen in the wild: student roll numbers in placement-news pages).
         return None
     return normalize_phone(raw)
 

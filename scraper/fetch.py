@@ -3,13 +3,19 @@
 It only sends login cookies for LinkedIn/Facebook when an admin has enabled restricted
 connectors (PRD section 6: "Restricted - disabled by default; legal approval needed").
 """
+import re
 import threading
 import time
-from urllib.parse import urlparse
+from urllib.parse import urljoin, urlparse
 from urllib.robotparser import RobotFileParser
 
 import requests
 from bs4 import UnicodeDammit
+
+# <meta http-equiv="refresh" content="0; url=/home4/"> - an older, still common way to redirect that plain HTTP
+# following (requests' allow_redirects) never sees, because it's inside the page, not an HTTP 3xx response.
+META_REFRESH_RE = re.compile(r'<meta[^>]+http-equiv=["\']?refresh["\']?[^>]*content=["\'][^;"\']*;\s*url=([^"\'>]+)', re.I)
+MAX_META_REDIRECTS = 3
 
 # Mimics a real Chrome browser so more sites serve full content instead of blocking bots.
 USER_AGENT = (
@@ -116,12 +122,8 @@ class Fetcher:
                 wait = PER_DOMAIN_DELAY - (now - last)
             time.sleep(wait)
 
-    def get_html(self, url: str) -> tuple[str | None, str]:
-        """Return (html, status_note). html is None when not fetched."""
-        if self._is_skipped(url):
-            return None, "skipped (login/social site)"
-        if not self.allowed(url):
-            return None, "blocked by robots.txt"
+    def _get_once(self, url: str) -> tuple[str | None, str]:
+        """One fetch, no meta-refresh following. Returns (html, status_note)."""
         self._wait_turn(url)
         for attempt in range(2):  # retry once on transient errors
             try:
@@ -145,3 +147,22 @@ class Fetcher:
             except requests.RequestException as e:
                 return None, f"error: {type(e).__name__}"
         return None, "error: exhausted retries"
+
+    def get_html(self, url: str) -> tuple[str | None, str]:
+        """Return (html, status_note). html is None when not fetched."""
+        for _ in range(MAX_META_REDIRECTS + 1):
+            if self._is_skipped(url):
+                return None, "skipped (login/social site)"
+            if not self.allowed(url):
+                return None, "blocked by robots.txt"
+            text, note = self._get_once(url)
+            if text is None:
+                return None, note
+            m = META_REFRESH_RE.search(text[:4000])  # the redirect tag, when present, is always near the top
+            if not m:
+                return text, note
+            next_url = urljoin(url, m.group(1).strip().strip('"\''))
+            if next_url == url:
+                return text, note  # refuses to make progress - avoid an infinite loop
+            url = next_url
+        return text, note  # too many hops; hand back whatever the last one was rather than fail outright

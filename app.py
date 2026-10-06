@@ -381,7 +381,9 @@ def create_job():
                 "name_filter": (d.get("name_filter") or "").strip(),
                 "enrich": bool(d.get("enrich")) or bool(custom), "find_websites": bool(d.get("find_websites", True)), **common}
     else:
-        queries = list(dict.fromkeys(q.strip() for q in (d.get("queries") or "").splitlines() if q.strip()))[:20]
+        # 300 is generous on purpose - for breadth across "100-200 websites" the limit that actually matters is how
+        # fast search engines can be queried without being refused (see scraper/search.py), not this count.
+        queries = list(dict.fromkeys(q.strip() for q in (d.get("queries") or "").splitlines() if q.strip()))[:300]
         if not queries:
             return jsonify(error="Add at least one search."), 400
         fields = [f for f in d.get("fields", []) if f in extract.STANDARD_FIELDS]

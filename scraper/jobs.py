@@ -158,7 +158,8 @@ def _search(job: Job) -> list[dict]:
             results.append({"query": q, "title": h.get("title", ""), "url": url, "snippet": h.get("body", "")})
             new += 1
         job.say(f"  {new} new results")
-        time.sleep(1)
+        if q != expanded_queries[-1]:
+            time.sleep(_current_gap())  # measured-safe pacing; shorter automatically once an official search key is set
     return results
 
 
@@ -283,14 +284,28 @@ def _enrich_place(job: Job, fetcher: Fetcher, row: dict) -> dict:
     return row
 
 
-# Tunable without a code change (e.g. on Render: Environment tab). Defaults are measured against the free DuckDuckGo
-# /Yahoo/Brave/Google/Mojeek/Startpage scraping fallback with no paid key: pushing SEARCH_GAP below ~5s reliably made
-# every engine start refusing after just a handful of lookups in testing (not a guess - see docs/PRD-status.md).
-# A BRAVE_API_KEY or GOOGLE_CSE_KEY/GOOGLE_CSE_CX (see .env.example) removes this limit almost entirely, since those
-# are official APIs with their own generous per-day quota instead of being rate-limited by IP.
-MAX_DISCOVER = int(os.environ.get("DISCOVER_MAX_PER_RUN", "80"))    # places looked up per run
-SEARCH_GAP = float(os.environ.get("DISCOVER_GAP_SECONDS", "5.0"))   # seconds between lookups
+# Tunable without a code change (e.g. on Render: Environment tab). SEARCH_GAP paces BOTH "Search the web" queries
+# (_search, above) and the Places website lookup (_discover_websites, below) - they go through the same
+# scraper/search.py and hit the same free engines, so the same safe pacing applies to both.
+# Defaults are measured against the free DuckDuckGo/Yahoo/Brave/Google/Mojeek/Startpage scraping fallback with no
+# paid key: pushing the gap below ~5s reliably made every engine start refusing after just a handful of requests in
+# testing (not a guess - see docs/PRD-status.md and README.md "Scaling this up"). A BRAVE_API_KEY or
+# GOOGLE_CSE_KEY/GOOGLE_CSE_CX (see .env.example) removes this limit almost entirely: those are official APIs with
+# their own daily quota instead of being rate-limited by IP, so this pacing is skipped whenever they're used.
+MAX_DISCOVER = int(os.environ.get("DISCOVER_MAX_PER_RUN", "80"))      # places looked up per Places run
+SEARCH_GAP = float(os.environ.get("DISCOVER_GAP_SECONDS", "5.0"))     # seconds between searches with no paid key
 THROTTLE_WAIT = float(os.environ.get("DISCOVER_RETRY_WAIT", "25.0"))  # pause before the one retry on an empty result
+# With an official key, Brave/Google enforce their own (generous) per-day quota rather than guessing at scripted use
+# by IP, so the defensive gap above is unnecessary - a short, fixed pause is kept only to stay comfortably under
+# the still-real per-second rate limit most API tiers apply (not a documented number to rely on exactly; lower it
+# with DISCOVER_GAP_SECONDS once you know your plan's actual limit).
+KEYED_GAP = float(os.environ.get("DISCOVER_KEYED_GAP_SECONDS", "1.1"))
+
+
+def _current_gap() -> float:
+    if os.environ.get("BRAVE_API_KEY") or (os.environ.get("GOOGLE_CSE_KEY") and os.environ.get("GOOGLE_CSE_CX")):
+        return min(SEARCH_GAP, KEYED_GAP)  # never slower than the no-key pacing, only ever faster
+    return SEARCH_GAP
 
 
 def _discover_websites(job: Job, rows: list[dict]):
@@ -299,9 +314,10 @@ def _discover_websites(job: Job, rows: list[dict]):
     if not todo:
         return
     batch = todo[:MAX_DISCOVER]
+    gap = _current_gap()
     job.phase, job.total, job.done = "visit", len(batch), 0
     job.say(f"Looking for the websites of {len(batch)} places that the map doesn't give one for "
-            f"(about {SEARCH_GAP:g} seconds each, to keep the search engines happy)…")
+            f"(about {gap:g} seconds each{', using your search key' if gap < SEARCH_GAP else ', to keep the search engines happy'})…")
     seen: dict[str, str | None] = {}  # the same name (several branches) is searched once
     for r in batch:
         if job.cancelled.is_set():
@@ -311,7 +327,10 @@ def _discover_websites(job: Job, rows: list[dict]):
         if key not in seen:
             try:
                 url, n_hits = discover.find_website(r["Name"], r.get("Search Location", ""), job.say, r.get("_aliases", []))
-                if n_hits == 0:  # almost certainly throttled: wait, then try this one again
+                # Zero results is only treated as throttling (worth a wait-and-retry) on the free, unpaced-by-quota
+                # path. With an official key, a quota problem already surfaced as an error inside web_search() and
+                # fell through to the free engines, so zero hits here just means this place genuinely had none.
+                if n_hits == 0 and gap >= SEARCH_GAP:
                     job.activity = "The search engines are limiting requests, waiting a moment…"
                     job.say(f"  no search results for {r['Name']}; waiting {THROTTLE_WAIT:g} s and trying once more")
                     time.sleep(THROTTLE_WAIT)
@@ -328,7 +347,7 @@ def _discover_websites(job: Job, rows: list[dict]):
             except Exception as e:  # one failed lookup must not stop the rest
                 job.say(f"  lookup failed for {r['Name']}: {type(e).__name__}")
                 seen[key] = None
-            time.sleep(SEARCH_GAP)
+            time.sleep(gap)
         url = seen[key]
         if url:
             r["Website"], r["Website Source"] = url, "Found by web search"

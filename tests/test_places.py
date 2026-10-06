@@ -211,6 +211,40 @@ f.session.get = lambda *a, **k: Resp(b"<html><title>Hi</title><body>info@x.com</
 html, note = f.get_html("https://x.example/")
 ok("a normal page still reads fine", note == "ok" and "info@x.com" in html)
 
+# ---- meta-refresh redirects (the cvr.ac.in case: a real site, no JS involved) ----------------------------------
+pages = {
+    "https://x.example/": b'<html><head><meta http-equiv="Refresh" content="0; url=/home4/"></head></html>',
+    "https://x.example/home4/": b"<html><title>Real site</title><body>contact@x.example</body></html>",
+}
+f.session.get = lambda u, **k: Resp(pages[u])
+html, note = f.get_html("https://x.example/")
+ok("a meta-refresh redirect is followed to the real page", note == "ok" and "contact@x.example" in (html or ""), (html, note))
+
+loop_pages = {"https://x.example/": b'<html><head><meta http-equiv="Refresh" content="0; url=/b/"></head></html>',
+              "https://x.example/b/": b'<html><head><meta http-equiv="Refresh" content="0; url=/a/"></head></html>',
+              "https://x.example/a/": b'<html><head><meta http-equiv="Refresh" content="0; url=/b/"></head></html>'}
+f.session.get = lambda u, **k: Resp(loop_pages.get(u, b"<html></html>"))
+import time as _time
+t0 = _time.time()
+html, note = f.get_html("https://x.example/")
+ok("a redirect loop stops instead of hanging", _time.time() - t0 < 3, f"{_time.time() - t0:.1f}s")
+
+f.session.get = lambda *a, **k: Resp(b"<html><body>no redirect here</body></html>")
+html, note = f.get_html("https://x.example/")
+ok("a normal page with no meta-refresh is unaffected", note == "ok" and "no redirect" in html)
+
+# ---- phone extraction precision: a student roll number must never be read as a phone number ---------------------
+import scraper.extract as _extract_mod  # noqa: E402
+roll_number_text = ("2026 Batch Students - Maddi Srihitha - Mech - 160122736077, "
+                    "Kotte Haindhavi Rao-EEE- 160122734005 is placed in ITC with CTC:9LPA")
+found = [p for p in (_extract_mod._clean_phone(m.group(0)) for m in _extract_mod.PHONE_RE.finditer(roll_number_text)) if p]
+ok("a student roll number sitting in ordinary text is not read as a phone number (seen for real on cbit.ac.in)",
+   found == [], found)
+ok("but a genuine unseparated 10-digit mobile is still accepted", _extract_mod._clean_phone("9848012345") == "+91 98480 12345")
+ok("a genuine trunk-prefixed landline run is still accepted", _extract_mod._clean_phone("04023146077") is not None)
+ok("Unicode dashes/spaces in a phone number are normalised to plain ASCII",
+   _extract_mod.normalize_phone("040 – 67135100") == "040 - 67135100" and "–" not in _extract_mod.normalize_phone("040—67135100"))
+
 # ---- phone number formatting (for a customer-facing, scannable column) ---------------------------------------
 from scraper.extract import normalize_phone  # noqa: E402
 
@@ -313,6 +347,38 @@ ok("SEARCH_GAP reads from DISCOVER_GAP_SECONDS", jobs2.SEARCH_GAP == 1.5)
 ok("THROTTLE_WAIT reads from DISCOVER_RETRY_WAIT", jobs2.THROTTLE_WAIT == 9)
 for k in ("DISCOVER_MAX_PER_RUN", "DISCOVER_GAP_SECONDS", "DISCOVER_RETRY_WAIT"):
     del os.environ[k]
+jobs3 = importlib.reload(jobs)
+
+# ---- an official search key shortens the pacing automatically, on both "Search the web" and Places -------------
+for k in ("BRAVE_API_KEY", "GOOGLE_CSE_KEY", "GOOGLE_CSE_CX"):
+    os.environ.pop(k, None)
+ok("no key: full, defensive pacing", jobs3._current_gap() == jobs3.SEARCH_GAP)
+os.environ["BRAVE_API_KEY"] = "x"
+ok("a Brave key: short, quota-based pacing", jobs3._current_gap() == jobs3.KEYED_GAP and jobs3._current_gap() < jobs3.SEARCH_GAP)
+del os.environ["BRAVE_API_KEY"]
+ok("half of the Google CSE pair alone changes nothing (both key and engine id are required)",
+   (os.environ.__setitem__("GOOGLE_CSE_KEY", "x"), jobs3._current_gap() == jobs3.SEARCH_GAP, os.environ.pop("GOOGLE_CSE_KEY"))[1])
+os.environ["GOOGLE_CSE_KEY"], os.environ["GOOGLE_CSE_CX"] = "x", "y"
+ok("a full Google CSE pair: short pacing too", jobs3._current_gap() == jobs3.KEYED_GAP)
+del os.environ["GOOGLE_CSE_KEY"], os.environ["GOOGLE_CSE_CX"]
+
+class FakeJob:
+    def __init__(self):
+        self.cancelled = type("E", (), {"is_set": staticmethod(lambda: False)})
+        self.log, self.phase, self.total, self.done, self.activity = [], "", 0, 0, ""
+    def say(self, m): self.log.append(m)
+
+jobs3.discover = jobs3.discover  # keep the already-patched discover module from earlier in this file
+jobs3.discover.find_website = lambda n, w, say=None, aliases=(): (None, 0)
+jobs3.time.sleep = lambda s: None
+j = FakeJob()
+jobs3._discover_websites(j, [{"Name": "A College", "Website": "", "Search Location": "X"}])
+ok("with no key, zero hits still triggers the throttle wait-and-retry", any("waiting" in m for m in j.log))
+os.environ["BRAVE_API_KEY"] = "x"
+j = FakeJob()
+jobs3._discover_websites(j, [{"Name": "A College", "Website": "", "Search Location": "X"}])
+ok("with a key, zero hits is taken at face value - no pointless wait-and-retry", not any("waiting" in m for m in j.log))
+del os.environ["BRAVE_API_KEY"]
 importlib.reload(jobs)  # back to defaults for anything that runs after this file
 
 print(f"\n{len(failures)} failure(s)" if failures else "\nAll tests passed")

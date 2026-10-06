@@ -46,7 +46,8 @@ Environment variables (set them in the Render dashboard, never in git):
 | `SHARE_MAX_TOTAL_MB` | Optional. Total space for shared copies in the database (default 200). |
 | `BRAVE_API_KEY` | Optional, but recommended. Free tier 2,000 queries/month. Free search engines often block cloud servers. |
 | `GOOGLE_CSE_KEY`, `GOOGLE_CSE_CX` | Optional. A second, independent free search option (100 queries/day), tried after Brave and before the free engines. |
-| `DISCOVER_MAX_PER_RUN`, `DISCOVER_GAP_SECONDS`, `DISCOVER_RETRY_WAIT` | Optional. Tune how hard **Places** searches for each place's own website. See *Finding places with their contacts* below. |
+| `DISCOVER_MAX_PER_RUN`, `DISCOVER_GAP_SECONDS`, `DISCOVER_RETRY_WAIT`, `DISCOVER_KEYED_GAP_SECONDS` | Optional. Tune how hard **Places** and **Search the web** pace requests to search engines. See *Scaling up* below. |
+| `HTTP_PROXY`, `HTTPS_PROXY`, `DDGS_PROXY` | Optional. Route outgoing requests through your own proxy (see *Scaling up*). |
 
 **Free Render PostgreSQL expires 30 days after it is created** (with a short grace period to upgrade). Because it only holds users and saved AI keys, losing it is recoverable: the admin account is recreated from `APP_USER` / `APP_PASSWORD`, and people re-add their AI keys. For a database that doesn't expire, use a paid Render database or a free external PostgreSQL such as Neon or Supabase, and put its URL in `DATABASE_URL`.
 
@@ -91,6 +92,26 @@ How it works:
 
 - If a place shows no contacts, its website either wasn't found or doesn't publish them as text — not every institution does.
 - For a wider list, search a larger or neighbouring area, or use **Search the web** with a query such as `engineering colleges in Bachupally Hyderabad contact email phone`.
+
+## Scaling "Search the web" to hundreds of searches
+
+For broad coverage ("100+ websites"), **New run → Search the web** has a **Generate many searches at once** panel: list the areas/items you want (one per line) and one pattern using `{area}`, e.g. `engineering colleges in {area} contact email phone` — it expands to one search per area and adds them all in one click. Up to 300 searches can be queued in a single run.
+
+Throughput is governed by the same measured search-engine pacing as Places (see the table above), shared by both modes through `_current_gap()` in [scraper/jobs.py](scraper/jobs.py):
+
+| Setup | Pace between searches | Why |
+|---|---|---|
+| No key | 5 seconds (tune with `DISCOVER_GAP_SECONDS`) | Same measured limit as Places: faster than this made every free engine start refusing within a handful of requests. |
+| `BRAVE_API_KEY` or (`GOOGLE_CSE_KEY` + `GOOGLE_CSE_CX`) set | 1.1 seconds (`DISCOVER_KEYED_GAP_SECONDS`) | An official key has its own quota instead of being IP-throttled, so the app paces much faster automatically. |
+
+**What Apify does that this app doesn't, and why:** Apify's scale comes from infrastructure this app deliberately doesn't build, because the free/low-cost equivalent either doesn't exist or isn't safe to fake:
+
+| Apify | This app | Free equivalent |
+|---|---|---|
+| Managed rotating proxy pools (residential/datacenter) so each request looks like a different visitor | None built in | Bring your own proxy — `HTTP_PROXY`/`HTTPS_PROXY` (page fetching) and `DDGS_PROXY` (free search engines) are honoured automatically with zero code changes if you already pay for a proxy provider. There's no free proxy pool worth using; free/public proxies are unreliable and often unsafe to route data through. |
+| Managed headless-browser rendering (Puppeteer/Playwright) for JS-heavy sites, at scale | Plain HTTP fetch + meta-refresh redirect following | Tested against 8 real target sites: 6 worked immediately, 1 needed meta-refresh handling (now fixed), 1 was an unrelated DNS failure — genuine JS-rendering need wasn't found in practice here. Headless rendering is real infra cost (CPU, memory, far lower throughput) not currently justified by evidence, so it isn't included. |
+| A RequestQueue + Dataset architecture and per-domain concurrency, run on Apify's cloud workers | A single background job per run, in server memory, paced sequentially | Good enough for the volumes free search engines allow anyway (see table); concurrency wouldn't raise the real ceiling, which is engine-side throttling, not this app's own speed. |
+| Pay-per-result pricing that buys you all of the above | Free tier search APIs (Brave 2,000/month, Google CSE 100/day) + free scraping fallback | Honest ceiling: roughly 170 keyed lookups/day with no pacing delay, more beyond that at the paced free-engine rate. For 10,000+ rows this means running in batches over days, same as Places — there is no free setting that removes the engines' own rate limits. |
 
 ## Sending data to customers
 

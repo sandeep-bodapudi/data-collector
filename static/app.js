@@ -306,7 +306,14 @@ function TagInput(box, { placeholder = "", disabled = false, onChange = () => {}
     input.placeholder = items.length ? "Add another…" : placeholder;
     if (!silent) onChange(items);
   };
-  const add = (v) => { v = v.trim(); if (v && !items.includes(v)) { items.push(v); render(); } };
+  // One render for the whole batch - adding a pasted or generated list of hundreds one-by-one would otherwise
+  // rebuild the entire tag list after each single item (quadratic, and visibly janky at "search 100+ areas" scale).
+  const addMany = (list) => {
+    let changed = false;
+    for (let v of list) { v = v.trim(); if (v && !items.includes(v)) { items.push(v); changed = true; } }
+    if (changed) render();
+  };
+  const add = (v) => addMany([v]);
   input.addEventListener("keydown", (e) => {
     if (e.key === "Enter") { e.preventDefault(); add(input.value); input.value = ""; }
     else if (e.key === "Backspace" && !input.value && items.length) { items.pop(); render(); }
@@ -314,11 +321,11 @@ function TagInput(box, { placeholder = "", disabled = false, onChange = () => {}
   input.addEventListener("blur", () => { if (input.value.trim()) { add(input.value); input.value = ""; } });
   input.addEventListener("paste", (e) => {
     const text = e.clipboardData.getData("text");
-    if (/\r?\n/.test(text)) { e.preventDefault(); text.split(/\r?\n/).forEach(add); }
+    if (/\r?\n/.test(text)) { e.preventDefault(); addMany(text.split(/\r?\n/)); }
   });
   box.addEventListener("click", () => input.focus());
   render(true);
-  return { items, add, input, flush() { if (input.value.trim()) { add(input.value); input.value = ""; } } };
+  return { items, add, addMany, input, flush() { if (input.value.trim()) { add(input.value); input.value = ""; } } };
 }
 
 /* ---------------------------------------------------------------- shell: theme, nav, router */
@@ -515,6 +522,19 @@ async function viewNewRun(mode) {
         <div class="chips"><small>Try</small>
           ${["CBSE schools in Vijayawada contact", "real estate agents in Pune email", "textile exporters in Tiruppur", "IT companies in Hyderabad contact"].map((x) => `<button type="button" class="chip" data-q="${esc(x)}">${esc(x)}</button>`).join("")}
         </div>
+        <details class="more mt-16" id="batch-gen">
+          <summary><b class="small">${icon("plus", 14)} Generate many searches at once</b><span class="chev">${icon("chev", 16)}</span></summary>
+          <div class="mt-8">
+            <p class="hint" style="margin-top:0">For broad coverage (e.g. "100+ websites"), list the areas you want and one search pattern. Each area becomes its own search.</p>
+            <div class="grid grid-2">
+              <div class="field"><label class="label" for="batch-areas">Areas / items <span class="opt">(one per line)</span></label>
+                <textarea class="input" id="batch-areas" rows="5" placeholder="Bachupally, Hyderabad&#10;Kukatpally, Hyderabad&#10;Ameerpet, Hyderabad&#10;Miyapur, Hyderabad"></textarea></div>
+              <div class="field"><label class="label" for="batch-template">Search pattern <span class="opt">(use <code>{area}</code>)</span></label>
+                <textarea class="input" id="batch-template" rows="5">engineering colleges in {area} contact email phone</textarea></div>
+            </div>
+            <div class="row-flex"><button type="button" class="btn btn-primary btn-sm" id="batch-add">Add these searches</button><span class="muted small" id="batch-count"></span></div>
+          </div>
+        </details>
         <div class="field mt-24"><label class="label">Search on</label>
           <div class="option-grid">${PLATFORMS.map(([val, label, ic]) => `
             <label class="option"><input type="checkbox" name="platform" value="${val}" ${val === "web" ? "checked" : ""}><span class="o-ico">${icon(ic)}</span><span><b>${label}</b><small>${val === "web" ? "All public websites" : "Public search results"}</small></span><span class="box"></span></label>`).join("")}
@@ -626,6 +646,25 @@ async function viewNewRun(mode) {
   if (mode === "web") {
     queries = TagInput($("#queries"), { placeholder: "e.g. software companies in Hyderabad contact email", onChange: update });
     $$("[data-q]", v).forEach((b) => b.onclick = () => queries.add(b.dataset.q));
+    const batchExpand = () => {
+      const areas = $("#batch-areas").value.split("\n").map((x) => x.trim()).filter(Boolean);
+      const tpl = $("#batch-template").value.trim();
+      const made = tpl.includes("{area}") ? areas.map((a) => tpl.replace(/\{area\}/g, a)) : [];
+      return { areas, made };
+    };
+    const batchSync = () => {
+      const { areas, made } = batchExpand();
+      $("#batch-count").textContent = !areas.length ? "" : !$("#batch-template").value.includes("{area}")
+        ? "Add {area} to the pattern so each line becomes its own search." : `= ${fmtNum(made.length)} search${made.length === 1 ? "" : "es"}`;
+    };
+    $("#batch-areas").oninput = batchSync; $("#batch-template").oninput = batchSync;
+    $("#batch-add").onclick = () => {
+      const { made } = batchExpand();
+      if (!made.length) return toast("Add at least one area, and keep {area} in the pattern.", "err");
+      queries.addMany(made);
+      $("#batch-areas").value = ""; $("#batch-count").textContent = "";
+      toast(`Added ${fmtNum(made.length)} search${made.length === 1 ? "" : "es"}`, "ok");
+    };
     custom = TagInput($("#custom"), { placeholder: aiReady ? "e.g. founder name, services offered" : "Add your AI key in Settings first", disabled: !aiReady, onChange: update });
     $("#max_results").oninput = () => { $("#max_out").textContent = $("#max_results").value; update(); };
     $$("#require button", v).forEach((b) => b.onclick = () => { $$("#require button", v).forEach((x) => x.classList.remove("active")); b.classList.add("active"); state.require = b.dataset.v; });
