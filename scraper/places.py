@@ -1,4 +1,5 @@
 """Place listings (temples, hospitals, schools, ...) from OpenStreetMap - free, open data, no login."""
+import re
 import time
 
 import requests
@@ -34,7 +35,11 @@ CATEGORIES = {
     "Colleges & universities": ['[amenity=college]', '[amenity=university]'],
     # Colleges whose name says engineering or technology (plus the well-known Hyderabad short names, which the map
     # often uses on its own, e.g. "griet college"). Junior colleges and schools are left out.
-    "Engineering colleges": ['[amenity~"^(college|university)$"][name~"engineer|tech|polytechnic|jntu|iiit|vjiet|griet|bvrit|cbit|mgit",i]'],
+    # Many engineering colleges have no "engineering" in the map name (e.g. "CMR College", "Malla Reddy Institute"), so the
+    # map query is wide (anything called a college/institute/university) and ENGINEERING_NOT drops the clearly
+    # non-engineering ones afterwards.
+    "Engineering colleges": ['[amenity~"^(college|university)$"][name~"engineer|tech|polytechnic|jntu|iiit|vjiet|griet|bvrit|cbit|mgit|college|institute|university|vidya|iit|nit",i]',
+                             '[office=educational_institution][name~"engineer|tech|college|institute|university",i]'],
     "Restaurants": ['[amenity=restaurant]'],
     "Cafes": ['[amenity=cafe]'],
     "Hotels": ['[tourism=hotel]', '[tourism=guest_house]'],
@@ -50,6 +55,14 @@ CATEGORIES = {
     "Government offices": ['[office=government]', '[amenity=townhall]'],
 }
 
+# Names that say it is not an engineering college (unless the name also says engineering/technology).
+ENGINEERING_NOT = re.compile(r"junior|\bjr\b|intermediate|degree college|pharm|medical|dental|nursing|\blaw\b|b\.? ?ed\b|ayurved|homeo|"
+                             r"agricultur|veterinar|physio|\bschool\b|commerce|arts and|hotel management|\bmba\b|\bpg college|coaching|tutorial", re.I)
+ENGINEERING_YES = re.compile(r"engineer|technolog|polytechnic|\btech\b|jntu|iiit|vjiet|griet|bvrit|cbit|mgit", re.I)
+
+# What the sheet shows: only real, useful data. Map coordinates, opening hours, internal notes and how each
+# value was found go to the run log, not the sheet.
+OUTPUT_COLUMNS = ["Name", "Phone", "Email", "Website", "Address", "Google Maps Link"]
 PLACE_COLUMNS = ["Name", "Category", "Address", "City", "State", "Postcode", "Phone", "Email",
                  "Website", "Opening Hours", "Latitude", "Longitude", "Google Maps Link", "Other Details"]
 
@@ -223,6 +236,9 @@ def search_places(category: str, location: str, name_filter: str = "", limit: in
     rows, seen = [], set()
     for el in elements:
         tags = el.get("tags", {})
+        nm = tags.get("name", "")
+        if category == "Engineering colleges" and ENGINEERING_NOT.search(nm) and not ENGINEERING_YES.search(nm):
+            continue
         lat = el.get("lat") or el.get("center", {}).get("lat")
         lon = el.get("lon") or el.get("center", {}).get("lon")
         key = (tags.get("name", "").lower(), round(lat or 0, 3), round(lon or 0, 3))
@@ -244,6 +260,7 @@ def search_places(category: str, location: str, name_filter: str = "", limit: in
             "Longitude": lon,
             "Google Maps Link": f"https://www.google.com/maps?q={lat},{lon}" if lat else "",
             "Other Details": _other_details(tags),
+            "_aliases": [a.strip() for k in ("short_name", "alt_name", "old_name") for a in tags.get(k, "").split(";") if a.strip()],
         })
     if not rows and info:
         info("  Nothing in the map data for this category here. Try the area name on its own, a bigger nearby area, "

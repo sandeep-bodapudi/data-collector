@@ -17,6 +17,7 @@ STANDARD_FIELDS = {
     "text_snippet": "Page Text (first 500 chars)",
 }
 
+PIN_RE = re.compile(r"(?<!\d)[1-9]\d{2}\s?\d{3}(?!\d)")  # Indian PIN code, e.g. 500090 or 500 090
 EMAIL_RE = re.compile(r"[A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+\.[A-Za-z]{2,24}")
 # Obfuscated emails: "info [at] school [dot] edu", "info(at)school.edu", "info AT school DOT edu".
 # Only explicit markers count, so ordinary text like "Great place.Visit" is never read as an email.
@@ -277,10 +278,15 @@ def _extract_address(soup, text: str) -> str:
             return addr[:400]
 
     # 4. Footer: look for divs/sections labelled "address" or containing pin patterns
-    for el in soup.find_all(["div", "p", "section", "footer", "span"], class_=re.compile(r"address|location|contact", re.I)):
+    best = ""
+    for el in soup.find_all(["div", "p", "section", "footer", "span", "li"], class_=re.compile(r"address|location|contact", re.I)):
         addr = el.get_text(" ", strip=True)
-        if len(addr) > 15:
-            return addr[:400]
+        # A whole "contact" section also holds phones, emails and form labels. Only short text that looks like an address
+        # (has a 6-digit PIN code) counts; the shortest such element is the address itself.
+        if 15 < len(addr) <= 300 and PIN_RE.search(addr) and (not best or len(addr) < len(best)):
+            best = addr
+    if best:
+        return best[:400]
 
     # 5. Text pattern: "Address:" label
     for pattern in [
@@ -308,6 +314,33 @@ def candidate_contact_urls(base_url: str, found_contact: str) -> list[str]:
     return urls[:6]  # never check more than 6 sub-pages per site
 
 
+_TITLE_SPLIT = re.compile(r"\s*[|\u2013\u2014\u00bb:]\s*|\s+-\s+")
+_ORG_WORDS = re.compile(r"college|institute|university|school|academy|engineering|technolog|hospital|clinic|centre|center", re.I)
+_PAGE_WORDS = re.compile(r"^(home|homepage|welcome|welcome to|index|official website|official site|contact( us)?|about( us)?)$", re.I)
+
+
+def clean_name(title: str) -> str:
+    """The organisation's name from a page title: "Contact Us | GRIET - Gokaraju Rangaraju Institute" -> the part that
+    looks like a name (mentions college/institute/...), else the first part that isn't just "Home" or "Contact"."""
+    parts = [re.sub(r"^(welcome to|home of)\s+", "", p.strip(), flags=re.I) for p in _TITLE_SPLIT.split(title or "")]
+    parts = [p for p in parts if p and not _PAGE_WORDS.match(p)]
+    if not parts:
+        return (title or "").strip()
+    named = [p for p in parts if _ORG_WORDS.search(p)]
+    return max(named, key=len)[:150] if named else parts[0][:150]
+
+
+def _site_name(soup, title: str) -> str:
+    for obj in _jsonld_objects(soup):  # the site's own statement of its name wins
+        if obj.get("name") and isinstance(obj["name"], str) and any(
+                t in str(obj.get("@type", "")) for t in ("Organization", "School", "University", "College", "Institution", "LocalBusiness")):
+            return obj["name"].strip()[:150]
+    og = soup.find("meta", attrs={"property": "og:site_name"})
+    if og and og.get("content", "").strip():
+        return og["content"].strip()[:150]
+    return clean_name(title)
+
+
 def parse(html: str, url: str) -> dict:
     """Extract every standard field from one page. Returns lists for multi-value fields."""
     soup = BeautifulSoup(html, "lxml")
@@ -319,6 +352,7 @@ def parse(html: str, url: str) -> dict:
     if meta and meta.get("content"):
         out["description"] = meta["content"].strip()
 
+    out["name"] = _site_name(soup, out["title"])
     emails, phones, social = [], [], []
     contact_page = ""
 

@@ -381,5 +381,43 @@ ok("with a key, zero hits is taken at face value - no pointless wait-and-retry",
 del os.environ["BRAVE_API_KEY"]
 importlib.reload(jobs)  # back to defaults for anything that runs after this file
 
+# ---- search-free website guessing, contact cleanup, engineering filter ----------------------------------
+ok("initials of the full name are a candidate", "griet" in discover.guess_stems("Gokaraju Rangaraju Institute of Engineering and Technology"))
+ok("a distinctive word is a candidate", "bvrit" in discover.guess_stems("BVRIT Hyderabad College of Engineering for Women"))
+ok("an alias adds candidates", "vjiet" in discover.guess_stems("VNR college", ["VNR Vignana Jyothi Institute of Engineering and Technology"]) or "vnrvjiet" in discover.guess_stems("vnr vjiet college"))
+ok("a college page naming the college is verified", discover.verify_page("GRIET Gokaraju Rangaraju Institute of Engineering and Technology, Bachupally", "GRIET College", ["Gokaraju Rangaraju Institute of Engineering and Technology"], "Bachupally, Hyderabad"))
+ok("an unrelated page is rejected", not discover.verify_page("Best travel deals and hotels in Goa", "GRIET College", [], "Bachupally"))
+ok("matching initials alone need the city too", not discover.verify_page("CBIT college of nursing, Kerala", "Chaitanya Bharathi Institute of Technology", [], "Hyderabad")
+   and discover.verify_page("CBIT engineering college, Gandipet Hyderabad", "Chaitanya Bharathi Institute of Technology", [], "Hyderabad"))
+
+class FakeFetcher:
+    pages = {"https://griet.ac.in/": "<html><title>GRIET</title><body>Gokaraju Rangaraju Institute of Engineering and Technology, Hyderabad</body></html>",
+             "https://griet.in/": "<html><body>Shoe shop</body></html>"}
+    def get_html(self, url):
+        return (self.pages[url], "ok") if url in self.pages else (None, "HTTP 404")
+exists = {"griet.in", "griet.ac.in"}
+def fake_resolve(h):
+    if h not in exists: raise OSError
+found = discover.guess_website(FakeFetcher(), "Gokaraju Rangaraju Institute of Engineering and Technology", "Bachupally, Hyderabad", [], fake_resolve)
+ok("the right address is found without any search engine", found == "https://griet.ac.in/", str(found))
+ok("nothing is guessed when no address resolves", discover.guess_website(FakeFetcher(), "Zzyzx Institute of Technology", "Hyderabad", [], lambda h: (_ for _ in ()).throw(OSError())) is None)
+
+ok("own-domain emails come first, third parties are dropped",
+   jobs._own_emails(["design@webagency.com", "info@griet.ac.in", "x@gmail.com"], "https://griet.ac.in/") == ["info@griet.ac.in", "x@gmail.com"])
+
+captured = {}
+places.geocode = lambda loc: {"kind": "area", "osm_type": "relation", "osm_id": 1, "label": "x"}
+places._overpass = lambda q, notify=None: [
+    {"type": "way", "center": {"lat": 17.5, "lon": 78.3}, "tags": {"name": "CMR College"}},
+    {"type": "way", "center": {"lat": 17.6, "lon": 78.3}, "tags": {"name": "Akshara Junior College"}},
+    {"type": "way", "center": {"lat": 17.7, "lon": 78.3}, "tags": {"name": "Sri Medical College"}},
+    {"type": "way", "center": {"lat": 17.8, "lon": 78.3}, "tags": {"name": "Junior College of Engineering", "short_name": "JCE"}}]
+got = places.search_places("Engineering colleges", "X", "", 100)
+ok("engineering list keeps colleges without 'engineering' in the name and drops junior/medical ones",
+   [r["Name"] for r in got] == ["CMR College", "Junior College of Engineering"], str([r["Name"] for r in got]))
+ok("map short names become aliases for the website lookup", got[1]["_aliases"] == ["JCE"])
+ok("the sheet has only real data columns", places.OUTPUT_COLUMNS == ["Name", "Phone", "Email", "Website", "Address", "Google Maps Link"])
+
+
 print(f"\n{len(failures)} failure(s)" if failures else "\nAll tests passed")
 sys.exit(1 if failures else 0)
