@@ -24,6 +24,12 @@ GOOGLE_CSE_URL = "https://www.googleapis.com/customsearch/v1"
 # single engine start refusing (see scraper/jobs.py's _current_gap/SEARCH_GAP, measured for *between* searches);
 # trying every free engine back-to-back within one search is the same risk, just compressed into a few seconds.
 FREE_ENGINE_GAP = float(os.environ.get("FREE_ENGINE_GAP_SECONDS", "1.5"))
+# ddgs's own default is 5s. Real cause of "each lookup takes up to a minute": when an engine is being slow or
+# half-blocking rather than cleanly refusing, every one of the up to 16 engine attempts one lookup can make (see
+# discover.find_website) sits for the FULL timeout before giving up and trying the next - 16 x 5s is most of a
+# minute on its own, before any of the deliberate pacing gaps are even added. Trimmed to a still-generous 4s;
+# a genuinely working engine essentially never needs the last second of a 5s budget to answer.
+FREE_ENGINE_TIMEOUT = float(os.environ.get("FREE_ENGINE_TIMEOUT_SECONDS", "4"))
 FREE_ENGINES = ["duckduckgo", "yahoo", "brave", "google", "mojeek", "startpage"]
 
 
@@ -91,7 +97,7 @@ def web_search(query: str, region: str, max_results: int, say, engines=None) -> 
     # So: keep querying further engines and merge their results (by URL) until max_results is reached or every
     # engine has been tried.
     merged, seen_href, failed, used = [], set(), [], []
-    with DDGS() as ddgs:
+    with DDGS(timeout=FREE_ENGINE_TIMEOUT) as ddgs:
         for i, engine in enumerate(engines or FREE_ENGINES):
             remaining = max_results - len(merged)
             if remaining <= 0:

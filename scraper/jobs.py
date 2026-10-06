@@ -613,7 +613,7 @@ def _discover_websites(job: Job, rows: list[dict]):
         job.activity = f"Looking for the website of {r['Name']}…"
         if key not in seen:
             try:
-                url, n_hits = discover.find_website(r["Name"], r.get("Search Location", ""), job.say, r.get("_aliases", []))
+                url, n_hits = discover.find_website(r["Name"], r.get("Search Location", ""), job.say, r.get("_aliases", []), gap)
                 # Zero results is only treated as throttling (worth a wait-and-retry) on the free, unpaced-by-quota
                 # path. With an official key, a quota problem already surfaced as an error inside web_search() and
                 # fell through to the free engines, so zero hits here just means this place genuinely had none.
@@ -621,7 +621,7 @@ def _discover_websites(job: Job, rows: list[dict]):
                     job.activity = "The search engines are limiting requests, waiting a moment…"
                     job.say(f"  no search results for {r['Name']}; waiting {THROTTLE_WAIT:g} s and trying once more")
                     time.sleep(THROTTLE_WAIT)
-                    url, n_hits = discover.find_website(r["Name"], r.get("Search Location", ""), job.say, r.get("_aliases", []))
+                    url, n_hits = discover.find_website(r["Name"], r.get("Search Location", ""), job.say, r.get("_aliases", []), gap)
                     if n_hits == 0:
                         job.say("  The search engines are still limiting requests, so the remaining websites were not "
                                 "looked up. Try again later, or ask your admin to add a Brave Search key.")

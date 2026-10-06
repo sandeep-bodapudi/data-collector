@@ -186,7 +186,7 @@ def places_rows(*names):
     return [{"Name": n, "Website": "", "Search Location": "Bachupally, Hyderabad"} for n in names]
 
 lookups = []
-def fake_find(name, where, say=None, aliases=()):
+def fake_find(name, where, say=None, aliases=(), gap=None):
     lookups.append(name)
     return ("https://" + name.split()[0].lower() + ".ac.in/", 5)
 discover.find_website = fake_find
@@ -196,25 +196,25 @@ ok("websites found by search are filled in and labelled", rws[0]["Website"] == "
 ok("the same name is only searched once", lookups == ["griet college", "BVRIT College"] and rws[2]["Website"] == rws[0]["Website"])
 
 outcomes = iter([(None, 0), (None, 0)])
-discover.find_website = lambda n, w, say=None, aliases=(): next(outcomes)
+discover.find_website = lambda n, w, say=None, aliases=(), gap=None: next(outcomes)
 j, rws = Job(), places_rows("A College", "B College")
 jobs._discover_websites(j, rws)
 ok("when searches keep coming back empty it waits once, then stops and says why",
    any("waiting" in m for m in j.log) and any("still limiting" in m for m in j.log) and not rws[1].get("Website"))
 
 outcomes = iter([(None, 0), ("https://a.ac.in/", 4), (None, 3)])
-discover.find_website = lambda n, w, say=None, aliases=(): next(outcomes)
+discover.find_website = lambda n, w, say=None, aliases=(), gap=None: next(outcomes)
 j, rws = Job(), places_rows("A College", "B College")
 jobs._discover_websites(j, rws)
 ok("a throttled lookup is retried and then succeeds", rws[0].get("Website") == "https://a.ac.in/" and "no official website found" in " ".join(j.log))
 
-def blocked(n, w, say=None, aliases=()):
+def blocked(n, w, say=None, aliases=(), gap=None):
     raise discover.SearchBlocked("blocked")
 discover.find_website = blocked
 j = Job(); jobs._discover_websites(j, places_rows("A College"))
 ok("blocked search stops cleanly with advice", any("refused" in m and "Brave" in m for m in j.log))
 
-discover.find_website = lambda n, w, say=None, aliases=(): (None, 3)
+discover.find_website = lambda n, w, say=None, aliases=(), gap=None: (None, 3)
 jobs.MAX_DISCOVER = 2
 j = Job(); jobs._discover_websites(j, places_rows("A College", "B College", "C College"))
 ok("only a limited number of places are looked up per run", any("first 2 of 3" in m for m in j.log))
@@ -372,6 +372,8 @@ for k in ("BRAVE_API_KEY", "GOOGLE_CSE_KEY", "GOOGLE_CSE_CX"):
 
 class FakeDDGS:
     calls = []
+    def __init__(self, *a, **kw):
+        pass
     def __enter__(self):
         return self
     def __exit__(self, *a):
@@ -433,7 +435,7 @@ class FakeJob:
     def say(self, m): self.log.append(m)
 
 jobs3.discover = jobs3.discover  # keep the already-patched discover module from earlier in this file
-jobs3.discover.find_website = lambda n, w, say=None, aliases=(): (None, 0)
+jobs3.discover.find_website = lambda n, w, say=None, aliases=(), gap=None: (None, 0)
 jobs3.time.sleep = lambda s: None
 j = FakeJob()
 jobs3._discover_websites(j, [{"Name": "A College", "Website": "", "Search Location": "X"}])
@@ -444,6 +446,22 @@ jobs3._discover_websites(j, [{"Name": "A College", "Website": "", "Search Locati
 ok("with a key, zero hits is taken at face value - no pointless wait-and-retry", not any("waiting" in m for m in j.log))
 del os.environ["BRAVE_API_KEY"]
 importlib.reload(jobs)  # back to defaults for anything that runs after this file
+
+# ---- find_website's own internal pacing is also key-aware, not a flat 5s regardless of search speed -------------
+# Real complaint: "each website takes up to 1 minute" - find_website() can make up to 3 of its own internal
+# queries, and was always pausing the full free-engine-safe QUERY_GAP (5s) between them even when an official key
+# made every query underneath fast and unthrottled. jobs.py now passes its own key-aware gap through.
+importlib.reload(discover)  # the previous test left find_website mocked out - get the real one back
+gaps_seen = []
+real_sleep, real_web_search = discover.time.sleep, discover.web_search
+discover.time.sleep = lambda s: gaps_seen.append(s)
+discover.web_search = lambda q, region, n, say, *a: [{"href": "https://unrelated-directory.example/", "title": "x", "body": ""}]
+discover.find_website("Some College", "Hyderabad", lambda m: None, aliases=["Other Name"], gap=1.1)
+ok("a short, key-aware gap is honoured between find_website's own internal queries",
+   gaps_seen == [1.1, 1.1], gaps_seen)
+discover.time.sleep, discover.web_search = real_sleep, real_web_search
+ok("FREE_ENGINE_TIMEOUT_SECONDS is a real, read env var (not just a hardcoded 5s default)",
+   search_mod.FREE_ENGINE_TIMEOUT == float(os.environ.get("FREE_ENGINE_TIMEOUT_SECONDS", "4")))
 
 # ---- search-free website guessing, contact cleanup, engineering filter ----------------------------------
 ok("initials of the full name are a candidate", "griet" in discover.guess_stems("Gokaraju Rangaraju Institute of Engineering and Technology"))
@@ -621,7 +639,7 @@ jobs.web_search = lambda q, region, n, say: [
 # everywhere else in this file) since enrichment itself is covered thoroughly in its own tests below.
 real_guess4, real_find4 = discover.guess_website, discover.find_website
 discover.guess_website = lambda fetcher, name, area="", aliases=(): None
-discover.find_website = lambda name, where, say=None, aliases=(): (None, 2)
+discover.find_website = lambda name, where, say=None, aliases=(), gap=None: (None, 2)
 j4 = jobs.Job({"queries": ["engineering colleges in Hyderabad"], "platforms": ["web"], "max_results": 50,
                "one_per_site": False, "region": "in-en", "fields": ["address"], "custom_fields": [], "require": "",
                "follow_contact": False, "ai": {}})
@@ -658,7 +676,7 @@ real_guess, real_find = discover.guess_website, discover.find_website
 # test stays offline, as promised at the top of this file - "nothing is guessed" is exercised directly elsewhere
 # (see "nothing is guessed when no address resolves" above). Only the paced web-search fallback is exercised here.
 discover.guess_website = lambda fetcher, name, area="", aliases=(): None
-discover.find_website = lambda name, where, say=None, aliases=(): (("https://aarmahaveer.ac.in/", 5) if "AAR" in name.upper() else (None, 3))
+discover.find_website = lambda name, where, say=None, aliases=(), gap=None: (("https://aarmahaveer.ac.in/", 5) if "AAR" in name.upper() else (None, 3))
 j7 = jobs.Job({"queries": [], "seed": "telangana_engineering_colleges", "platforms": ["web"], "max_results": 50,
                "one_per_site": False, "region": "in-en", "fields": ["address", "emails", "phones"], "custom_fields": [],
                "require": "", "follow_contact": False, "ai": {}})
@@ -681,7 +699,7 @@ class FakeFetcher4:
             return "<html><title>GRIET</title><body>info@griet.ac.in 040-23146077</body></html>", "ok"
         return None, "not found"
 discover.guess_website = lambda fetcher, name, area="", aliases=(): ("https://griet.ac.in/" if "GRIET" in name.upper() else None)
-discover.find_website = lambda name, where, say=None, aliases=(): (None, 2)
+discover.find_website = lambda name, where, say=None, aliases=(), gap=None: (None, 2)
 
 def run_enrich(rows, columns, fields=("emails", "phones")):
     jobs.Fetcher = lambda spec: FakeFetcher4()

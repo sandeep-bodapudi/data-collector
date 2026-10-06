@@ -172,20 +172,25 @@ QUERY_GAP = 5.0  # seconds between the tries for one place (search engines limit
 OTHER_ENGINES = ("startpage", "mojeek", "google", "duckduckgo")
 
 
-def find_website(name: str, where: str, say=lambda msg: None, aliases=()) -> tuple[str | None, int]:
+def find_website(name: str, where: str, say=lambda msg: None, aliases=(), gap: float = QUERY_GAP) -> tuple[str | None, int]:
     """Search the web for the place's official site. Returns (website or None, results of the first search).
 
     Tries up to three searches, pausing between them: "<name> <area>", then the other names the map gave the same place,
     then "<name>" alone. Zero results from the first search for a real place name usually means the search engines are
     limiting us, not that it has no site, so the caller can wait and retry.
-    Raises SearchBlocked when every search engine refuses outright."""
+    Raises SearchBlocked when every search engine refuses outright.
+
+    `gap` defaults to the fixed, free-engine-safe QUERY_GAP, but callers that already know an official Brave/Google
+    key is configured (jobs.py's _current_gap()) pass a much shorter one - the 5s pause between THIS function's own
+    up to 3 queries was being applied even when every query underneath was already a fast, unthrottled official API
+    call, for no reason."""
     area = where.split(",")[0].strip()
     queries = [f"{name} {area} official website"] + [f"{a} official website" for a in list(aliases)[:2]] + [f"{name} official website"]
     first_hits = 0
     tries = list(dict.fromkeys(queries))[:3]
     for i, q in enumerate(tries):
         if i:
-            time.sleep(QUERY_GAP)
+            time.sleep(gap)
         last = i == len(tries) - 1 and i > 0
         hits = web_search(q, "in-en", 8, say, OTHER_ENGINES) if last else web_search(q, "in-en", 8, say)
         if i == 0:
