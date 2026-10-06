@@ -9,6 +9,7 @@ const $$ = (sel, root = document) => [...root.querySelectorAll(sel)];
 const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
 const icon = (id, size = 16) => `<svg width="${size}" height="${size}" aria-hidden="true"><use href="#i-${id}"/></svg>`;
 const fmtNum = (n) => Number(n || 0).toLocaleString();
+const rowsText = (n) => `${fmtNum(n)} row${n === 1 ? "" : "s"}`;
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 function fmtDuration(s) {
@@ -35,7 +36,7 @@ function timeAgo(iso) {
 }
 const STATUS_LABEL = { queued: "Queued", running: "Running", done: "Succeeded", cancelled: "Cancelled", error: "Failed" };
 const badge = (status) => `<span class="badge ${esc(status)}">${STATUS_LABEL[status] || esc(status)}</span>`;
-const SOURCE_LABEL = { run: "Run", merge: "Merged", import: "Imported" };
+const SOURCE_LABEL = { run: "Run", merge: "Merged", import: "Imported", shared: "Shared copy" };
 
 /* ---------------------------------------------------------------- API */
 async function api(path, opts = {}) {
@@ -72,13 +73,16 @@ async function exportSheet(sheetId, format) {
   let meta, data;
   try { [meta, data] = await Promise.all([Store.sheets.get(sheetId), Store.sheets.data(sheetId)]); } catch (e) { return toast(e.message, "err"); }
   if (!meta || !data) return toast("This sheet could not be found on this device.", "err");
-  const base = fileSafe(meta.name);
-  if (format === "csv") return saveBlob(new Blob([SheetOps.toCSV(data.columns, data.rows)], { type: "text/csv;charset=utf-8" }), base + ".csv");
-  if (format === "json") return saveBlob(new Blob([SheetOps.toJSON(data.columns, data.rows)], { type: "application/json" }), base + ".json");
+  return exportData(meta.name, data.columns, data.rows, format);
+}
+async function exportData(name, columns, rows, format) {
+  const base = fileSafe(name);
+  if (format === "csv") return saveBlob(new Blob([SheetOps.toCSV(columns, rows)], { type: "text/csv;charset=utf-8" }), base + ".csv");
+  if (format === "json") return saveBlob(new Blob([SheetOps.toJSON(columns, rows)], { type: "application/json" }), base + ".json");
   toast("Preparing your Excel file…");  // the server only formats it; nothing is stored there
   try {
     const r = await fetch("/api/export/xlsx", { method: "POST", headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ name: meta.name, columns: data.columns, rows: data.rows }) });
+      body: JSON.stringify({ name, columns, rows }) });
     if (r.status === 401) { location.href = "/login"; return; }
     if (!r.ok) throw new Error(((await r.json().catch(() => ({}))).error) || "Could not create the Excel file.");
     saveBlob(await r.blob(), base + ".xlsx");
@@ -266,6 +270,13 @@ function skeletonRows(n = 5, cols = 5) {
   return `<table class="tbl"><tbody>${Array.from({ length: n }, () =>
     `<tr>${Array.from({ length: cols }, () => '<td><div class="skel"></div></td>').join("")}</tr>`).join("")}</tbody></table>`;
 }
+function exportDataMenu(name, columns, rows) {
+  return [
+    { label: "Excel (.xlsx)", icon: "download", run: () => exportData(name, columns, rows, "xlsx") },
+    { label: "CSV (.csv)", icon: "download", run: () => exportData(name, columns, rows, "csv") },
+    { label: "JSON (.json)", icon: "download", run: () => exportData(name, columns, rows, "json") },
+  ];
+}
 function exportMenu(sheetId) {
   return [
     { label: "Excel (.xlsx)", icon: "download", run: () => exportSheet(sheetId, "xlsx") },
@@ -348,6 +359,8 @@ const ROUTES = [
   [/^#\/runs\/([\w-]+)$/, (m) => viewRunDetail(m[1])],
   [/^#\/sheets$/, () => viewSheets()],
   [/^#\/sheets\/([\w-]+)$/, (m) => viewSheet(m[1])],
+  [/^#\/shared$/, () => viewShared()],
+  [/^#\/shared\/([\w-]+)$/, (m) => viewSharedSheet(m[1])],
   [/^#\/merge(?:\?ids=([\w,-]*))?$/, (m) => viewMerge(m[1] ? m[1].split(",") : [])],
   [/^#\/settings$/, () => viewSettings()],
   [/^#\/admin$/, () => IS_ADMIN ? viewAdmin() : viewNotFound()],
@@ -971,6 +984,7 @@ async function viewSheets() {
       return openMenu(m, [
         { label: "Open", icon: "eye", run: () => location.hash = `#/sheets/${s.id}` },
         { label: "Rename", icon: "edit", run: () => renameSheet(s, load) },
+        { label: "Share…", icon: "share", run: () => shareDialog(s) },
         { label: "Merge & dedupe", icon: "merge", run: () => location.hash = `#/merge?ids=${s.id}` },
         "-",
         { label: "Delete", icon: "trash", danger: true, run: async () => {
@@ -1004,31 +1018,18 @@ function deviceNote() {
 }
 
 /* ================================================================ SHEET VIEW (data grid) */
-async function viewSheet(id) {
-  const tk = routeToken();
-  setCrumbs({ label: "Sheets", href: "#/sheets" }, "Sheet");
-  const v = $("#view");
-  const meta = await Store.sheets.get(id);
-  if (stale(tk)) return;
-  if (!meta) return viewNotFound();
-  setCrumbs({ label: "Sheets", href: "#/sheets" }, meta.name);
-  const data = await Store.sheets.data(id);
-  if (stale(tk)) return;
-  if (!data) return viewNotFound();
-  const PAGE = 100;
-  const state = { q: "", offset: 0, rows: data.rows };
-  v.innerHTML = `
-    <div class="page-head"><div><h1>${esc(meta.name)}</h1><p>${fmtNum(meta.rows)} rows · ${meta.columns.length} columns · ${SOURCE_LABEL[meta.source] || "Run"} · ${esc(fmtDate(meta.created))} · saved on this device</p></div>
-      <div class="actions">${IS_VIEWER ? "" : `<button class="btn" id="rename">${icon("edit")}Rename</button><a class="btn" href="#/merge?ids=${id}">${icon("merge")}Dedupe / merge</a>`}
-        <span class="menu-wrap"><button class="btn btn-primary" id="export">${icon("download")}Export</button></span></div></div>
+const GRID_CARD = `
     <div class="card">
       <div class="toolbar"><div class="search grow" style="max-width:420px">${icon("search")}<input id="q" placeholder="Search all columns" aria-label="Search all columns"></div>
         <span class="muted small" id="count"></span></div>
       <div class="grid-scroll" id="grid"></div>
       <div class="pager"><span id="range"></span><div class="row-flex"><button class="btn btn-sm" id="prev">Previous</button><button class="btn btn-sm" id="next">Next</button></div></div>
     </div>`;
-  $("#export").onclick = (e) => { e.stopPropagation(); openMenu($("#export"), exportMenu(id)); };
-  $("#rename")?.addEventListener("click", () => renameSheet(meta, () => route()));
+
+// A searchable, paged, read-only grid for any sheet's data (my own or a shared one). Returns a cleanup function.
+function mountGrid(data) {
+  const PAGE = 100;
+  const state = { q: "", offset: 0, rows: data.rows };
   const draw = () => {
     const slice = state.rows.slice(state.offset, state.offset + PAGE);
     $("#grid").innerHTML = !slice.length ? emptyState("search", state.q ? "No rows match" : "This sheet is empty", state.q ? "Try a different search." : "")
@@ -1059,6 +1060,235 @@ async function viewSheet(id) {
   draw();
   return () => clearTimeout(deb);
 }
+
+async function viewSheet(id) {
+  const tk = routeToken();
+  setCrumbs({ label: "Sheets", href: "#/sheets" }, "Sheet");
+  const v = $("#view");
+  const meta = await Store.sheets.get(id);
+  if (stale(tk)) return;
+  if (!meta) return viewNotFound();
+  setCrumbs({ label: "Sheets", href: "#/sheets" }, meta.name);
+  const data = await Store.sheets.data(id);
+  if (stale(tk)) return;
+  if (!data) return viewNotFound();
+  v.innerHTML = `
+    <div class="page-head"><div><h1>${esc(meta.name)}</h1><p>${fmtNum(meta.rows)} rows · ${meta.columns.length} columns · ${SOURCE_LABEL[meta.source] || "Run"} · ${esc(fmtDate(meta.created))} · saved on this device</p></div>
+      <div class="actions">${IS_VIEWER ? "" : `<button class="btn" id="rename">${icon("edit")}Rename</button><a class="btn" href="#/merge?ids=${id}">${icon("merge")}Dedupe / merge</a><button class="btn" id="share">${icon("share")}Share</button>`}
+        <span class="menu-wrap"><button class="btn btn-primary" id="export">${icon("download")}Export</button></span></div></div>
+    ${GRID_CARD}`;
+  $("#export").onclick = (e) => { e.stopPropagation(); openMenu($("#export"), exportMenu(id)); };
+  $("#rename")?.addEventListener("click", () => renameSheet(meta, () => route()));
+  $("#share")?.addEventListener("click", () => shareDialog(meta));
+  return mountGrid(data);
+}
+
+/* ================================================================ SHARING (an explicit copy on the server that expires) */
+const expiresIn = (iso) => {
+  const ms = new Date(iso).getTime() - Date.now();
+  if (ms <= 0) return "expired";
+  const h = ms / 36e5;
+  return h < 1 ? "in under an hour" : h < 24 ? `in ${Math.round(h)} hour${Math.round(h) === 1 ? "" : "s"}` : `in ${Math.round(h / 24)} day${Math.round(h / 24) === 1 ? "" : "s"}`;
+};
+const shareUrl = (id) => `${location.origin}/#/shared/${id}`;
+async function copyText(text) {
+  try { await navigator.clipboard.writeText(text); return true; }
+  catch {
+    const t = document.createElement("textarea");
+    t.value = text; t.style.position = "fixed"; t.style.opacity = "0";
+    document.body.appendChild(t); t.select();
+    let ok = false; try { ok = document.execCommand("copy"); } catch {}
+    t.remove(); return ok;
+  }
+}
+
+// What gets sent when a share link goes out by mail or chat: the sheet's name, its size and the link. Never the data.
+function shareMessage(r) {
+  const intro = `Hi, I've shared the sheet “${r.name}” (${rowsText(r.rows)}) with you on OneBridge Data Collector.`;
+  const url = shareUrl(r.id);
+  const note = `You'll need to sign in to open it. The link stops working on ${fmtDate(r.expires, false)}.`;
+  return { subject: `Shared sheet: ${r.name}`, intro, url, note, full: `${intro}\n\nOpen it here: ${url}\n\n${note}` };
+}
+// The ways to send a link. Gmail, WhatsApp and Telegram open their own pages with the message filled in;
+// "More apps" opens the device's own share menu (phones, tablets and the installed app) when it exists.
+function shareChannels(r) {
+  const m = shareMessage(r), enc = encodeURIComponent;
+  const openPage = (url) => window.open(url, "_blank", "noopener");
+  const items = [
+    { id: "gmail", label: "Gmail", icon: "mail", run: () => openPage(`https://mail.google.com/mail/?view=cm&fs=1&su=${enc(m.subject)}&body=${enc(m.full)}`) },
+    { id: "mail", label: "Email app", icon: "mail", run: () => { const a = document.createElement("a"); a.href = `mailto:?subject=${enc(m.subject)}&body=${enc(m.full)}`; document.body.appendChild(a); a.click(); a.remove(); } },
+    { id: "whatsapp", label: "WhatsApp", icon: "chat", run: () => openPage(`https://wa.me/?text=${enc(m.full)}`) },
+    { id: "telegram", label: "Telegram", icon: "send", run: () => openPage(`https://t.me/share/url?url=${enc(m.url)}&text=${enc(m.intro + " " + m.note)}`) },
+  ];
+  if (navigator.share) {
+    items.push({ id: "more", label: "More apps…", icon: "share", run: async () => {
+      try { await navigator.share({ title: m.subject, text: `${m.intro} ${m.note}`, url: m.url }); }
+      catch (e) { if (e.name !== "AbortError") toast("Your device couldn't open its share menu.", "err"); }
+    } });
+  }
+  return items;
+}
+function renderSendRow(el, r) {
+  const channels = shareChannels(r);
+  el.innerHTML = channels.map((c, i) => `<button type="button" class="btn send-${c.id}" data-i="${i}">${icon(c.icon)}${esc(c.label)}</button>`).join("");
+  el.onclick = (e) => { const b = e.target.closest("[data-i]"); if (b) channels[+b.dataset.i].run(); };
+}
+
+async function shareDialog(meta) {
+  let data, people;
+  try { [data, people] = await Promise.all([Store.sheets.data(meta.id), api("/api/users/directory")]); }
+  catch (e) { return toast(navigator.onLine ? e.message : "Sharing needs a connection.", "err"); }
+  if (!data) return toast("This sheet could not be found on this device.", "err");
+  const picked = new Set();
+  const canFile = !!(navigator.canShare && navigator.canShare({ files: [new File(["x"], "x.csv", { type: "text/csv" })] }));
+  let created = null;
+  const body = `
+    <div class="field">
+      <label class="label">Share with</label>
+      ${people.length ? `<div class="search" style="margin-bottom:8px">${icon("search")}<input id="sh-find" placeholder="Find a person" aria-label="Find a person"></div>
+        <div class="people" id="sh-people">${people.map((p) => `<label class="person" data-name="${esc(p.username.toLowerCase())}"><input type="checkbox" value="${p.id}"><span class="avatar" style="width:26px;height:26px;font-size:11px">${esc(p.username.slice(0, 2))}</span><span>${esc(p.username)}</span></label>`).join("")}</div>`
+        : `<div class="callout info">${icon("info")}<div>No one else has an account yet. Ask an admin to add people, or share with the link below.</div></div>`}
+      <label class="switch mt-8"><input type="checkbox" id="sh-link"><span class="sw"></span><span><b>Anyone in the company with the link</b><small>They still have to sign in first.</small></span></label>
+    </div>
+    <div class="grid grid-2">
+      <div class="field"><label class="label" for="sh-days">Stops working</label>
+        <select class="input" id="sh-days"><option value="1">After 1 day</option><option value="7" selected>After 7 days</option><option value="30">After 30 days</option></select></div>
+      <div class="field"><span class="label">Downloads</span>
+        <label class="switch"><input type="checkbox" id="sh-export" checked><span class="sw"></span><span><b>Allow downloads</b><small>Hides the download buttons. It can't stop someone copying what they see.</small></span></label></div>
+    </div>
+    <div class="callout info">${icon("info")}<div>This shares a <b>copy as it is now</b> (${rowsText(data.rows.length)}). Later changes to your sheet aren't included. The copy is kept on the server until it expires or you stop sharing, then it is deleted.</div></div>
+    ${canFile ? `<div class="mt-16"><button class="btn" id="sh-file" type="button">${icon("share")}Send as a file instead…</button></div>` : ""}`;
+  return modal({
+    title: `Share “${meta.name}”`, confirm: "Create share", wide: true, body,
+    onOpen: (ov) => {
+      $$("#sh-people input", ov).forEach((c) => c.onchange = () => c.checked ? picked.add(+c.value) : picked.delete(+c.value));
+      $("#sh-find", ov)?.addEventListener("input", (e) => {
+        const q = e.target.value.trim().toLowerCase();
+        $$(".person", ov).forEach((p) => p.hidden = !!q && !p.dataset.name.includes(q));
+      });
+      $("#sh-file", ov)?.addEventListener("click", async () => {
+        try {
+          const file = new File([SheetOps.toCSV(data.columns, data.rows)], fileSafe(meta.name) + ".csv", { type: "text/csv" });
+          await navigator.share({ files: [file], title: meta.name });
+        } catch (e) { if (e.name !== "AbortError") toast("Your device couldn't share the file.", "err"); }
+      });
+    },
+    onConfirm: async (ov) => {
+      if (created) return true;  // second click is "Done"
+      const link = $("#sh-link", ov).checked;
+      if (!picked.size && !link) { toast("Pick at least one person, or allow anyone with the link.", "err"); return false; }
+      const r = await api("/api/shares", { method: "POST", body: { name: meta.name, columns: data.columns, rows: data.rows,
+        recipients: [...picked], link_access: link, expires_days: +$("#sh-days", ov).value, allow_export: $("#sh-export", ov).checked } });
+      created = r;
+      const who = [...(r.recipients.length ? [r.recipients.join(", ")] : []), ...(r.link_access ? ["anyone signed in with the link"] : [])].join(" and ");
+      $(".modal-body", ov).innerHTML = `
+        <div class="callout ok">${icon("check")}<div><b>Shared.</b> Opens for ${esc(who)}. Stops working ${esc(expiresIn(r.expires))}.</div></div>
+        <div class="field mt-16"><label class="label" for="sh-url">Link</label>
+          <div class="input-row"><input class="input mono" id="sh-url" readonly value="${esc(shareUrl(r.id))}"><button class="btn btn-primary" type="button" id="sh-copy">Copy link</button></div>
+          <div class="hint">People you chose will also find it under <b>Shared</b>. You can stop sharing any time from there.</div></div>
+        <div class="field"><span class="label">Send the link</span><div class="send-row" id="sh-send"></div>
+          <div class="hint">Only the sheet's name, size and link are put in the message. The data stays on the server until the link expires.</div></div>`;
+      renderSendRow($("#sh-send", ov), r);
+      $("#sh-url", ov).onfocus = (e) => e.target.select();
+      $("#sh-copy", ov).onclick = async () => toast((await copyText(shareUrl(r.id))) ? "Link copied" : "Copy the link by hand: select it and press Ctrl+C.", "ok");
+      $("[data-ok]", ov).textContent = "Done";
+      $("[data-x]", ov)?.remove();
+      return false;
+    },
+  });
+}
+
+async function viewShared() {
+  const tk = routeToken();
+  setCrumbs("Shared");
+  const v = $("#view");
+  const state = { box: "with-me" };
+  v.innerHTML = `
+    <div class="page-head"><div><h1>Shared</h1><p>Copies of sheets that people shared. Each one expires automatically.</p></div></div>
+    <div class="card">
+      <div class="toolbar"><div class="seg" id="box"><button data-b="with-me" class="active">Shared with me</button><button data-b="by-me">Shared by me</button></div></div>
+      <div class="table-wrap" id="list">${skeletonRows(4, 5)}</div>
+    </div>`;
+  let items = [];
+  const render = () => {
+    const mine = state.box === "by-me";
+    $("#list").innerHTML = !items.length
+      ? emptyState("share", mine ? "You haven't shared anything" : "Nothing has been shared with you", mine ? "Open a sheet and press Share to send a copy to a colleague." : "When someone shares a sheet with you, it appears here.",
+          mine && !IS_VIEWER ? '<a class="btn btn-primary" href="#/sheets">Go to Sheets</a>' : "")
+      : `<table class="tbl"><thead><tr><th>Sheet</th><th>${mine ? "Shared with" : "Shared by"}</th><th class="num">Rows</th><th>Shared</th><th>Stops working</th><th></th></tr></thead><tbody>
+        ${items.map((s) => `<tr class="clickable" data-id="${s.id}"><td><div class="name-cell"><div class="file-ico">${icon("sheet")}</div><div><b>${esc(s.name)}</b><small>${s.allow_export ? "Downloads allowed" : "Downloads off"}</small></div></div></td>
+          <td>${mine ? esc([...s.recipients, ...(s.link_access ? ["anyone with the link"] : [])].join(", ") || "—") : esc(s.owner)}</td>
+          <td class="num">${fmtNum(s.rows)}</td><td class="nowrap">${timeAgo(s.created)}</td><td class="nowrap" title="${esc(fmtDate(s.expires))}">${esc(expiresIn(s.expires))}</td>
+          <td class="actions" data-stop><span class="menu-wrap">${mine ? `<button class="btn btn-sm" data-copy="${s.id}">${icon("link")}Copy link</button><button class="btn btn-sm" data-send="${s.id}">${icon("send")}Send…</button><button class="btn btn-sm btn-danger" data-stopshare="${s.id}">Stop sharing</button>`
+            : `<a class="btn btn-sm" href="#/shared/${s.id}">Open</a>`}</span></td></tr>`).join("")}</tbody></table>`;
+  };
+  const load = async () => {
+    const r = await api(`/api/shares?box=${state.box}`);
+    if (stale(tk)) return;
+    items = r; render();
+  };
+  $$("#box button").forEach((b) => b.onclick = async () => {
+    $$("#box button").forEach((x) => x.classList.toggle("active", x === b));
+    state.box = b.dataset.b; $("#list").innerHTML = skeletonRows(4, 5);
+    try { await load(); } catch (e) { toast(e.message, "err"); }
+  });
+  $("#list").addEventListener("click", async (e) => {
+    const copy = e.target.closest("[data-copy]");
+    if (copy) return toast((await copyText(shareUrl(copy.dataset.copy))) ? "Link copied" : "Couldn't copy the link.", "ok");
+    const send = e.target.closest("[data-send]");
+    if (send) { e.stopPropagation(); return openMenu(send, shareChannels(items.find((x) => x.id === send.dataset.send))); }
+    const stop = e.target.closest("[data-stopshare]");
+    if (stop) {
+      const s = items.find((x) => x.id === stop.dataset.stopshare);
+      if (!await confirmDialog("Stop sharing?", `“${s.name}” will be deleted from the server and nobody will be able to open it any more.`, "Stop sharing")) return;
+      try { await api(`/api/shares/${s.id}`, { method: "DELETE" }); toast("Sharing stopped", "ok"); load(); } catch (err) { toast(err.message, "err"); }
+      return;
+    }
+    if (e.target.closest("[data-stop]")) return;
+    const tr = e.target.closest("tr[data-id]");
+    if (tr) location.hash = `#/shared/${tr.dataset.id}`;
+  });
+  await load();
+}
+
+async function viewSharedSheet(id) {
+  const tk = routeToken();
+  setCrumbs({ label: "Shared", href: "#/shared" }, "Shared sheet");
+  const v = $("#view");
+  let s;
+  try { s = await api(`/api/shares/${id}`); }
+  catch (e) {
+    if (stale(tk)) return;
+    if (e.status !== 404) throw e;
+    v.innerHTML = `<div class="card">${emptyState("share", "This shared sheet isn't available", "It may have expired, been stopped by its owner, or not been shared with you.", '<a class="btn btn-primary" href="#/shared">See what is shared with you</a>')}</div>`;
+    return;
+  }
+  if (stale(tk)) return;
+  setCrumbs({ label: "Shared", href: "#/shared" }, s.name);
+  const data = { columns: s.columns, rows: s.rows_data };
+  v.innerHTML = `
+    <div class="page-head"><div><div class="row-flex"><h1>${esc(s.name)}</h1><span class="badge accent plain">Shared copy</span></div>
+      <p>${rowsText(s.rows)} · ${s.mine ? "shared by you" : `shared by ${esc(s.owner)}`} · stops working ${esc(expiresIn(s.expires))}${s.allow_export ? "" : " · downloads are off"}</p></div>
+      <div class="actions">
+        ${s.allow_export ? `<button class="btn" id="save-copy">${icon("sheet")}Save a copy to my device</button><span class="menu-wrap"><button class="btn btn-primary" id="export">${icon("download")}Export</button></span>` : ""}
+        ${s.mine ? `<span class="menu-wrap"><button class="btn" id="send">${icon("send")}Send link</button></span><button class="btn btn-danger" id="stop">${icon("trash")}Stop sharing</button>` : ""}</div></div>
+    ${GRID_CARD}`;
+  $("#export")?.addEventListener("click", (e) => { e.stopPropagation(); openMenu($("#export"), exportDataMenu(s.name, data.columns, data.rows)); });
+  $("#save-copy")?.addEventListener("click", async () => {
+    try {
+      const meta = await Store.sheets.put({ id: newId(), name: s.name, source: "shared", created: nowIso() }, data);
+      Store.persist();
+      toast("Saved to your sheets", "ok", { label: "Open", run: () => { location.hash = `#/sheets/${meta.id}`; } });
+    } catch (e) { toast(e.message, "err"); }
+  });
+  $("#send")?.addEventListener("click", (e) => { e.stopPropagation(); openMenu($("#send"), shareChannels(s)); });
+  $("#stop")?.addEventListener("click", async () => {
+    if (!await confirmDialog("Stop sharing?", "This copy will be deleted from the server and nobody will be able to open it any more.", "Stop sharing")) return;
+    try { await api(`/api/shares/${id}`, { method: "DELETE" }); toast("Sharing stopped", "ok"); location.hash = "#/shared"; } catch (e) { toast(e.message, "err"); }
+  });
+  return mountGrid(data);
+}
+
 function rowDrawer(columns, row, n) {
   const ov = document.createElement("div");
   ov.className = "overlay drawer-overlay";

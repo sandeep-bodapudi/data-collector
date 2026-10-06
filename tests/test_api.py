@@ -148,6 +148,69 @@ a = c.get("/api/admin/settings").get_json()
 ok("admin sees database status", a["database"]["kind"] == "sqlite" and a["database"]["persistent"] is False)
 ok("cannot demote the last admin", c.patch("/api/admin/users/1", json={"role": "member"}).status_code == 400)
 
+# ---- sharing -----------------------------------------------------------------------------------
+from datetime import datetime as _dt, timedelta as _td  # noqa: E402
+from models import Share, db as _db  # noqa: E402
+
+with app.app_context():
+    from models import User as _U
+    ids = {u.username: u.id for u in _U.query.all()}
+ROWS = [{"Name": "శ్రీ School", "Phone": "+91 98480 12345", "n": 5}, {"Name": "B", "Phone": "", "n": 7}]
+payload = lambda **kw: {"name": "My list", "columns": ["Name", "Phone", "n"], "rows": ROWS, **kw}
+
+ok("viewer cannot share", viewer.post("/api/shares", json=payload(link_access=True)).status_code == 403)
+ok("viewer cannot list people", viewer.get("/api/users/directory").status_code == 403)
+names = [u["username"] for u in c.get("/api/users/directory").get_json()]
+ok("people list excludes yourself", "boss" not in names and {"ravi", "meena"} <= set(names))
+ok("sharing needs someone to share with", c.post("/api/shares", json=payload()).status_code == 400)
+ok("expiry must be one of the offered choices", c.post("/api/shares", json=payload(link_access=True, expires_days=400)).status_code == 400)
+ok("empty sheets are refused", c.post("/api/shares", json={"name": "x", "columns": ["a"], "rows": [], "link_access": True}).status_code == 400)
+ok("unknown people are ignored, so no recipients is refused", c.post("/api/shares", json=payload(recipients=[999, 12345])).status_code == 400)
+
+r = c.post("/api/shares", json=payload(recipients=[ids["ravi"]], allow_export=False, expires_days=7))
+sh = r.get_json(); sid = sh["id"]
+ok("owner can share with a person", r.status_code == 200 and sh["recipients"] == ["ravi"] and sh["allow_export"] is False and len(sid) >= 12)
+opened = viewer.get(f"/api/shares/{sid}").get_json()
+ok("recipient can open it", opened["rows_data"] == ROWS and opened["columns"] == ["Name", "Phone", "n"], str(opened)[:120])
+ok("Telugu text and numbers survive the round trip", opened["rows_data"][0]["Name"] == "శ్రీ School" and opened["rows_data"][1]["n"] == 7)
+ok("download setting is passed on to the recipient", opened["allow_export"] is False and opened["owner"] == "boss")
+ok("someone who was not chosen cannot open it", meena.get(f"/api/shares/{sid}").status_code == 404)
+ok("signed-out users cannot open it", app.test_client().get(f"/api/shares/{sid}").status_code == 401)
+ok("owner always may export their own share", c.get(f"/api/shares/{sid}").get_json()["allow_export"] is True)
+ok("it appears in the recipient's Shared with me", [x["id"] for x in viewer.get("/api/shares").get_json()] == [sid])
+ok("it appears in the owner's Shared by me, not in with-me", [x["id"] for x in c.get("/api/shares?box=by-me").get_json()] == [sid]
+   and c.get("/api/shares").get_json() == [])
+ok("another member does not see it listed", meena.get("/api/shares").get_json() == [])
+
+link = c.post("/api/shares", json=payload(link_access=True, expires_days=1)).get_json()
+ok("anyone signed in with the link can open a link share", meena.get(f"/api/shares/{link['id']}").status_code == 200)
+ok("link shares are not listed for people who were not chosen", all(x["id"] != link["id"] for x in meena.get("/api/shares").get_json()))
+ok("link access still needs a sign-in", app.test_client().get(f"/api/shares/{link['id']}").status_code == 401)
+
+ok("only the owner (or an admin) can stop a share", meena.delete(f"/api/shares/{link['id']}").status_code == 404)
+ok("owner stops sharing", c.delete(f"/api/shares/{link['id']}").status_code == 200 and meena.get(f"/api/shares/{link['id']}").status_code == 404)
+other = meena.post("/api/shares", json=payload(link_access=True)).get_json()
+ok("an admin can stop anyone's share", c.delete(f"/api/shares/{other['id']}").status_code == 200)
+
+with app.app_context():
+    row = _db.session.get(Share, sid); row.expires_at = _dt.utcnow() - _td(minutes=1); _db.session.commit()
+ok("expired shares cannot be opened", viewer.get(f"/api/shares/{sid}").status_code == 404)
+ok("expired shares disappear from the list", viewer.get("/api/shares").get_json() == [])
+with app.app_context():
+    ok("expired shares are deleted from the database", _db.session.get(Share, sid) is None)
+
+old_max = appmod.SHARE_MAX_BYTES; appmod.SHARE_MAX_BYTES = 50
+big = c.post("/api/shares", json=payload(link_access=True, rows=[{"Name": "x" * 500 + str(i), "Phone": str(i), "n": i} for i in range(200)]))
+ok("a sheet over the size limit is refused with advice", big.status_code == 413 and "too large" in big.get_json()["error"])
+appmod.SHARE_MAX_BYTES = old_max
+old_total = appmod.SHARE_MAX_TOTAL; appmod.SHARE_MAX_TOTAL = 10
+ok("a full share space is reported clearly", c.post("/api/shares", json=payload(link_access=True)).status_code == 507)
+appmod.SHARE_MAX_TOTAL = old_total
+old_active = appmod.SHARE_MAX_ACTIVE; appmod.SHARE_MAX_ACTIVE = 1
+first = c.post("/api/shares", json=payload(link_access=True))
+ok("the number of active shares per person is capped", first.status_code == 200 and c.post("/api/shares", json=payload(link_access=True)).status_code == 400)
+appmod.SHARE_MAX_ACTIVE = old_active
+
 # ---- database fallback: a dead database must not take the site down ---------------------------
 os.environ["DATABASE_URL"] = "postgresql://user:pw@127.0.0.1:1/none"
 t0 = time.time()

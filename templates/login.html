@@ -87,6 +87,12 @@
   const pw = document.getElementById("password");
   document.getElementById("eye").onclick = () => { pw.type = pw.type === "password" ? "text" : "password"; pw.focus(); };
   pw.addEventListener("keyup", (e) => { document.getElementById("caps").style.display = e.getModifierState && e.getModifierState("CapsLock") ? "block" : "none"; });
+  // A shared link opened while signed out is /#/shared/xyz; remember the part after # so sign-in lands on it.
+  if (location.hash.length > 1) {
+    const f = document.getElementById("f"), u = new URL(f.action || location.href, location.href);
+    u.searchParams.set("next", "/" + location.hash);
+    f.action = u.pathname + u.search;
+  }
   document.getElementById("f").addEventListener("submit", () => { const b = document.getElementById("go"); b.disabled = true; b.innerHTML = '<span class="spinner"></span> Please wait…'; });
 </script>
 </body>

@@ -1,6 +1,8 @@
 """OneBridge Data Collector - web app. Run: python app.py  then open http://localhost:5000"""
+import gzip
 import hashlib
 import io
+import json
 import os
 import re
 import secrets
@@ -44,7 +46,7 @@ def _secret_key() -> str:
 _load_env_file()
 _secret_key()
 
-from models import ROLES, AppSetting, User, VaultCredential, db, encrypt  # noqa: E402
+from models import ROLES, AppSetting, Share, User, VaultCredential, db, encrypt  # noqa: E402
 from scraper import ai_extract, extract, places, sheets  # noqa: E402
 from scraper.excel import write_workbook  # noqa: E402
 from scraper.jobs import JOBS, REGIONS, purge_jobs, start_job  # noqa: E402
@@ -523,6 +525,123 @@ def test_ai():
     except Exception as e:
         return jsonify(ok=False, error=f"{type(e).__name__}")
     return jsonify(ok=True, message=msg)
+
+
+# ---------------------------------------------------------------- sharing (explicit, size-capped, expiring copies)
+
+SHARE_MAX_BYTES = 5 * 1024 * 1024                                             # compressed size of one shared sheet
+SHARE_MAX_ACTIVE = 25                                                         # live shares per person
+SHARE_MAX_TOTAL = int(float(os.environ.get("SHARE_MAX_TOTAL_MB", "200")) * 1024 * 1024)  # all shares together
+SHARE_EXPIRY_DAYS = (1, 7, 30)
+
+
+def _purge_shares():
+    """Expired and withdrawn copies are deleted for good, so nothing lingers in the database."""
+    Share.query.filter((Share.expires_at < datetime.utcnow()) | (Share.revoked.is_(True))).delete(synchronize_session=False)
+    db.session.commit()
+
+
+def _share_meta(sh: Share, names: dict) -> dict:
+    return {"id": sh.id, "name": sh.name, "rows": sh.row_count, "size": sh.size_bytes,
+            "owner": names.get(sh.owner_id, "Someone"), "owner_id": sh.owner_id,
+            "created": sh.created_at.strftime("%Y-%m-%dT%H:%M:%SZ"), "expires": sh.expires_at.strftime("%Y-%m-%dT%H:%M:%SZ"),
+            "allow_export": bool(sh.allow_export), "link_access": bool(sh.link_access),
+            "recipients": [names[i] for i in sh.recipients if i in names]}
+
+
+def _user_names() -> dict:
+    return {u.id: u.username for u in User.query.all()}
+
+
+@app.get("/api/users/directory")
+@roles_required("admin", "member")
+def user_directory():
+    """People a sheet can be shared with (names only)."""
+    return jsonify([{"id": u.id, "username": u.username} for u in User.query.filter_by(is_active_user=True)
+                    .order_by(User.username).all() if u.id != current_user.id])
+
+
+@app.post("/api/shares")
+@roles_required("admin", "member")
+def create_share():
+    d = request.get_json(force=True, silent=True) or {}
+    columns, rows = d.get("columns"), d.get("rows")
+    if not isinstance(columns, list) or not isinstance(rows, list) or not columns:
+        return jsonify(error="There is nothing to share."), 400
+    columns = [str(c)[:200] for c in columns][:300]
+    rows = [{c: ("" if r.get(c) is None else r.get(c)) for c in columns} for r in rows if isinstance(r, dict)]
+    if not rows:
+        return jsonify(error="There is nothing to share."), 400
+    valid_ids = {u.id for u in User.query.filter_by(is_active_user=True).all()} - {current_user.id}
+    recipients = sorted({int(i) for i in (d.get("recipients") or []) if str(i).isdigit() and int(i) in valid_ids})
+    link_access = bool(d.get("link_access"))
+    if not recipients and not link_access:
+        return jsonify(error="Choose who to share with: pick people, or allow anyone with the link."), 400
+    days = int(d.get("expires_days") or 7)
+    if days not in SHARE_EXPIRY_DAYS:
+        return jsonify(error="Choose how long the share should last."), 400
+
+    _purge_shares()
+    mine = Share.query.filter_by(owner_id=current_user.id).count()
+    if mine >= SHARE_MAX_ACTIVE:
+        return jsonify(error=f"You already have {SHARE_MAX_ACTIVE} active shares. Stop sharing some of them first."), 400
+    blob = gzip.compress(json.dumps(rows, ensure_ascii=False, separators=(",", ":")).encode("utf-8"), 6)
+    if len(blob) > SHARE_MAX_BYTES:
+        return jsonify(error=f"This sheet is too large to share ({len(blob) / 1048576:.1f} MB compressed, the limit is "
+                             f"{SHARE_MAX_BYTES // 1048576} MB). Share a file instead, or share a smaller sheet."), 413
+    used = db.session.query(db.func.coalesce(db.func.sum(Share.size_bytes), 0)).scalar() or 0
+    if used + len(blob) > SHARE_MAX_TOTAL:
+        return jsonify(error="The server's sharing space is full right now. Ask an admin, or share a file instead."), 507
+
+    sh = Share(id=secrets.token_urlsafe(12), owner_id=current_user.id, name=_clean_name(d.get("name"), "Shared sheet"),
+               row_count=len(rows), columns_json=json.dumps(columns, ensure_ascii=False), data=blob, size_bytes=len(blob),
+               expires_at=datetime.utcnow() + timedelta(days=days), allow_export=bool(d.get("allow_export", True)),
+               link_access=link_access, recipients_json=json.dumps(recipients))
+    db.session.add(sh)
+    db.session.commit()
+    return jsonify(_share_meta(sh, _user_names()))
+
+
+@app.get("/api/shares")
+@login_required
+def list_shares():
+    """?box=with-me (default) or ?box=by-me."""
+    _purge_shares()
+    names = _user_names()
+    if request.args.get("box") == "by-me":
+        q = Share.query.filter_by(owner_id=current_user.id)
+    else:
+        q = Share.query.filter(Share.owner_id != current_user.id)
+    out = [_share_meta(s, names) for s in q.order_by(Share.created_at.desc()).all()
+           if (request.args.get("box") == "by-me" or current_user.id in s.recipients)]
+    return jsonify(out)
+
+
+@app.get("/api/shares/<share_id>")
+@login_required
+def open_share(share_id):
+    sh = db.session.get(Share, share_id)
+    if not sh or not sh.can_open(current_user):  # same answer for "missing" and "not yours": nothing is leaked
+        abort(404)
+    try:
+        rows = json.loads(gzip.decompress(sh.data).decode("utf-8"))
+    except (OSError, ValueError):
+        abort(404)
+    meta = _share_meta(sh, _user_names())
+    if sh.owner_id == current_user.id:
+        meta["allow_export"] = True
+    return jsonify({**meta, "columns": json.loads(sh.columns_json), "rows_data": rows, "mine": sh.owner_id == current_user.id})
+
+
+@app.delete("/api/shares/<share_id>")
+@login_required
+def stop_share(share_id):
+    sh = db.session.get(Share, share_id)
+    if not sh or (sh.owner_id != current_user.id and not current_user.is_admin):
+        abort(404)
+    db.session.delete(sh)
+    db.session.commit()
+    return jsonify(ok=True)
 
 
 # ---------------------------------------------------------------- admin

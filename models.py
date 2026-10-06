@@ -6,6 +6,7 @@ Sheets and run history live in each person's browser (IndexedDB), never on the s
 import base64
 import hashlib
 import os
+import json
 from datetime import datetime
 
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
@@ -108,3 +109,35 @@ class AppSetting(db.Model):
         row = db.session.get(AppSetting, key) or AppSetting(key=key)
         row.value = value
         db.session.add(row)
+
+
+class Share(db.Model):
+    """A copy of one sheet that its owner chose to share. Size-capped and expiring, so it can't fill the database.
+    The owner's own sheet stays in their browser; this is a snapshot, not a live link."""
+    __tablename__ = "shares"
+    id = db.Column(db.String(24), primary_key=True)          # unguessable token, also used in the link
+    owner_id = db.Column(db.Integer, db.ForeignKey("users.id"), nullable=False)
+    name = db.Column(db.String(255), nullable=False)
+    row_count = db.Column(db.Integer, default=0)
+    columns_json = db.Column(db.Text, nullable=False)
+    data = db.Column(db.LargeBinary(length=2 ** 24), nullable=False)   # gzip of the rows as JSON
+    size_bytes = db.Column(db.Integer, default=0)
+    created_at = db.Column(db.DateTime, default=datetime.utcnow)
+    expires_at = db.Column(db.DateTime, nullable=False)
+    allow_export = db.Column(db.Boolean, default=True)
+    link_access = db.Column(db.Boolean, default=False)       # any signed-in user with the link
+    recipients_json = db.Column(db.Text, default="[]")       # user ids who can open it
+    revoked = db.Column(db.Boolean, default=False)
+
+    @property
+    def recipients(self) -> list[int]:
+        try:
+            return [int(x) for x in json.loads(self.recipients_json or "[]")]
+        except (ValueError, TypeError):
+            return []
+
+    def is_live(self) -> bool:
+        return not self.revoked and self.expires_at > datetime.utcnow()
+
+    def can_open(self, user) -> bool:
+        return self.is_live() and (user.id == self.owner_id or self.link_access or user.id in self.recipients)

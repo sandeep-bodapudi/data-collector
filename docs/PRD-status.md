@@ -20,7 +20,7 @@ The PRD says sheets are stored on the server (chunked collections, server-side p
 
 | PRD item | Effect |
 |---|---|
-| §5.11 Sharing, "Shared with me", comments, presence | Not possible while sheets exist only on one device. It needs an explicit "share a copy" that uploads a sheet to the server. |
+| §5.11 Sharing, "Shared with me", comments, presence | Sharing is built as an explicit snapshot copy uploaded to the server (expiring, size-capped). Live sharing, comments and presence are not possible while sheets exist only on one device. |
 | §5.12 Schedules and change monitors | A scheduled run has nowhere to put its result when nobody has the browser open. It needs server-side result storage, at least for scheduled runs. |
 | §5.14 Admin: audit of what each person exported, disk dashboard | The server no longer sees sheets or exports, so it can only audit runs it starts. |
 | §2 "1M-row sheet stays responsive" | Sheets are held in the browser's memory when opened; fine for roughly 100k rows, not 1M. |
@@ -55,7 +55,7 @@ The PRD says sheets are stored on the server (chunked collections, server-side p
 | 5.8 | Sheet workspace: grid, search with highlight, paging, row drawer | 🟡 | No cell editing, column operations, saved views, versions or comments. |
 | 5.9 | Merge & Dedupe wizard | ✅ | Stack mode with key columns, match options (case, spaces, smart phone/email/URL, punctuation), keep first/last/most complete, merge-fill, save removed duplicates, preview with reasons. No join/compare modes or fuzzy matching. |
 | 5.10 | Export and import | 🟡 | xlsx/csv/json export (CSV has a BOM for Excel). Import of xlsx/csv/tsv/json. No PDF, selected-rows export or split files. |
-| 5.11 | Sharing | ❌ | |
+| 5.11 | Sharing | 🟡 | Share a snapshot copy with chosen people or anyone signed in with the link; expiry (1/7/30 days); downloads on/off; "Shared with me" and "Shared by me" with stop-sharing; send the link by Gmail, email app, WhatsApp, Telegram or the device's share menu. No Editor/Commenter roles, groups, password-protected links, live (auto-updating) shares, presence or notifications. Turning downloads off hides the buttons; it cannot stop someone copying what is on screen. |
 | 5.12 | Schedules and monitors | ❌ | |
 | 4 (PWA) | Installable, offline-capable app | ✅ | Manifest, icons (any and maskable), service worker, install button, offline indicator, update prompt. The signed-in page copy is removed on sign-out. Starting runs, importing and Excel export still need a connection. |
 | 5.13 | Vault | 🟡 | AES-256-GCM at rest, values never shown again, per user. No team sharing of credentials, status tracking or OAuth. |
@@ -92,6 +92,6 @@ These problems were found in the code committed before this review:
 
 1. **Add a persistent database on the server.** Set `DATABASE_URL` to a PostgreSQL database. Without it, the server's SQLite file is wiped on every redeploy and added users are lost. Free Render databases expire after 30 days; see the README.
 2. **Add a Brave Search API key** (`BRAVE_API_KEY`). Free engines often block cloud servers.
-3. **Phase 4: Sharing** (5.11). It's the biggest gap for team use, and it needs the storage decision above revisited (for example, an explicit "share a copy" that uploads one sheet).
+3. **Phase 4: finish collaboration** (5.11). Snapshot sharing exists; comments, notifications and live sharing would need the storage decision above revisited.
 4. **Phase 5: Schedules** (5.12), using a job queue (RQ/Celery or BullMQ if moving to MERN).
 5. **Add an audit log** (5.14).
