@@ -155,6 +155,20 @@ def _on_topic(h: dict, url: str, signal: list[str]) -> bool:
     return any(s in text for s in signal)
 
 
+# Domains under these suffixes are only issued to accredited Indian academic/government institutions (.ac.in and
+# .edu.in registration both require UGC/AICTE-recognised status; .gov.in and .nic.in are government-only) - real
+# evidence a result is a genuine Indian institution, independent of whether a short search snippet happens to
+# literally repeat the queried place name. Real failure this fixes: "engineering colleges in Secunderabad, India"
+# got back real college results whose SERP snippets just said the college name with no city/country mentioned at
+# all (not every snippet repeats the obvious) - plain _on_topic rejected every one of them as "unrelated", and this
+# query's result set happened to have no directory hit either, so there was nothing to confirm the area from.
+_TRUSTED_TLDS = (".ac.in", ".edu.in", ".gov.in", ".nic.in")
+
+
+def _is_trusted_domain(url: str) -> bool:
+    return domain_of(url).endswith(_TRUSTED_TLDS)
+
+
 def _search(job: Job) -> tuple[list[dict], list[dict]]:
     spec = job.spec
     platforms = spec.get("platforms", ["web"])
@@ -209,7 +223,7 @@ def _search(job: Job) -> tuple[list[dict], list[dict]]:
                 if domain_of(url) in listings.LISTING_PARSERS:
                     listing_hits.append({"url": url})
                 continue
-            if not area_confirmed and not _on_topic(h, url, signal):
+            if not area_confirmed and not _is_trusted_domain(url) and not _on_topic(h, url, signal):
                 off_topic += 1
                 continue
             results.append({"query": q, "title": h.get("title", ""), "url": url, "snippet": h.get("body", "")})

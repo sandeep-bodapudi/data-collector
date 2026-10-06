@@ -60,9 +60,22 @@ def _home(url: str) -> str:
     return f"{u.scheme}://{root_domain(domain_of(url))}/"
 
 
+# A URL path shaped like "...-colleges-in-<place>" or "list-of-.../top-10-..." names a CATEGORY, not a place - no
+# real institution's own site has a page like that about itself. This catches the long tail of directory sites a
+# fixed domain blocklist can never keep up with (chunocollege.com, findmycollege.com, studyclap.com and others seen
+# slipping through on live runs, each a direct hit for this exact pattern) without needing to list every one by name.
+_LISTING_PATH_RE = re.compile(
+    r"(colleges?|institutes?|universit(y|ies)|schools?|hospitals?|hotels?|restaurants?)s?[-/](in|near)[-/]"
+    r"|/(top|best)[-/]\d*[-/]?.*(colleges?|institutes?|universit(y|ies)|schools?)"
+    r"|/list[-/]of[-/]", re.I)
+
+
 def _is_official_candidate(url: str) -> bool:
     d = domain_of(url)
+    path = urlparse(url).path.lower()
     if not d or url.lower().split("?")[0].endswith((".pdf", ".doc", ".docx", ".xls", ".xlsx")):
+        return False
+    if _LISTING_PATH_RE.search(path):
         return False
     return not any(d == bad or d.endswith("." + bad) for bad in NOT_OFFICIAL)
 

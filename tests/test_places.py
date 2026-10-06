@@ -454,6 +454,18 @@ ok("an unrelated page is rejected", not discover.verify_page("Best travel deals 
 ok("matching initials alone need the city too", not discover.verify_page("CBIT college of nursing, Kerala", "Chaitanya Bharathi Institute of Technology", [], "Hyderabad")
    and discover.verify_page("CBIT engineering college, Gandipet Hyderabad", "Chaitanya Bharathi Institute of Technology", [], "Hyderabad"))
 
+# ---- a "...-colleges-in-<place>" URL path is a directory, whichever domain it's on ---------------------------
+# Real failure: chunocollege.com, findmycollege.com and studyclap.com (none on the domain blocklist - an endless
+# long tail) all slipped through as if they were someone's own site, purely because their domain names sound
+# college-ish. None of them would ever pass this check for their OWN homepage ("/") - only their category pages.
+ok("a 'colleges-in-<place>' category page is a directory on any domain",
+   not discover._is_official_candidate("https://findmycollege.com/engineering-colleges-in-secunderabad"))
+ok("a 'top-N-...-colleges' listing page is a directory on any domain",
+   not discover._is_official_candidate("https://example.com/top-10-engineering-colleges-in-hyderabad"))
+ok("a real college's own homepage is unaffected", discover._is_official_candidate("https://griet.ac.in/"))
+ok("a real college's own page about its own schools/departments is unaffected (not every '.../schools...' path is a directory)",
+   discover._is_official_candidate("https://somecollege.edu.in/schools-of-management"))
+
 class FakeFetcher:
     pages = {"https://griet.ac.in/": "<html><title>GRIET</title><body>Gokaraju Rangaraju Institute of Engineering and Technology, Hyderabad</body></html>",
              "https://griet.in/": "<html><body>Shoe shop</body></html>"}
@@ -541,6 +553,27 @@ j3.spec = {"queries": ["engineering colleges in Tarnaka"], "platforms": ["web"],
 rows3, _ = jobs._search(j3)
 ok("the real official site survives once a directory result confirms the engine understood the area",
    [r["url"] for r in rows3] == ["https://www.uceou.edu/contactus.php"], str(rows3))
+jobs.web_search = real_jobs_web_search
+
+# ---- a .ac.in/.edu.in result survives even with NO directory confirmation and a snippet mentioning nothing ------
+# Real failure: "engineering colleges in Secunderabad, India" got back real college results whose SERP snippets just
+# said the college name - no city, no "India", nothing _on_topic could match - and this particular query's result
+# set happened to have no directory hit either, so area_confirmed stayed False too. .ac.in/.edu.in registration is
+# gated to accredited Indian institutions, so that domain shape alone is real evidence, independent of snippet text.
+no_snippet_hits = [{"title": "Vasavi College of Engineering", "body": "", "href": "https://www.vce.ac.in/"}]
+jobs.web_search = lambda q, region, n, say: no_snippet_hits
+j5 = FakeJob2()
+j5.spec = {"queries": ["engineering colleges in Secunderabad, India"], "platforms": ["web"], "max_results": 50, "one_per_site": False, "region": "in-en"}
+rows5, _ = jobs._search(j5)
+ok("a .ac.in result with no matching text and no directory confirmation is still kept",
+   [r["url"] for r in rows5] == ["https://www.vce.ac.in/"], str(rows5))
+
+jobs.web_search = lambda q, region, n, say: [{"title": "College of Engineering", "body": "", "href": "https://engineering.oregonstate.edu/"}]
+j6 = FakeJob2()
+j6.spec = {"queries": ["engineering colleges in Secunderabad, India"], "platforms": ["web"], "max_results": 50, "one_per_site": False, "region": "in-en"}
+rows6, _ = jobs._search(j6)
+ok("a non-Indian .edu domain with the same empty snippet is still rejected (trust is TLD-specific, not a blanket bypass)",
+   rows6 == [], str(rows6))
 jobs.web_search = real_jobs_web_search
 
 # ---- listing pages: a directory page with no dedicated parser is still just dropped, but one with a parser -------
