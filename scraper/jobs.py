@@ -238,9 +238,9 @@ def _search(job: Job) -> tuple[list[dict], list[dict]]:
 
 def _expand_listings(job: Job, fetcher: Fetcher, listing_hits: list[dict], known_names: set) -> list[dict]:
     """Turn each listing-page hit into one row per name found on it, instead of one row for the page itself.
-    Fast by design: just the name, address (when the listing shows one) and the directory's own profile link for
-    that entry - not yet verified as the institution's own official site. Run those rows through Search the web
-    again (now with real individual names as queries) to fill in Emails/Phone Numbers/Website."""
+    Just the name, address (when the listing shows one) and the directory's own profile link for that entry -
+    not yet verified as the institution's own official site. _enrich_listed_rows fills in the real website and
+    contacts for each afterwards."""
     rows = []
     for hit in listing_hits:
         if job.cancelled.is_set():
@@ -263,6 +263,79 @@ def _expand_listings(job: Job, fetcher: Fetcher, listing_hits: list[dict], known
             job.say(f"  {domain_of(hit['url'])}: {added} new name{'s' if added != 1 else ''} from its listing"
                     + (f" ({dupes} already found elsewhere)" if dupes else ""))
     return rows
+
+
+def _enrich_web_row(job: Job, fetcher: Fetcher, row: dict, spec: dict) -> dict:
+    """Fill in contacts for a row that now has a verified website - the same contact-page crawl _process_page does
+    for a normal search hit, just reused here for a row that started from a listing page instead."""
+    url = row.get("Website", "")
+    if url and not url.startswith("http"):
+        url = "http://" + url
+    if not url:
+        return row
+    html, note = fetcher.get_html(url)
+    if not html:
+        job.say(f"  could not read {url}: {note}")
+        return row
+    page = extract.parse(html, url)
+    candidates = extract.candidate_contact_urls(url, page.get("contact_page", ""))
+    visited = {url}
+    for sub_url in candidates:
+        if job.cancelled.is_set():
+            break
+        if sub_url in visited:
+            continue
+        if page["emails"] and page["phones"]:
+            break
+        visited.add(sub_url)
+        sub_html, _ = fetcher.get_html(sub_url)
+        if sub_html:
+            _merge_pages(page, extract.parse(sub_html, sub_url))
+    emails = _own_emails(page["emails"], url)
+    if emails:
+        existing = row["Emails"].split("; ") if row.get("Emails") else []
+        row["Emails"] = "; ".join(dict.fromkeys(existing + emails))
+    if not row.get("Phone Numbers") and page["phones"]:
+        row["Phone Numbers"] = "; ".join(extract.dedupe_phones(page["phones"])[:3])
+    if not row.get("Address") and page["address"]:
+        row["Address"] = page["address"]
+    if spec["custom_fields"]:
+        row.update(ai_extract.extract_fields(spec["custom_fields"], page["_text"], url, row["Name"], spec["ai"]))
+    return row
+
+
+def _enrich_listed_rows(job: Job, fetcher: Fetcher, rows: list[dict], spec: dict):
+    """A listing-expanded row starts with only a name (and maybe an address) - find each one's real website and
+    read its contacts, the same two-step, search-engine-aware way Places mode already does: first the free guess
+    (name.ac.in-style addresses, verified by reading the page - no search engine, no blocking risk), then a paced
+    web search for whatever's left (capped at MAX_DISCOVER, same as Places, so one huge run can't hammer the free
+    engines for hundreds of names at once)."""
+    for r in rows:
+        r["_listing_url"] = r.get("Website", "")  # the directory's own profile link - kept as a fallback only
+        r["Website"], r["Search Location"] = "", r.get("Address", "") or "India"
+    _guess_websites(job, fetcher, rows)
+    if not job.cancelled.is_set():
+        _discover_websites(job, rows)
+    todo = [r for r in rows if r.get("Website")]
+    job.phase, job.total, job.done = "visit", len(todo), 0
+    job.say(f"Reading contact details from {len(todo)} verified website{'s' if len(todo) != 1 else ''}…")
+    with ThreadPoolExecutor(WORKERS) as pool:
+        futures = {pool.submit(_enrich_web_row, job, fetcher, r, spec): r for r in todo}
+        for fut in as_completed(futures):
+            if job.cancelled.is_set():
+                pool.shutdown(wait=False, cancel_futures=True)
+                break
+            job.done += 1
+            try:
+                fut.result()
+            except Exception as e:
+                job.say(f"  failed: {e}")
+    for r in rows:
+        if not r.get("Website"):
+            r["Website"] = r.pop("_listing_url", "")  # nothing verified - the directory link is the only lead left
+        else:
+            r.pop("_listing_url", None)
+        r.pop("Search Location", None)  # not a web-search column; only used internally to steer the guess/search
 
 
 def _merge_pages(base: dict, extra: dict):
@@ -356,7 +429,10 @@ def _run_web(job: Job):
     if listing_hits and not job.cancelled.is_set():
         job.activity = f"Reading {len(listing_hits)} listing page{'s' if len(listing_hits) != 1 else ''} for individual names…"
         job.say(f"Expanding {len(listing_hits)} listing page{'s' if len(listing_hits) != 1 else ''} into individual rows…")
-        for row in _expand_listings(job, fetcher, listing_hits, known_names):
+        listed_rows = _expand_listings(job, fetcher, listing_hits, known_names)
+        if listed_rows and not job.cancelled.is_set():
+            _enrich_listed_rows(job, fetcher, listed_rows, spec)
+        for row in listed_rows:
             if _keep(spec, row):
                 job.rows.append(row)
         job.done = job.total

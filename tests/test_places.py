@@ -617,6 +617,11 @@ jobs.web_search = lambda q, region, n, say: [
     {"href": "https://www.colleges9.in/Telangana/Hyderabad/Engineering-Colleges/", "title": "Engineering Colleges List", "body": ""},
     {"href": "https://aarmahaveer.ac.in/", "title": "AAR Mahaveer Engineering College", "body": "Hyderabad"},
 ]
+# The listing-expanded row (BVRIT) now also goes through _enrich_listed_rows - mocked out here (offline, like
+# everywhere else in this file) since enrichment itself is covered thoroughly in its own tests below.
+real_guess4, real_find4 = discover.guess_website, discover.find_website
+discover.guess_website = lambda fetcher, name, area="", aliases=(): None
+discover.find_website = lambda name, where, say=None, aliases=(): (None, 2)
 j4 = jobs.Job({"queries": ["engineering colleges in Hyderabad"], "platforms": ["web"], "max_results": 50,
                "one_per_site": False, "region": "in-en", "fields": ["address"], "custom_fields": [], "require": "",
                "follow_contact": False, "ai": {}})
@@ -627,6 +632,7 @@ ok("the listing page is expanded instead of kept as one row for the page itself"
 ok("a name already found as a real official site is not duplicated from the listing",
    sum(1 for n in names if n.lower() == "aar mahaveer engineering college") == 1, names)
 ok("two real rows total: the one official site plus the one new name from the listing", len(j4.rows) == 2, names)
+discover.guess_website, discover.find_website = real_guess4, real_find4
 jobs.Fetcher = real_fetcher
 jobs.web_search = real_jobs_web_search
 
@@ -637,21 +643,36 @@ ok("every seed URL is colleges9.in's own Engineering-Colleges page for a distric
    all(u.startswith("https://www.colleges9.in/Telangana/") and u.endswith("/Engineering-Colleges/")
        for u in listings.KNOWN_SEEDS["telangana_engineering_colleges"]["urls"]))
 
+COLLEGE_HOME_PAGE = ('<html><title>AAR Mahaveer Engineering College</title>'
+                      '<body>Contact us: info@aarmahaveer.ac.in, 040-23146077. Hyderabad.</body></html>')
 class FakeFetcher3:
     def get_html(self, url):
-        return (COLLEGES9_FIXTURE, "ok") if "colleges9.in" in url else (None, "not used")
+        if "colleges9.in" in url:
+            return COLLEGES9_FIXTURE, "ok"
+        if "aarmahaveer.ac.in" in url:
+            return COLLEGE_HOME_PAGE, "ok"
+        return None, "not used"
 jobs.Fetcher = lambda spec: FakeFetcher3()
-jobs.web_search = lambda q, region, n, say: (_ for _ in ()).throw(AssertionError("a seed-only run must never call web_search"))
+real_guess, real_find = discover.guess_website, discover.find_website
+# The free, search-engine-free guess (name.ac.in-style addresses + real DNS) is mocked out entirely here so this
+# test stays offline, as promised at the top of this file - "nothing is guessed" is exercised directly elsewhere
+# (see "nothing is guessed when no address resolves" above). Only the paced web-search fallback is exercised here.
+discover.guess_website = lambda fetcher, name, area="", aliases=(): None
+discover.find_website = lambda name, where, say=None, aliases=(): (("https://aarmahaveer.ac.in/", 5) if "AAR" in name.upper() else (None, 3))
 j7 = jobs.Job({"queries": [], "seed": "telangana_engineering_colleges", "platforms": ["web"], "max_results": 50,
-               "one_per_site": False, "region": "in-en", "fields": ["address"], "custom_fields": [], "require": "",
-               "follow_contact": False, "ai": {}})
+               "one_per_site": False, "region": "in-en", "fields": ["address", "emails", "phones"], "custom_fields": [],
+               "require": "", "follow_contact": False, "ai": {}})
 jobs._run_web(j7)
-ok("a seed-only run (no typed searches at all) still produces real rows, with no search engine call",
-   len(j7.rows) == 2, [r["Name"] for r in j7.rows])
-ok("fetching 10 district pages (not 1) for the chosen seed",
-   j7.total == 10, j7.total)
+ok("a seed-only run (no typed searches at all) still produces real rows", len(j7.rows) == 2, [r["Name"] for r in j7.rows])
+aar = next(r for r in j7.rows if "AAR" in r["Name"])
+bvrit = next(r for r in j7.rows if "BVRIT" in r["Name"])
+ok("a name the search fallback resolves gets its real website and contacts filled in",
+   aar["Website"] == "https://aarmahaveer.ac.in/" and aar["Emails"] == "info@aarmahaveer.ac.in" and "23146077" in aar["Phone Numbers"], aar)
+ok("a name nothing resolves for keeps the directory's own profile link as the only lead, no contacts invented",
+   bvrit["Website"].startswith("https://www.colleges9.in/colleges/") and not bvrit.get("Emails") and not bvrit.get("Phone Numbers"), bvrit)
+ok("the internal 'Search Location' helper column never leaks into the sheet", "Search Location" not in aar and "Search Location" not in bvrit)
+discover.guess_website, discover.find_website = real_guess, real_find
 jobs.Fetcher = real_fetcher
-jobs.web_search = real_jobs_web_search
 
 print(f"\n{len(failures)} failure(s)" if failures else "\nAll tests passed")
 sys.exit(1 if failures else 0)
