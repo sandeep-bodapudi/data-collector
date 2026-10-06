@@ -95,6 +95,8 @@ How it works:
 
 ## Scaling "Search the web" to hundreds of searches
 
+"Search the web" sheets contain only real data: **Name** (the organisation's name read from its site, not the search-result title), the details you ticked (Emails, Phone Numbers, Address…) and **Website**. Search queries, snippets and fetch status stay in the run log. Directory/aggregator pages (Collegedunia, Shiksha, Justdial, Wikipedia, social sites…) are skipped because they list many places rather than being one. For a complete list of places in an area, **Places** mode is the better tool: it starts from a map list (100+ colleges) instead of however many sites a search engine returns.
+
 For broad coverage ("100+ websites"), **New run → Search the web** has a **Generate many searches at once** panel: list the areas/items you want (one per line) and one pattern using `{area}`, e.g. `engineering colleges in {area} contact email phone` — it expands to one search per area and adds them all in one click. Up to 300 searches can be queued in a single run.
 
 Throughput is governed by the same measured search-engine pacing as Places (see the table above), shared by both modes through `_current_gap()` in [scraper/jobs.py](scraper/jobs.py):

@@ -155,6 +155,8 @@ def _search(job: Job) -> list[dict]:
             if not url or key in seen:
                 continue
             seen.add(key)
+            if "site:" not in q and not discover._is_official_candidate(url):
+                continue  # a directory, social or map page lists other places; it is not one itself
             results.append({"query": q, "title": h.get("title", ""), "url": url, "snippet": h.get("body", "")})
             new += 1
         job.say(f"  {new} new results")
@@ -174,11 +176,9 @@ def _merge_pages(base: dict, extra: dict):
 
 def _process_page(job: Job, fetcher: Fetcher, hit: dict) -> dict:
     spec = job.spec
-    row = {
-        "Search Query": hit["query"], "Result Title": hit["title"], "Source URL": hit["url"],
-        "Website": domain_of(hit["url"]), "Search Snippet": hit["snippet"],
-    }
     html, note = fetcher.get_html(hit["url"])
+    if not html:
+        job.say(f"  could not read {hit['url']}: {note}")
     page = extract.parse(html, hit["url"]) if html else None
 
     # Check contact/about/staff pages for more emails & phones (the "Contact Us pages" switch).
@@ -199,12 +199,15 @@ def _process_page(job: Job, fetcher: Fetcher, hit: dict) -> dict:
                 sub_page = extract.parse(sub_html, sub_url)
                 _merge_pages(page, sub_page)
 
+    # Only the real data: who it is, how to reach them, where the site is. Search/fetch details stay in the run log.
+    row = {"Name": (page["name"] if page else "") or extract.clean_name(hit["title"])}
     for key in spec["fields"]:
-        row[extract.STANDARD_FIELDS[key]] = page[key] if page else ""
+        if key != "title":  # the name above already covers the page title
+            row[extract.STANDARD_FIELDS[key]] = page[key] if page else ""
+    row["Website"] = domain_of(hit["url"])
     if spec["custom_fields"]:
         text = page["_text"] if page else f'{hit["title"]}\n{hit["snippet"]}'
         row.update(ai_extract.extract_fields(spec["custom_fields"], text, hit["url"], hit["query"], spec["ai"]))
-    row["Fetch Status"] = note
     return row
 
 
@@ -221,9 +224,8 @@ def _keep(spec: dict, row: dict) -> bool:
 
 def _run_web(job: Job):
     spec = job.spec
-    job.columns = (["Search Query", "Result Title", "Source URL", "Website", "Search Snippet"]
-                   + [extract.STANDARD_FIELDS[k] for k in spec["fields"]]
-                   + spec["custom_fields"] + ["Fetch Status"])
+    job.columns = (["Name"] + [extract.STANDARD_FIELDS[k] for k in spec["fields"] if k != "title"]
+                   + ["Website"] + spec["custom_fields"])
     hits = _search(job)
     job.total = len(hits)
     job.phase, job.activity = "visit", f"Reading {len(hits)} websites and picking out the details…"
