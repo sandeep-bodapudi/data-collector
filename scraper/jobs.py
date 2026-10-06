@@ -327,6 +327,10 @@ def _run_web(job: Job):
     job.columns = (["Name"] + [extract.STANDARD_FIELDS[k] for k in spec["fields"] if k != "title"]
                    + ["Website"] + spec["custom_fields"])
     hits, listing_hits = _search(job)
+    if spec.get("seed") in listings.KNOWN_SEEDS:
+        seed = listings.KNOWN_SEEDS[spec["seed"]]
+        job.say(f"Also pulling {seed['label']}…")
+        listing_hits += [{"url": u} for u in seed["urls"]]
     job.total = len(hits) + len(listing_hits)
     job.phase, job.activity = "visit", f"Reading {len(hits)} websites and picking out the details…"
     job.say(f"Visiting {len(hits)} pages…")

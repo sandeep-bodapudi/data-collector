@@ -48,7 +48,7 @@ _load_env_file()
 _secret_key()
 
 from models import ROLES, AppSetting, Share, User, VaultCredential, db, decrypt, encrypt  # noqa: E402
-from scraper import ai_extract, extract, places, sheets  # noqa: E402
+from scraper import ai_extract, extract, listings, places, sheets  # noqa: E402
 from scraper.excel import write_workbook  # noqa: E402
 from scraper.jobs import JOBS, REGIONS, purge_jobs, start_job  # noqa: E402
 
@@ -295,6 +295,7 @@ def index():
         fields=extract.STANDARD_FIELDS,
         categories=list(places.CATEGORIES),
         regions=REGIONS,
+        known_seeds={k: v["label"] for k, v in listings.KNOWN_SEEDS.items()},
         providers={k: {"label": v["label"], "model": v["model"]} for k, v in ai_extract.PROVIDERS.items()},
         restricted=_restricted_enabled(),
         company=COMPANY_NAME,
@@ -384,14 +385,15 @@ def create_job():
         # 300 is generous on purpose - for breadth across "100-200 websites" the limit that actually matters is how
         # fast search engines can be queried without being refused (see scraper/search.py), not this count.
         queries = list(dict.fromkeys(q.strip() for q in (d.get("queries") or "").splitlines() if q.strip()))[:300]
-        if not queries:
-            return jsonify(error="Add at least one search."), 400
+        seed = d.get("seed") if d.get("seed") in listings.KNOWN_SEEDS else ""
+        if not queries and not seed:
+            return jsonify(error="Add at least one search, or pick a known directory below."), 400
         fields = [f for f in d.get("fields", []) if f in extract.STANDARD_FIELDS]
         if not fields and not custom:
             return jsonify(error="Pick at least one detail to collect."), 400
         platforms = [p for p in (d.get("platforms") or ["web"])
                      if p in ("web", "linkedin.com", "facebook.com", "instagram.com", "twitter.com")] or ["web"]
-        spec = {"mode": "web", "queries": queries,
+        spec = {"mode": "web", "queries": queries, "seed": seed,
                 "region": d.get("region") if d.get("region") in REGIONS else "wt-wt",
                 "fields": fields, "platforms": platforms,
                 "follow_contact": bool(d.get("follow_contact", True)), "one_per_site": bool(d.get("one_per_site")),

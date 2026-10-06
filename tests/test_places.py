@@ -630,5 +630,28 @@ ok("two real rows total: the one official site plus the one new name from the li
 jobs.Fetcher = real_fetcher
 jobs.web_search = real_jobs_web_search
 
+# ---- known seed directories: real rows with zero search engine involved -----------------------------------------
+ok("the Telangana engineering-colleges seed covers all 10 real districts",
+   len(listings.KNOWN_SEEDS["telangana_engineering_colleges"]["urls"]) == 10)
+ok("every seed URL is colleges9.in's own Engineering-Colleges page for a district",
+   all(u.startswith("https://www.colleges9.in/Telangana/") and u.endswith("/Engineering-Colleges/")
+       for u in listings.KNOWN_SEEDS["telangana_engineering_colleges"]["urls"]))
+
+class FakeFetcher3:
+    def get_html(self, url):
+        return (COLLEGES9_FIXTURE, "ok") if "colleges9.in" in url else (None, "not used")
+jobs.Fetcher = lambda spec: FakeFetcher3()
+jobs.web_search = lambda q, region, n, say: (_ for _ in ()).throw(AssertionError("a seed-only run must never call web_search"))
+j7 = jobs.Job({"queries": [], "seed": "telangana_engineering_colleges", "platforms": ["web"], "max_results": 50,
+               "one_per_site": False, "region": "in-en", "fields": ["address"], "custom_fields": [], "require": "",
+               "follow_contact": False, "ai": {}})
+jobs._run_web(j7)
+ok("a seed-only run (no typed searches at all) still produces real rows, with no search engine call",
+   len(j7.rows) == 2, [r["Name"] for r in j7.rows])
+ok("fetching 10 district pages (not 1) for the chosen seed",
+   j7.total == 10, j7.total)
+jobs.Fetcher = real_fetcher
+jobs.web_search = real_jobs_web_search
+
 print(f"\n{len(failures)} failure(s)" if failures else "\nAll tests passed")
 sys.exit(1 if failures else 0)

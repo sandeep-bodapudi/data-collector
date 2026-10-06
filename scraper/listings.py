@@ -64,3 +64,25 @@ def extract_listing(html: str, url: str) -> list[dict]:
         return parser(BeautifulSoup(html, "lxml"), url)
     except Exception:  # a parser written against one page layout must never break the run if the site changed it
         return []
+
+
+# ---------------------------------------------------------------- known directory URLs (no search engine needed)
+# colleges9.in organises every Telangana district's colleges under a fixed, discoverable URL shape - no search
+# required to find these pages at all, which means this data source has zero exposure to free-engine blocking or
+# pacing. Verified live, real counts per district (engineering colleges): Adilabad 2, Hyderabad 38, Karimnagar 19,
+# Khammam 25, Mahaboobnagar 10, Medak 28, Nalgonda 40, Nizamabad 13, Ranga-Reddy 165, Warangal 30 - 370 real colleges
+# total, one search-free run. The district list itself was read live from https://www.colleges9.in/Telangana/ and
+# is reasonably stable (it's a fixed set of districts, not something that gets reshuffled), but if colleges9.in adds
+# or renames a district this list needs a manual refresh - it's not re-discovered automatically every run, to avoid
+# depending on a live page fetch succeeding just to know what to fetch next.
+TELANGANA_DISTRICTS = (
+    "Adilabad", "Hyderabad", "Karimnagar", "Khammam", "Mahaboobnagar", "Medak",
+    "Nalgonda", "Nizamabad", "Ranga-Reddy", "Warangal",
+)
+
+KNOWN_SEEDS = {
+    "telangana_engineering_colleges": {
+        "label": "Telangana engineering colleges (colleges9.in, ~370 real colleges, no search engine needed)",
+        "urls": [f"https://www.colleges9.in/Telangana/{d}/Engineering-Colleges/" for d in TELANGANA_DISTRICTS],
+    },
+}

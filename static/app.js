@@ -544,6 +544,14 @@ async function viewNewRun(mode) {
           <div class="hint">${CFG.restricted ? "Logged-in collection for LinkedIn/Facebook is enabled by your admin and uses the cookies in your Settings."
             : "For social sites we collect only what appears in public search results (name, link, snippet). Their pages are not opened."}</div>
         </div>
+        ${Object.keys(CFG.known_seeds || {}).length ? `
+        <div class="field mt-24"><label class="label">Known directories <span class="opt">(no search engine needed)</span></label>
+          <div class="option-grid">${Object.entries(CFG.known_seeds).map(([val, label]) => `
+            <label class="option"><input type="radio" name="seed" value="${val}"><span class="o-ico">${icon("globe")}</span><span><b>${esc(label)}</b></span><span class="box"></span></label>`).join("")}
+            <label class="option"><input type="radio" name="seed" value="" checked><span><b>None</b><small>Just my searches above</small></span><span class="box"></span></label>
+          </div>
+          <div class="hint">Fetched directly, page by page - not affected by free search engines refusing requests. Adds to whatever searches you listed above; you can also leave the searches empty and use this alone.</div>
+        </div>` : ""}
       </div>
     </div>
     <div class="form-section">
@@ -631,10 +639,13 @@ async function viewNewRun(mode) {
     if (mode === "web") {
       const fields = $$("input[name=field]:checked", v).map((c) => CFG.fields[c.value]).concat(custom.items);
       const plats = $$("input[name=platform]:checked", v).map((c) => PLATFORMS.find((p) => p[0] === c.value)[1]);
+      const seedEl = $("input[name=seed]:checked", v);
+      const seedOn = !!(seedEl && seedEl.value);
       rows.push(["Searches", queries.items.length || "—"], ["Search on", plats.join(", ") || "—"],
         ["Websites", queries.items.length ? `up to ${fmtNum(queries.items.length * plats.length * +$("#max_results").value)}` : "—"],
         ["Country", CFG.regions[$("#region").value]], ["Columns", fields.length ? `${fields.length} details` : "—"]);
-      checks.push([queries.items.length > 0, "At least one search"], [fields.length > 0, "At least one detail"], [plats.length > 0, "A place to search"]);
+      if (seedOn) rows.splice(1, 0, ["Known directory", CFG.known_seeds[seedEl.value]]);
+      checks.push([queries.items.length > 0 || seedOn, "At least one search, or a known directory"], [fields.length > 0, "At least one detail"], [plats.length > 0, "A place to search"]);
     } else {
       rows.push(["Category", state.category], ["Locations", locations.items.length ? locations.items.slice(0, 2).join("; ") + (locations.items.length > 2 ? ` +${locations.items.length - 2}` : "") : "—"],
         ["Max per location", fmtNum($("#max_places").value)], ["Website check", $("#enrich").checked || custom.items.length ? "Yes" : "No"]);
@@ -670,7 +681,7 @@ async function viewNewRun(mode) {
     custom = TagInput($("#custom"), { placeholder: aiReady ? "e.g. founder name, services offered" : "Add your AI key in Settings first", disabled: !aiReady, onChange: update });
     $("#max_results").oninput = () => { $("#max_out").textContent = $("#max_results").value; update(); };
     $$("#require button", v).forEach((b) => b.onclick = () => { $$("#require button", v).forEach((x) => x.classList.remove("active")); b.classList.add("active"); state.require = b.dataset.v; });
-    $$("input[name=field], input[name=platform], #region", v).forEach((c) => c.addEventListener("change", update));
+    $$("input[name=field], input[name=platform], input[name=seed], #region", v).forEach((c) => c.addEventListener("change", update));
     setTimeout(() => queries.input.focus(), 50);
   } else {
     locations = TagInput($("#locations"), { placeholder: "e.g. Bachupally, Hyderabad", onChange: update });
@@ -701,12 +712,14 @@ async function viewNewRun(mode) {
     const body = { mode, file_name: $("#file_name").value, custom_fields: custom.items.join(",") };
     if (mode === "web") {
       queries.flush();
+      const seedEl = $("input[name=seed]:checked", v);
       Object.assign(body, {
         queries: queries.items.join("\n"), max_results: $("#max_results").value, region: $("#region").value,
         require: state.require, follow_contact: $("#follow_contact").checked, one_per_site: $("#one_per_site").checked,
+        seed: seedEl ? seedEl.value : "",
         fields: $$("input[name=field]:checked", v).map((c) => c.value), platforms: $$("input[name=platform]:checked", v).map((c) => c.value),
       });
-      if (!queries.items.length) { toast("Add at least one search in step 1.", "err"); return queries.input.focus(); }
+      if (!queries.items.length && !body.seed) { toast("Add at least one search in step 1, or pick a known directory.", "err"); return queries.input.focus(); }
       if (!body.platforms.length) return toast("Choose at least one place to search.", "err");
       if (!body.fields.length && !custom.items.length) return toast("Pick at least one detail in step 2.", "err");
     } else {
