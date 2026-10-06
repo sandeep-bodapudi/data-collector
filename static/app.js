@@ -481,7 +481,7 @@ const PLATFORMS = [["web", "Websites", "globe"], ["linkedin.com", "LinkedIn", "l
 const CAT_GROUPS = [
   ["Religious", ["Hindu temples", "Churches", "Mosques", "Gurudwaras", "Buddhist / Jain temples", "All places of worship"]],
   ["Health", ["Hospitals", "Clinics & doctors", "Pharmacies"]],
-  ["Education", ["Schools", "Colleges & universities"]],
+  ["Education", ["Schools", "Colleges & universities", "Engineering colleges"]],
   ["Food & stay", ["Restaurants", "Cafes", "Hotels"]],
   ["Business", ["Offices / companies", "IT companies", "Factories / industrial", "Supermarkets & shops", "Banks", "ATMs", "Petrol pumps"]],
   ["Public", ["Government offices", "Police stations", "Tourist attractions"]],
@@ -564,7 +564,7 @@ async function viewNewRun(mode) {
       <div class="section-body">
         <div class="tags" id="locations"></div>
         <div class="hint">Press <kbd>Enter</kbd> after each place. Adding the country gives better matches.</div>
-        <div class="chips"><small>Try</small>${["Hyderabad, India", "Vijayawada, India", "Tirupati, India", "Chennai, India"].map((x) => `<button type="button" class="chip" data-l="${esc(x)}">${esc(x)}</button>`).join("")}</div>
+        <div class="chips"><small>Try</small>${["Bachupally, Hyderabad", "Hyderabad, India", "Vijayawada, India", "Tirupati, India"].map((x) => `<button type="button" class="chip" data-l="${esc(x)}">${esc(x)}</button>`).join("")}</div>
       </div>
     </div>
     <div class="form-section">
@@ -574,7 +574,8 @@ async function viewNewRun(mode) {
           <div class="field"><label class="label" for="name_filter">Name contains <span class="opt">(optional)</span></label><input class="input" id="name_filter" placeholder="e.g. Venkateswara, Apollo"></div>
           <div class="field"><label class="label">Max places per location</label><div class="range-row"><input type="range" id="max_places" min="10" max="500" step="10" value="300" aria-label="Max places per location"><output id="places_out">300</output></div></div>
         </div>
-        <label class="switch"><input type="checkbox" id="enrich"><span class="sw"></span><span><b>Visit each place's website for emails &amp; phones</b><small>Slower, but finds contact details the map doesn't have.</small></span></label>
+        <label class="switch"><input type="checkbox" id="enrich" checked><span class="sw"></span><span><b>Find emails &amp; phone numbers</b><small>Reads each place's website for contact details. The map itself rarely has them, so leave this on if you need contacts. Slower.</small></span></label>
+        <label class="switch mt-8" id="find-sites-row"><input type="checkbox" id="find_sites" checked><span class="sw"></span><span><b>Look up websites the map doesn't list</b><small>Searches the web for each place's own site first (about 2 seconds per place, up to 80 per run). Without this, only places with a website on the map get contacts.</small></span></label>
         ${aiBlock("custom-places")}
         <div class="callout info mt-16">${icon("info")}<div>Places come from OpenStreetMap, a free public map. Well-known places are almost always listed; very small ones may be missing.</div></div>
       </div>
@@ -631,7 +632,7 @@ async function viewNewRun(mode) {
     $$("input[name=field], input[name=platform], #region", v).forEach((c) => c.addEventListener("change", update));
     setTimeout(() => queries.input.focus(), 50);
   } else {
-    locations = TagInput($("#locations"), { placeholder: "e.g. Hyderabad, India", onChange: update });
+    locations = TagInput($("#locations"), { placeholder: "e.g. Bachupally, Hyderabad", onChange: update });
     $$("[data-l]", v).forEach((b) => b.onclick = () => locations.add(b.dataset.l));
     custom = TagInput($("#custom-places"), { placeholder: aiReady ? "e.g. main deity, temple timings" : "Add your AI key in Settings first", disabled: !aiReady, onChange: update });
     const renderCats = () => {
@@ -648,7 +649,9 @@ async function viewNewRun(mode) {
     $("#cat-filter").oninput = renderCats;
     renderCats();
     $("#max_places").oninput = () => { $("#places_out").textContent = $("#max_places").value; update(); };
-    $("#enrich").onchange = update;
+    const syncSites = () => { $("#find-sites-row").hidden = !$("#enrich").checked; };
+    $("#enrich").onchange = () => { syncSites(); update(); };
+    syncSites();
   }
   update();
 
@@ -669,7 +672,7 @@ async function viewNewRun(mode) {
       locations.flush();
       if (!state.category) { toast("Choose a category in step 1.", "err"); return $("#cat-filter").focus(); }
       Object.assign(body, { category: state.category, locations: locations.items.join("\n"), name_filter: $("#name_filter").value,
-        max_results: $("#max_places").value, enrich: $("#enrich").checked });
+        max_results: $("#max_places").value, enrich: $("#enrich").checked, find_websites: $("#find_sites").checked });
       if (!locations.items.length) { toast("Add at least one location in step 2.", "err"); return locations.input.focus(); }
     }
     if (!navigator.onLine) return toast("You're offline. Connect to the internet to start a run.", "err");

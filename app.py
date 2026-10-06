@@ -379,7 +379,7 @@ def create_job():
             return jsonify(error="Choose a category."), 400
         spec = {"mode": "places", "category": d["category"], "locations": locations[:30],
                 "name_filter": (d.get("name_filter") or "").strip(),
-                "enrich": bool(d.get("enrich")) or bool(custom), **common}
+                "enrich": bool(d.get("enrich")) or bool(custom), "find_websites": bool(d.get("find_websites", True)), **common}
     else:
         queries = list(dict.fromkeys(q.strip() for q in (d.get("queries") or "").splitlines() if q.strip()))[:20]
         if not queries:

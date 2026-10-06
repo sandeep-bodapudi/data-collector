@@ -32,7 +32,8 @@ def _brave(query: str, region: str, max_results: int, key: str) -> list[dict]:
     return out[:max_results]
 
 
-def web_search(query: str, region: str, max_results: int, say) -> list[dict]:
+def web_search(query: str, region: str, max_results: int, say, engines=None) -> list[dict]:
+    """`engines` (optional) chooses which free engines to try, in order. The default order is FREE_ENGINES."""
     key = os.environ.get("BRAVE_API_KEY")
     if key:
         try:
@@ -45,7 +46,7 @@ def web_search(query: str, region: str, max_results: int, say) -> list[dict]:
 
     failed = []
     with DDGS() as ddgs:
-        for engine in FREE_ENGINES:
+        for engine in (engines or FREE_ENGINES):
             try:
                 hits = ddgs.text(query, region=region, max_results=max_results, backend=engine) or []
             except Exception as e:  # each engine fails in its own way (blocked, rate limited, no results)

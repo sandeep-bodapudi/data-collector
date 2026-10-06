@@ -30,6 +30,9 @@ CATEGORIES = {
     "Pharmacies": ['[amenity=pharmacy]'],
     "Schools": ['[amenity=school]'],
     "Colleges & universities": ['[amenity=college]', '[amenity=university]'],
+    # Colleges whose name says engineering or technology (plus the well-known Hyderabad short names, which the map
+    # often uses on its own, e.g. "griet college"). Junior colleges and schools are left out.
+    "Engineering colleges": ['[amenity~"^(college|university)$"][name~"engineer|tech|polytechnic|jntu|iiit|vjiet|griet|bvrit|cbit|mgit",i]'],
     "Restaurants": ['[amenity=restaurant]'],
     "Cafes": ['[amenity=cafe]'],
     "Hotels": ['[tourism=hotel]', '[tourism=guest_house]'],
@@ -53,11 +56,33 @@ class PlaceError(Exception):
     pass
 
 
-def _geocode_nominatim(location: str) -> dict | None:
-    r = requests.get(NOMINATIM, params={"q": location, "format": "json", "limit": 1}, headers=HEADERS, timeout=30)
+# How far to search around a place that is only a point on the map (metres), by what kind of place it is.
+AREA_PLACE_TYPES = {"city": 12000, "town": 6000, "municipality": 8000, "suburb": 2500, "neighbourhood": 2000,
+                    "neighborhood": 2000, "quarter": 2000, "city_district": 4000, "borough": 4000, "village": 3000,
+                    "hamlet": 2000, "locality": 2500, "isolated_dwelling": 1500, "district": 15000, "county": 20000,
+                    "state_district": 20000, "region": 30000}
+POINT_RADIUS = 3000  # when only one business or building matched, search this far around it
+BIG_BOX_DEGREES = 0.008  # about a kilometre
+
+
+def _nominatim(location: str, limit: int = 8) -> list[dict]:
+    r = requests.get(NOMINATIM, params={"q": location, "format": "json", "limit": limit}, headers=HEADERS, timeout=30)
     r.raise_for_status()
-    data = r.json()
-    return data[0] if data else None
+    return r.json()
+
+
+def _as_area(c: dict) -> dict | None:
+    """Turn a geocoder result into somewhere we can search inside. Returns None for a single business or building:
+    searching inside a shop's 10-metre outline finds nothing."""
+    cls, typ = c.get("class"), c.get("type")
+    s_, n_, w_, e_ = [float(x) for x in c["boundingbox"]]
+    if cls == "boundary" and c.get("osm_type") in ("relation", "way"):
+        return {"kind": "area", "osm_type": c["osm_type"], "osm_id": int(c["osm_id"])}
+    if cls in ("place", "boundary"):
+        if (n_ - s_) > BIG_BOX_DEGREES or (e_ - w_) > BIG_BOX_DEGREES:
+            return {"kind": "box", "bbox": (s_, w_, n_, e_)}
+        return {"kind": "around", "lat": float(c["lat"]), "lon": float(c["lon"]), "radius": AREA_PLACE_TYPES.get(typ, POINT_RADIUS)}
+    return None
 
 
 def _geocode_photon(location: str) -> dict | None:
@@ -69,32 +94,70 @@ def _geocode_photon(location: str) -> dict | None:
         return None
     p = feats[0]["properties"]
     lon, lat = feats[0]["geometry"]["coordinates"]
-    # Photon extent is [minLon, maxLat, maxLon, minLat]; fall back to ~10 km around the point.
-    w, n, e, s = p.get("extent") or [lon - 0.1, lat + 0.1, lon + 0.1, lat - 0.1]
-    return {"osm_id": p["osm_id"], "osm_type": {"R": "relation", "W": "way", "N": "node"}.get(p.get("osm_type"), "node"),
-            "boundingbox": [s, n, w, e]}
+    label = ", ".join(x for x in (p.get("name"), p.get("city"), p.get("state"), p.get("country")) if x)
+    extent = p.get("extent")  # [minLon, maxLat, maxLon, minLat]
+    if extent and (abs(extent[2] - extent[0]) > BIG_BOX_DEGREES or abs(extent[1] - extent[3]) > BIG_BOX_DEGREES):
+        w_, n_, e_, s_ = extent
+        return {"kind": "box", "bbox": (s_, w_, n_, e_), "label": label}
+    return {"kind": "around", "lat": lat, "lon": lon, "radius": POINT_RADIUS, "label": label, "approx": True}
 
 
 def geocode(location: str) -> dict:
-    for finder in (_geocode_nominatim, _geocode_photon):
+    """Find the place to search in, preferring a whole area (suburb, town, district) over one business.
+
+    "Bachupally, Hyderabad" used to match a single junior college, so the search covered 10 metres and found nothing.
+    Now: look for an area in the full text; if the matches are all businesses, retry with just the first part
+    ("Bachupally"); if that fails too, search a few kilometres around the best match and say so."""
+    parts = [x.strip() for x in location.split(",") if x.strip()]
+    attempts = [location] + ([parts[0]] if len(parts) > 1 else [])
+    first_match, reached = None, False
+    for q in attempts:
         try:
-            found = finder(location)
+            cands = _nominatim(q)
+            reached = True
         except requests.RequestException:
-            continue
+            cands = []
+        time.sleep(1.0)  # the free map search allows one request per second
+        for c in cands:
+            area = _as_area(c)
+            if area:
+                area["label"] = c.get("display_name", q)
+                area["fallback"] = q != location
+                return area
+        if cands and first_match is None:
+            first_match = cands[0]
+    if not reached or first_match is None:  # the main service was unreachable or knew nothing: try the backup
+        try:
+            found = _geocode_photon(location)
+        except requests.RequestException:
+            found = None
         if found:
+            found["fallback"] = False
             return found
-    raise PlaceError(f"Location not found: {location}. Try adding the state or country, e.g. 'Tirupati, India'.")
+    if first_match is not None:
+        return {"kind": "around", "lat": float(first_match["lat"]), "lon": float(first_match["lon"]), "radius": POINT_RADIUS,
+                "label": first_match.get("display_name", location), "approx": True, "fallback": False}
+    raise PlaceError(f"Location not found: {location}. Try the area name with the city or country, e.g. 'Bachupally, Hyderabad, India'.")
+
+
+def describe_location(geo: dict, asked: str) -> str:
+    """One plain sentence saying where the search really ran, so a wrong match is easy to spot."""
+    label = geo.get("label", asked)
+    if geo.get("approx"):
+        return f"Couldn't find an area called “{asked}”, so searching about {geo['radius'] / 1000:g} km around: {label}"
+    note = f" (matched from “{asked.split(',')[0].strip()}”)" if geo.get("fallback") else ""
+    return f"Searching inside: {label}{note}"
 
 
 def _area_clause(geo: dict) -> tuple[str, str]:
     """Return (prefix statement, filter suffix) restricting the query to the location."""
-    osm_id = int(geo["osm_id"])
-    if geo["osm_type"] == "relation":
-        return f"area({3600000000 + osm_id})->.a;", "(area.a)"
-    if geo["osm_type"] == "way":
-        return f"area({2400000000 + osm_id})->.a;", "(area.a)"
-    s, n, w, e = geo["boundingbox"]
-    return "", f"({s},{w},{n},{e})"
+    if geo["kind"] == "area":
+        base = 3600000000 if geo["osm_type"] == "relation" else 2400000000
+        return f"area({base + int(geo['osm_id'])})->.a;", "(area.a)"
+    if geo["kind"] == "box":
+        s_, w_, n_, e_ = geo["bbox"]
+        return "", f"({s_},{w_},{n_},{e_})"
+    return "", f"(around:{int(geo['radius'])},{geo['lat']},{geo['lon']})"
 
 
 def _overpass(query: str, notify=None) -> list[dict]:
@@ -124,8 +187,10 @@ def _addr(tags: dict) -> str:
     return ", ".join(p for p in parts if p)
 
 
-def search_places(category: str, location: str, name_filter: str = "", limit: int = 500, notify=None) -> list[dict]:
+def search_places(category: str, location: str, name_filter: str = "", limit: int = 500, notify=None, info=None) -> list[dict]:
     geo = geocode(location)
+    if info:
+        info(describe_location(geo, location))
     prefix, area = _area_clause(geo)
     name_part = f'[name~"{name_filter.replace(chr(34), "")}",i]' if name_filter else "[name]"
     stmts = "".join(f"nwr{f}{name_part}{area};" for f in CATEGORIES[category])
@@ -161,4 +226,7 @@ def search_places(category: str, location: str, name_filter: str = "", limit: in
             "Google Maps Link": f"https://www.google.com/maps?q={lat},{lon}" if lat else "",
             "Other Details": other[:500],
         })
+    if not rows and info:
+        info("  Nothing in the map data for this category here. Try the area name on its own, a bigger nearby area, "
+             "a broader category, or the Web search option, which also finds places the map doesn't list.")
     return rows

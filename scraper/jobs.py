@@ -9,7 +9,7 @@ import uuid
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 
-from . import ai_extract, extract, places
+from . import ai_extract, discover, extract, places
 from .excel import SECRET_KEYS
 from .fetch import WORKERS, Fetcher, domain_of
 from .search import SearchBlocked, web_search
@@ -282,11 +282,63 @@ def _enrich_place(job: Job, fetcher: Fetcher, row: dict) -> dict:
     return row
 
 
+MAX_DISCOVER = 80          # places to look up per run: every lookup is a web search, and search engines limit heavy use
+SEARCH_GAP = 5.0           # seconds between lookups. Faster than this and the search engines start returning nothing.
+THROTTLE_WAIT = 25.0       # how long to wait when a lookup comes back empty before trying once more
+
+
+def _discover_websites(job: Job, rows: list[dict]):
+    """The map rarely lists a website. Search the web for each such place's own site, so its contact details can be read."""
+    todo = [r for r in rows if not r.get("Website") and r.get("Name")]
+    if not todo:
+        return
+    batch = todo[:MAX_DISCOVER]
+    job.phase, job.total, job.done = "visit", len(batch), 0
+    job.say(f"Looking for the websites of {len(batch)} places that the map doesn't give one for "
+            f"(about {SEARCH_GAP:g} seconds each, to keep the search engines happy)…")
+    seen: dict[str, str | None] = {}  # the same name (several branches) is searched once
+    for r in batch:
+        if job.cancelled.is_set():
+            return
+        key = r["Name"].lower().strip()
+        job.activity = f"Looking for the website of {r['Name']}…"
+        if key not in seen:
+            try:
+                url, n_hits = discover.find_website(r["Name"], r.get("Search Location", ""), job.say, r.get("_aliases", []))
+                if n_hits == 0:  # almost certainly throttled: wait, then try this one again
+                    job.activity = "The search engines are limiting requests, waiting a moment…"
+                    job.say(f"  no search results for {r['Name']}; waiting {THROTTLE_WAIT:g} s and trying once more")
+                    time.sleep(THROTTLE_WAIT)
+                    url, n_hits = discover.find_website(r["Name"], r.get("Search Location", ""), job.say, r.get("_aliases", []))
+                    if n_hits == 0:
+                        job.say("  The search engines are still limiting requests, so the remaining websites were not "
+                                "looked up. Try again later, or ask your admin to add a Brave Search key.")
+                        return
+                seen[key] = url
+            except discover.SearchBlocked:
+                job.say("  Web search refused the requests, so the remaining websites were not looked up. "
+                        "Try again later, or ask your admin to add a Brave Search key.")
+                return
+            except Exception as e:  # one failed lookup must not stop the rest
+                job.say(f"  lookup failed for {r['Name']}: {type(e).__name__}")
+                seen[key] = None
+            time.sleep(SEARCH_GAP)
+        url = seen[key]
+        if url:
+            r["Website"], r["Website Source"] = url, "Found by web search"
+            job.say(f"  {r['Name']}: {url}")
+        else:
+            job.say(f"  {r['Name']}: no official website found")
+        job.done += 1
+    if len(todo) > len(batch):
+        job.say(f"  Looked up the first {len(batch)} of {len(todo)} places. Run again with a smaller area for the rest.")
+
+
 def _run_places(job: Job):
     spec = job.spec
     job.columns = list(places.PLACE_COLUMNS)
     if spec.get("enrich"):
-        job.columns += spec["custom_fields"] + ["Website Status"]
+        job.columns += spec["custom_fields"] + ["Website Source", "Website Status"]
     all_rows = []
     job.total = len(spec["locations"])
     for loc in spec["locations"]:
@@ -296,7 +348,7 @@ def _run_places(job: Job):
         job.activity = f'Looking up {spec["category"].lower()} in {loc}…'
         try:
             found = places.search_places(spec["category"], loc, spec.get("name_filter", ""), spec["max_results"],
-                                         notify=lambda msg: setattr(job, "activity", msg))
+                                         notify=lambda msg: setattr(job, "activity", msg), info=job.say)
         except places.PlaceError as e:
             job.say(f"  {e}")
             job.problems.append(str(e))
@@ -314,9 +366,23 @@ def _run_places(job: Job):
     if "Search Location" not in job.columns:
         job.columns.insert(0, "Search Location")
 
+    all_rows, merged = discover.merge_duplicates(all_rows)  # one place listed twice on the map under similar names
+    if merged:
+        job.say(f"Merged {merged} duplicate map listing{'s' if merged != 1 else ''} of the same place.")
+
     if not spec.get("enrich"):
         job.rows = all_rows
         return
+
+    for r in all_rows:
+        if r.get("Website"):
+            r["Website Source"] = "Map"
+    if spec.get("find_websites", True):
+        _discover_websites(job, all_rows)
+        if not job.cancelled.is_set():
+            all_rows, merged = discover.merge_duplicates(all_rows)  # now also by shared website
+            if merged:
+                job.say(f"Merged {merged} more duplicate listing{'s' if merged != 1 else ''} (same website, close together).")
 
     with_site = [r for r in all_rows if r.get("Website")]
     job.rows = [r for r in all_rows if not r.get("Website")]

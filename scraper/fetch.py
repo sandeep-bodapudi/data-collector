@@ -33,7 +33,9 @@ _SESSION_HEADERS = {
     "User-Agent": USER_AGENT,
     "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
     "Accept-Language": "en-US,en;q=0.9",
-    "Accept-Encoding": "gzip, deflate, br",
+    # Only ask for compression we can unpack. Asking for Brotli ("br") without the decoder installed made many sites
+    # (anything served by Cloudflare, modern nginx, ...) answer with data we then read as garbage, with no error.
+    "Accept-Encoding": "gzip, deflate",
     "DNT": "1",
     "Connection": "keep-alive",
     "Upgrade-Insecure-Requests": "1",
@@ -131,8 +133,10 @@ class Fetcher:
                     return None, f"not a web page ({ctype.split(';')[0] or 'unknown'})"
                 content = r.raw.read(MAX_BYTES, decode_content=True)
                 declared = [r.encoding] if "charset" in ctype.lower() and r.encoding else []
-                text = UnicodeDammit(content, declared, is_html=True).unicode_markup
-                return text or content.decode("utf-8", errors="replace"), "ok"
+                text = UnicodeDammit(content, declared, is_html=True).unicode_markup or content.decode("utf-8", errors="replace")
+                if "<" not in text[:5000] or text[:5000].count("\ufffd") > 25:  # compressed or binary data, not a web page
+                    return None, "unreadable page"
+                return text, "ok"
             except (requests.ConnectionError, requests.Timeout):
                 if attempt == 0:
                     time.sleep(2)

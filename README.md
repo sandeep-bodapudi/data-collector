@@ -59,9 +59,24 @@ The logo is [static/logo.svg](static/logo.svg) (a vector trace of the OneBridge 
 ## Tests
 
 ```
-python tests/test_api.py        # backend: login, roles, PWA files, runs, import/export, database fallback
+python tests/test_api.py        # backend: login, roles, PWA files, runs, import/export, sharing, database fallback
+python tests/test_places.py     # place search: finding the area, duplicate merging, website lookup (no network needed)
 node tests/sheetops.test.js     # browser logic: merge & dedupe, CSV/JSON export
 ```
+
+## Finding places with their contacts (for example, engineering colleges in an area)
+
+1. **New run → Places.** Pick a category (Education → *Engineering colleges*), and in *Where* type the area and city, such as `Bachupally, Hyderabad`.
+2. Keep **Find emails & phone numbers** and **Look up websites the map doesn't list** switched on, then start the run.
+
+How it works, and what to expect:
+
+- The list of places comes from OpenStreetMap, a community-edited map. It knows names and positions but almost never phone numbers, emails or websites, and it may not list every place. The public map servers are sometimes slow, so a search can take a few minutes.
+- The area is matched as a whole area where possible. Say `Bachupally, Hyderabad` or just `Bachupally`: the run log's first line shows exactly which area was searched. If a name matches only one business, the app searches about 3 km around it and says so.
+- To get contacts, the app searches the web for each place's own website (about 5 seconds per place, up to 80 per run, to stay within what search engines allow), then reads the emails and phone numbers from that site and its contact pages. The *Website Source* column says whether a website came from the map or from the search.
+- The same place often appears twice on the map under different names ("griet college" and "GRIET COLLEGE"). These are merged automatically, and the other name is noted in *Other Details*.
+- If a place shows no contacts, its website either wasn't found or doesn't publish them as text. Add a Brave Search key (`BRAVE_API_KEY`) if searches are being limited.
+- For a wider list, search a larger or neighbouring area, or use **Search the web** with a query such as `engineering colleges in Bachupally Hyderabad contact email phone`.
 
 ## Sending data to customers
 
@@ -93,7 +108,8 @@ static/logo.svg        Logo; static/icons/ holds the app icons
 scraper/search.py      Web search (Brave API, else free engines with fallbacks)
 scraper/fetch.py       Polite fetcher (robots.txt, per-site delay, restricted-site rules)
 scraper/extract.py     Email / phone / address / social extraction
-scraper/places.py      OpenStreetMap places (categories, geocoding, mirrors)
+scraper/places.py      OpenStreetMap places (categories, finding the area, mirrors)
+scraper/discover.py    Finds a place's own website by web search; merges duplicate listings
 scraper/ai_extract.py  Bring-your-own-key AI providers
 scraper/jobs.py        Background runs and progress (in memory, nothing stored)
 scraper/sheets.py      Reads uploaded Excel / CSV / JSON files
