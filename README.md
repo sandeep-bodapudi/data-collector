@@ -1,13 +1,14 @@
 # OneBridge Data Collector
 
-An internal web app that collects **public** information from the web into spreadsheets, then lets you merge, dedupe and export it. No logins to the target websites are needed. It is an **installable app (PWA)** and keeps working with your saved sheets when you're offline.
+An internal tool for our team. We collect **public** information from the web into spreadsheets, clean them up (merge, dedupe, export), and **deliver them to customers** such as an overseas education company that asked for student data. No logins to the target websites are needed. It is an **installable app (PWA)** and keeps working with your saved sheets when you're offline.
 
 - **Web search:** emails, phones, addresses, social links and page details from websites matching your searches. Optional AI columns fill any detail you describe, using **each person's own AI key** (OpenAI, Gemini, Claude, OpenRouter, Groq or any OpenAI-compatible service).
 - **Places:** lists of temples, hospitals, schools, hotels, banks… in any city, from OpenStreetMap.
 - **Sheets:** every run saves a sheet. You can search it, open single rows, and export it as Excel, CSV or JSON. Excel, CSV and JSON files can also be imported.
 - **Merge & Dedupe:** combine sheets and remove duplicates using smart matching for phones, emails and websites.
-- **Share:** send a copy of a sheet to specific colleagues, or to anyone in the company with a link (they still sign in). Choose how long it lasts and whether downloads are allowed, then send the link by Gmail, your email app, WhatsApp, Telegram or any app on your phone. Found under **Shared**.
-- **Admin:** users with Admin, Member and Viewer roles, plus the connector policy.
+- **Send to a customer:** press **Share** on a sheet and choose *Customer outside the company*. The customer gets a private, branded page (no account needed) where they download Excel or CSV. Add an optional passcode (sent separately), a short message and an expiry. Send the link from Gmail, your email app, WhatsApp, Telegram or any app on your phone. The sender sees when it was opened and downloaded.
+- **Share with colleagues:** the same dialog's *Colleagues* tab shares a copy with chosen people, or anyone signed in with the link.
+- **Admin:** users with Admin, Member and Viewer roles, the connector policy, and a list of every customer link that is active right now (who sent it, to whom, whether it was opened) with a Stop button.
 
 Product requirements: [docs/OneBridge Scraper_ Product Requirements Document.md](docs/OneBridge%20Scraper_%20Product%20Requirements%20Document.md). What's built so far: [docs/PRD-status.md](docs/PRD-status.md).
 
@@ -17,7 +18,7 @@ Product requirements: [docs/OneBridge Scraper_ Product Requirements Document.md]
 |---|---|---|
 | User accounts, roles, saved AI keys (encrypted) | **Database** (PostgreSQL on Render) | Small; this is all the database holds. |
 | Sheets and run history | **Each person's browser (IndexedDB)** | Never uploaded to the server. They don't appear on other computers, and are lost if the person clears their browser data. **Settings → Data on this device** offers backup and restore. |
-| Shared copies | **Database** (`shares` table), only when someone presses Share | An explicit snapshot, never a live link. Compressed, capped at 5 MB per sheet, 25 active per person and 200 MB in total (`SHARE_MAX_TOTAL_MB`). Deleted automatically when it expires (1, 7 or 30 days) or the owner stops sharing. Not encrypted inside the database, so share only what colleagues may see. |
+| Shared copies and customer links | **Database** (`shares` table), only when someone presses Share | An explicit snapshot, never a live link. Compressed, capped at 5 MB per sheet, 25 active per person and 200 MB in total (`SHARE_MAX_TOTAL_MB`). Deleted automatically when it expires (1, 7 or 30 days) or the owner stops sharing. Not encrypted inside the database, so share only what colleagues may see. |
 | Live runs | Server memory, only until the browser collects the rows | A server restart during a run loses that run. |
 
 IndexedDB is kept separately for each signed-in user, so people sharing a computer never see each other's sheets.
@@ -41,6 +42,7 @@ Environment variables (set them in the Render dashboard, never in git):
 | `SECRET_KEY` | A long random value. **Never change it**, because it signs logins and encrypts saved AI keys. |
 | `APP_USER`, `APP_PASSWORD` | The first admin, created when the database has no users. |
 | `DATABASE_URL` | The **Internal Database URL** of a Render PostgreSQL database. **Without it, users are lost on every restart.** If it can't be reached, the app falls back to a temporary SQLite file so the site stays up, and Admin shows a warning. |
+| `COMPANY_NAME` | Optional. Shown on the customer page and in the messages (default "OneBridge Infotech"). |
 | `SHARE_MAX_TOTAL_MB` | Optional. Total space for shared copies in the database (default 200). |
 | `BRAVE_API_KEY` | Optional, but recommended. Free search engines often block cloud servers. |
 
@@ -60,6 +62,16 @@ The logo is [static/logo.svg](static/logo.svg) (a vector trace of the OneBridge 
 python tests/test_api.py        # backend: login, roles, PWA files, runs, import/export, database fallback
 node tests/sheetops.test.js     # browser logic: merge & dedupe, CSV/JSON export
 ```
+
+## Sending data to customers
+
+A customer link is `https://<your-site>/s/<random code>`. It works without an account, so treat it like the file itself:
+
+- The code is long and unguessable, and the page tells search engines not to index it. Turn on the **passcode** (default) and send it in a separate message.
+- Wrong passcodes are locked out after 5 tries (10 minutes). The link stops working on its expiry date and is deleted; an admin or the sender can stop it sooner.
+- Opens and downloads are counted, ignoring the sender's own visits and chat-app link previews, so you can see whether the customer received it.
+- Before creating a link, the sender must tick a confirmation that the company may share this data with that customer. The sheet probably contains **personal details of people** (for example students). Check the agreement with the customer and the privacy rules that apply, including India's DPDP Act and rules for people abroad.
+- Prices, invoices and payments are not part of this app. Handle them outside it.
 
 ## Responsible use
 
