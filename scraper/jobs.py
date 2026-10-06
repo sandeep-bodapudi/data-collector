@@ -1,6 +1,8 @@
-"""Background scrape jobs: run in a thread, report progress, save to Excel."""
-import os
-import re
+"""Background scrape jobs: run in a thread and report progress.
+
+Nothing is stored on the server. A finished job's rows stay in memory only until the person's browser has
+collected them (it saves them in its own IndexedDB) or RESULT_TTL passes.
+"""
 import threading
 import time
 import uuid
@@ -12,18 +14,24 @@ from .excel import SECRET_KEYS
 from .fetch import WORKERS, Fetcher, domain_of
 from .search import SearchBlocked, web_search
 
-
 REGIONS = {
     "wt-wt": "Worldwide", "in-en": "India", "us-en": "United States", "uk-en": "United Kingdom",
     "ae-en": "UAE", "au-en": "Australia", "ca-en": "Canada", "sg-en": "Singapore",
 }
 
 JOBS: dict[str, "Job"] = {}
+RESULT_TTL = 2 * 3600  # seconds a finished job's rows are kept for the browser to collect
 
 
 def public_spec(spec: dict) -> dict:
-    """The run settings without any secrets (safe to store in the database or show in the UI)."""
+    """The run settings without any secrets (safe to show in the UI or save in the browser)."""
     return {k: v for k, v in spec.items() if k not in SECRET_KEYS}
+
+
+def _text(v) -> str:
+    if isinstance(v, list):
+        return "; ".join(map(str, v))
+    return "" if v is None else str(v)
 
 
 class Job:
@@ -37,11 +45,10 @@ class Job:
         self.rows: list[dict] = []
         self.columns: list[str] = []
         self.log: list[str] = []
-        self.file = None
         self.error = None
         self.started = datetime.now()
         self.finished = None
-        self.phase = "search"  # search -> visit -> save -> done
+        self.phase = "search"  # search -> visit -> done
         self.activity = "Getting ready…"
         self.cancelled = threading.Event()
         self.problems: list[str] = []  # service errors; shown when a run ends with no rows
@@ -65,86 +72,53 @@ class Job:
             "elapsed": int((end - self.started).total_seconds()), **self.stats(),
             "count": len(self.rows), "columns": self.columns,
             "preview": [{c: _short(r.get(c)) for c in self.columns} for r in self.rows[-preview_rows:]],
-            "log": self.log[-60:], "file": os.path.basename(self.file) if self.file else None,
-            "sheet_id": getattr(self, "sheet_id", None), "error": self.error,
+            "log": self.log[-60:], "error": self.error,
         }
+
+    def result(self) -> dict:
+        """Everything the browser needs to save this run as a sheet (cells are plain text)."""
+        return {"columns": self.columns,
+                "rows": [{c: _text(r.get(c)) for c in self.columns} for r in self.rows]}
 
 
 def _short(v, n=120):
-    if isinstance(v, list):
-        v = "; ".join(map(str, v))
-    v = "" if v is None else str(v)
+    v = _text(v)
     return v if len(v) <= n else v[:n] + "…"
 
 
-def _safe_name(s: str) -> str:
-    s = re.sub(r"[^\w\- ]+", "", s).strip().replace(" ", "_")
-    return s[:50] or "scrape"
+def purge_jobs():
+    now = datetime.now()
+    for jid, j in list(JOBS.items()):
+        if j.finished and (now - j.finished).total_seconds() > RESULT_TTL:
+            JOBS.pop(jid, None)
 
 
-def start_job(spec: dict, app, user_id: int) -> Job:
+def start_job(spec: dict, user_id: int) -> Job:
+    purge_jobs()
     job = Job(spec, user_id)
     JOBS[job.id] = job
-    threading.Thread(target=_run, args=(job, app, user_id), daemon=True).start()
+    threading.Thread(target=_run, args=(job,), daemon=True).start()
     return job
 
 
-def _run(job: Job, app, user_id: int):
-    from models import db, Run
-    import json
-    with app.app_context():
-        title = job.spec.get("file_name") or (job.spec.get("queries") or [job.spec.get("category", "scrape")])[0]
-        run = Run(id=job.id, name=title, connector=job.spec["mode"], spec_json=json.dumps(public_spec(job.spec)),
-                  owner_id=user_id, status="running")
-        db.session.add(run)
-        db.session.commit()
-
-        job.status = "running"
-        try:
-            if job.spec["mode"] == "places":
-                _run_places(job)
-            else:
-                _run_web(job)
-            final = "cancelled" if job.cancelled.is_set() else "done"
-            if final == "done" and not job.rows and job.problems:
-                job.error, final = job.problems[-1], "error"
-        except Exception as e:  # report any failure to the UI instead of crashing the thread
-            job.error = f"{type(e).__name__}: {e}"
-            final = "error"
-            job.say("ERROR: " + job.error)
-        
-        if job.rows:
-            job.phase, job.activity = "save", "Saving your Excel file…"
-            try:
-                _save(job, user_id)
-            except Exception as e:
-                job.error, final = f"Could not save Excel: {e}", "error"
-        
-        job.phase, job.finished = "done", datetime.now()
-        job.activity = {"done": "All done!", "cancelled": "Stopped. Your data so far was saved.",
-                        "error": "Something went wrong."}[final]
-        job.status = final
-        
-        # update run record
-        run = Run.query.get(job.id)
-        if run:
-            run.status = final
-            run.total_items = job.total
-            run.done_items = job.done
-            run.row_count = len(job.rows)
-            run.error = job.error
-            run.completed_at = job.finished
-            db.session.commit()
-
-
-def _save(job: Job, user_id: int):
-    from . import sheets
-    title = job.spec.get("file_name") or (job.spec.get("queries") or [job.spec.get("category", "scrape")])[0]
-    name = f"{_safe_name(title)}_{datetime.now():%Y%m%d_%H%M%S}.xlsx"
-    info = {k: v for k, v in public_spec(job.spec).items() if v not in (None, "", [], False)}
-    sheet = sheets.save(name, job.columns, job.rows, user_id, source="run", info=info, run_id=job.id)
-    job.file, job.sheet_id = name, sheet.id
-    job.say(f"Saved {len(job.rows)} rows to {name}")
+def _run(job: Job):
+    job.status = "running"
+    try:
+        if job.spec["mode"] == "places":
+            _run_places(job)
+        else:
+            _run_web(job)
+        final = "cancelled" if job.cancelled.is_set() else "done"
+        if final == "done" and not job.rows and job.problems:
+            job.error, final = job.problems[-1], "error"
+    except Exception as e:  # report any failure to the UI instead of crashing the thread
+        job.error = f"{type(e).__name__}: {e}"
+        final = "error"
+        job.say("ERROR: " + job.error)
+    job.phase, job.finished = "done", datetime.now()
+    job.activity = {"done": "All done!", "cancelled": "Stopped. The rows collected so far are kept.",
+                    "error": "Something went wrong."}[final]
+    job.status = final
 
 
 # ---------------------------------------------------------------- web search mode

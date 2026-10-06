@@ -4,9 +4,7 @@
     {
       "name": "data-collector",
       "runtimeExecutable": ".venv\\Scripts\\python.exe",
-      "runtimeArgs": [
-        "app.py"
-      ],
+      "runtimeArgs": ["app.py"],
       "port": 5000
     }
   ]

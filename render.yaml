@@ -1,15 +1,30 @@
+# Render blueprint for the OneBridge Data Collector.
+#
+# Secrets are NOT stored in this file. `sync: false` means Render asks for the value in the dashboard
+# (Environment tab) and keeps it there, out of git.
 services:
   - type: web
     name: onebridge-data-collector
     env: python
     buildCommand: pip install -r requirements.txt
+    # One worker on purpose: live runs are tracked in memory.
     startCommand: gunicorn app:app --workers 1 --threads 8 --timeout 180 --bind 0.0.0.0:$PORT
     envVars:
-      - key: SECRET_KEY
-        value: 19879eae876afb0dbb883c2b2623beed641003d0157d2ba0fb09b28953c49cfd
-      - key: APP_USER
-        value: admin@onebridge.com
-      - key: APP_PASSWORD
-        value: OnebridgeAdmin2026!
       - key: PYTHON_VERSION
         value: 3.10.0
+      # Long random value (for example: python -c "import secrets; print(secrets.token_hex(32))").
+      # Keep it fixed: it signs logins and encrypts saved AI keys.
+      - key: SECRET_KEY
+        sync: false
+      # The first admin account. Created only when the database has no users.
+      - key: APP_USER
+        sync: false
+      - key: APP_PASSWORD
+        sync: false
+      # Internal Database URL of a Render PostgreSQL database. It holds ONLY user accounts and saved AI keys;
+      # sheets and run history live in each person's browser. Without it, users are lost on every restart.
+      - key: DATABASE_URL
+        sync: false
+      # Optional but recommended: a Brave Search API key, so web search works reliably from the cloud.
+      - key: BRAVE_API_KEY
+        sync: false

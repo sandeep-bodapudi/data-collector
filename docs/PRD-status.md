@@ -1,6 +1,6 @@
 # PRD status: OneBridge Scraper
 
-Checked against `OneBridge Scraper_ Product Requirements Document.md` (v1.0 draft) on 5 Oct 2026.
+Checked against `OneBridge Scraper_ Product Requirements Document.md` (v1.0 draft) on 5 Oct 2026, updated 6 Oct 2026 for the storage change and PWA.
 
 **Legend:** ✅ done · 🟡 partly done · ❌ not started
 
@@ -8,11 +8,29 @@ Checked against `OneBridge Scraper_ Product Requirements Document.md` (v1.0 draf
 
 The PRD names a MERN stack (React, Node/Express, MongoDB, BullMQ, Playwright, Docker). The working product is **Python + Flask** with **MySQL / PostgreSQL / SQLite** (via `DATABASE_URL`) and a no-build front end. Everything below is built on that stack. Moving to MERN would be a rewrite. Decide whether that's still wanted before Phase 3.
 
+## Storage decision (6 Oct 2026)
+
+The PRD says sheets are stored on the server (chunked collections, server-side paging, §2 and §7). The team chose a different model because the free Render database is small:
+
+- **Database:** only user accounts, roles, admin switches and encrypted AI keys.
+- **Browser (IndexedDB):** every sheet and the run history, one database per signed-in user.
+- **Server memory:** a live run's rows, until the browser collects them.
+
+**What this gives up compared with the PRD** (decide before starting Phase 4/5):
+
+| PRD item | Effect |
+|---|---|
+| §5.11 Sharing, "Shared with me", comments, presence | Not possible while sheets exist only on one device. It needs an explicit "share a copy" that uploads a sheet to the server. |
+| §5.12 Schedules and change monitors | A scheduled run has nowhere to put its result when nobody has the browser open. It needs server-side result storage, at least for scheduled runs. |
+| §5.14 Admin: audit of what each person exported, disk dashboard | The server no longer sees sheets or exports, so it can only audit runs it starts. |
+| §2 "1M-row sheet stays responsive" | Sheets are held in the browser's memory when opened; fine for roughly 100k rows, not 1M. |
+| Data safety | Clearing browser data deletes sheets. Settings has backup and restore; there is no automatic copy. |
+
 ## Phase-by-phase
 
 | PRD phase | Status | Notes |
 |---|---|---|
-| 1 Foundation: auth, roles, queue, workers, connector framework, layout, design system | 🟡 | Auth, roles and the design system are done. Jobs run in background threads, not a Redis queue. There is no plug-in connector framework yet; the two connectors are built in. |
+| 1 Foundation: auth, roles, queue, workers, connector framework, layout, design system | 🟡 | Auth, roles, the design system and an installable offline-capable app (PWA) are done. Jobs run in background threads, not a Redis queue. There is no plug-in connector framework yet; the two connectors are built in. |
 | 2 Core flow: connector library, auto-form, runs, run detail, sheets library, basic grid, CSV/XLSX export | 🟡 | Runs, run detail, sheets library, grid and exports are done. There's no connector library or schema-driven auto-form, because only 2 connectors exist. |
 | 3 Data tools: full grid, Merge & Dedupe wizard, versioning, import, Convert | 🟡 | The Merge & Dedupe wizard and import are done. Full grid editing, versioning and PDF/TSV export are not. |
 | 4 Collaboration: sharing, comments, presence, presets, notifications | ❌ | |
@@ -33,12 +51,13 @@ The PRD names a MERN stack (React, Node/Express, MongoDB, BullMQ, Playwright, Do
 | 5.4 | New run form + live summary + pre-flight check | ✅ | No presets, schedules, CSV upload of inputs, or point-and-click custom URL scraper. |
 | 5.5 | Runs list: filters, search, delete | ✅ | No bulk rerun. |
 | 5.6 | Run detail: live status, ETA, Results/Log/Input tabs, partial results saved | ✅ | No Pause/Resume, Errors tab or screenshots. |
-| 5.7 | Sheets library: search, filter, multi-select, bulk merge/delete | ✅ | No folders, tags or trash/restore. |
+| 5.7 | Sheets library: search, filter, multi-select, bulk merge/delete | ✅ | Stored in the browser (see Storage decision). No folders, tags or trash/restore. Backup and restore in Settings. |
 | 5.8 | Sheet workspace: grid, search with highlight, paging, row drawer | 🟡 | No cell editing, column operations, saved views, versions or comments. |
 | 5.9 | Merge & Dedupe wizard | ✅ | Stack mode with key columns, match options (case, spaces, smart phone/email/URL, punctuation), keep first/last/most complete, merge-fill, save removed duplicates, preview with reasons. No join/compare modes or fuzzy matching. |
 | 5.10 | Export and import | 🟡 | xlsx/csv/json export (CSV has a BOM for Excel). Import of xlsx/csv/tsv/json. No PDF, selected-rows export or split files. |
 | 5.11 | Sharing | ❌ | |
 | 5.12 | Schedules and monitors | ❌ | |
+| 4 (PWA) | Installable, offline-capable app | ✅ | Manifest, icons (any and maskable), service worker, install button, offline indicator, update prompt. The signed-in page copy is removed on sign-out. Starting runs, importing and Excel export still need a connection. |
 | 5.13 | Vault | 🟡 | AES-256-GCM at rest, values never shown again, per user. No team sharing of credentials, status tracking or OAuth. |
 | 5.14 | Admin console | 🟡 | Users (add, role, deactivate, reset password) and connector policy. No audit log, system dashboard or retention rules. |
 | 5.15 | Notifications and profile | 🟡 | Profile: password and theme. No notification centre. |
@@ -63,10 +82,16 @@ These problems were found in the code committed before this review:
 12. **Placeholder phone numbers** like `+91-8888888888` were accepted.
 13. **Merge used file names as identifiers.** An unsanitised output name could inject HTML into the page.
 
+## Found on 6 Oct 2026
+
+- **`render.yaml` was committed with `SECRET_KEY`, `APP_USER` and `APP_PASSWORD` in plain text.** The values are removed from the file now, but they remain in git history. Rotate them: change the admin password in Settings, and set a new `SECRET_KEY` in Render (everyone signs in again and re-enters their AI key).
+- **The obfuscated-email detector and Telugu text:** the "ignore punctuation" match option deleted Telugu/Hindi vowel signs, so different names could look identical. Fixed and covered by a unit test.
+- **A dead database would have taken the whole site down** (free Render databases expire after 30 days). The app now falls back to a temporary SQLite file and Admin shows a warning.
+
 ## Suggested next steps (in order)
 
-1. **Add a persistent database on the server.** Set `DATABASE_URL` to a PostgreSQL or MySQL database. Without it, the server's SQLite file is wiped on every redeploy, losing users and sheets.
+1. **Add a persistent database on the server.** Set `DATABASE_URL` to a PostgreSQL database. Without it, the server's SQLite file is wiped on every redeploy and added users are lost. Free Render databases expire after 30 days; see the README.
 2. **Add a Brave Search API key** (`BRAVE_API_KEY`). Free engines often block cloud servers.
-3. **Phase 4: Sharing** (5.11). It's the biggest gap for team use.
+3. **Phase 4: Sharing** (5.11). It's the biggest gap for team use, and it needs the storage decision above revisited (for example, an explicit "share a copy" that uploads one sheet).
 4. **Phase 5: Schedules** (5.12), using a job queue (RQ/Celery or BullMQ if moving to MERN).
 5. **Add an audit log** (5.14).

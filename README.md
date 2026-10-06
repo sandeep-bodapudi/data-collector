@@ -1,6 +1,6 @@
 # OneBridge Data Collector
 
-An internal web app that collects **public** information from the web into spreadsheets, then lets you merge, dedupe and export it. No logins to the target websites are needed.
+An internal web app that collects **public** information from the web into spreadsheets, then lets you merge, dedupe and export it. No logins to the target websites are needed. It is an **installable app (PWA)** and keeps working with your saved sheets when you're offline.
 
 - **Web search:** emails, phones, addresses, social links and page details from websites matching your searches. Optional AI columns fill any detail you describe, using **each person's own AI key** (OpenAI, Gemini, Claude, OpenRouter, Groq or any OpenAI-compatible service).
 - **Places:** lists of temples, hospitals, schools, hotels, banks… in any city, from OpenStreetMap.
@@ -9,6 +9,16 @@ An internal web app that collects **public** information from the web into sprea
 - **Admin:** users with Admin, Member and Viewer roles, plus the connector policy.
 
 Product requirements: [docs/OneBridge Scraper_ Product Requirements Document.md](docs/OneBridge%20Scraper_%20Product%20Requirements%20Document.md). What's built so far: [docs/PRD-status.md](docs/PRD-status.md).
+
+## Where data is stored
+
+| What | Where | Why it matters |
+|---|---|---|
+| User accounts, roles, saved AI keys (encrypted) | **Database** (PostgreSQL on Render) | Small; this is all the database holds. |
+| Sheets and run history | **Each person's browser (IndexedDB)** | Never uploaded to the server. They don't appear on other computers, and are lost if the person clears their browser data. **Settings → Data on this device** offers backup and restore. |
+| Live runs | Server memory, only until the browser collects the rows | A server restart during a run loses that run. |
+
+IndexedDB is kept separately for each signed-in user, so people sharing a computer never see each other's sheets.
 
 ## Run it locally (Windows)
 
@@ -20,19 +30,33 @@ On first start you create the admin account. Add your team under **Admin**.
 
 ## Run it on a server (Render)
 
-- **Build command:** `pip install -r requirements.txt`
-- **Start command:** `gunicorn app:app --workers 1 --threads 8 --timeout 180 --bind 0.0.0.0:$PORT`
+[render.yaml](render.yaml) holds the build and start commands. Keep `--workers 1`: live runs are tracked in memory.
 
-Keep `--workers 1`: live runs are tracked in memory.
-
-Environment variables:
+Environment variables (set them in the Render dashboard, never in git):
 
 | Variable | Why |
 |---|---|
-| `SECRET_KEY` | A long random value. **Never change it**, because it encrypts saved AI keys. |
+| `SECRET_KEY` | A long random value. **Never change it**, because it signs logins and encrypts saved AI keys. |
 | `APP_USER`, `APP_PASSWORD` | The first admin, created when the database has no users. |
-| `DATABASE_URL` | PostgreSQL or MySQL. **Without it, users and sheets are lost on every redeploy.** |
+| `DATABASE_URL` | The **Internal Database URL** of a Render PostgreSQL database. **Without it, users are lost on every restart.** If it can't be reached, the app falls back to a temporary SQLite file so the site stays up, and Admin shows a warning. |
 | `BRAVE_API_KEY` | Optional, but recommended. Free search engines often block cloud servers. |
+
+**Free Render PostgreSQL expires 30 days after it is created** (with a short grace period to upgrade). Because it only holds users and saved AI keys, losing it is recoverable: the admin account is recreated from `APP_USER` / `APP_PASSWORD`, and people re-add their AI keys. For a database that doesn't expire, use a paid Render database or a free external PostgreSQL such as Neon or Supabase, and put its URL in `DATABASE_URL`.
+
+## Installing as an app
+
+Open the site in Chrome or Edge and use the **Install app** button in the top bar (or the install icon in the address bar). On iPhone/iPad: Share → Add to Home Screen. Settings → *Install the app* shows the right instructions for the current browser.
+
+How it works offline: a service worker ([templates/sw.js](templates/sw.js)) caches the app's own files and the last signed-in page. API calls and the login page are never cached. Starting a run, importing a file and exporting to Excel need a connection; browsing, searching, merging and CSV/JSON export of saved sheets work offline.
+
+The logo is [static/logo.svg](static/logo.svg) (a vector trace of the OneBridge logo). App icons are in `static/icons/`.
+
+## Tests
+
+```
+python tests/test_api.py        # backend: login, roles, PWA files, runs, import/export, database fallback
+node tests/sheetops.test.js     # browser logic: merge & dedupe, CSV/JSON export
+```
 
 ## Responsible use
 
@@ -43,17 +67,20 @@ Environment variables:
 ## Code map
 
 ```
-app.py                 Flask app: login, roles, APIs (runs, sheets, merge, settings, admin)
-models.py              Database models + AES-256-GCM vault encryption
-templates/             index.html (app shell), login.html
+app.py                 Flask app: login, roles, PWA files, run API, import/export helpers, settings, admin
+models.py              Database models (users, vault, settings) + AES-256-GCM vault encryption
+templates/             index.html (app shell), login.html, sw.js (service worker), offline.html
 static/app.css         Design system (light/dark tokens, components)
-static/app.js          Single-page front end (Home, New run, Runs, Sheets, Merge, Settings, Admin)
+static/app.js          Single-page front end: views, run tracker, install/offline handling
+static/store.js        IndexedDB storage for sheets and run history (one database per user)
+static/sheetops.js     Merge & Dedupe and CSV/JSON export (pure functions, unit-tested)
+static/logo.svg        Logo; static/icons/ holds the app icons
 scraper/search.py      Web search (Brave API, else free engines with fallbacks)
 scraper/fetch.py       Polite fetcher (robots.txt, per-site delay, restricted-site rules)
 scraper/extract.py     Email / phone / address / social extraction
 scraper/places.py      OpenStreetMap places (categories, geocoding, mirrors)
 scraper/ai_extract.py  Bring-your-own-key AI providers
-scraper/jobs.py        Background runs, progress, saving results
-scraper/sheets.py      Sheet storage, import, Merge & Dedupe
+scraper/jobs.py        Background runs and progress (in memory, nothing stored)
+scraper/sheets.py      Reads uploaded Excel / CSV / JSON files
 scraper/excel.py       Excel formatting (no secrets, no formula injection)
 ```

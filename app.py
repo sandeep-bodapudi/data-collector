@@ -1,10 +1,10 @@
 """OneBridge Data Collector - web app. Run: python app.py  then open http://localhost:5000"""
-import csv
+import hashlib
 import io
-import json
 import os
 import re
 import secrets
+import tempfile
 import time
 from datetime import datetime, timedelta
 from functools import wraps
@@ -44,9 +44,10 @@ def _secret_key() -> str:
 _load_env_file()
 _secret_key()
 
-from models import ROLES, AppSetting, Run, Sheet, User, VaultCredential, db, encrypt  # noqa: E402
+from models import ROLES, AppSetting, User, VaultCredential, db, encrypt  # noqa: E402
 from scraper import ai_extract, extract, places, sheets  # noqa: E402
-from scraper.jobs import JOBS, REGIONS, start_job  # noqa: E402
+from scraper.excel import write_workbook  # noqa: E402
+from scraper.jobs import JOBS, REGIONS, purge_jobs, start_job  # noqa: E402
 
 def _database_url() -> str:
     url = os.environ.get("DATABASE_URL", "").strip()
@@ -60,14 +61,38 @@ def _database_url() -> str:
     return url
 
 
+def _resolve_database() -> tuple[str, dict]:
+    """Pick the database URL. If the configured database cannot be reached (for example a free Render
+    database that has expired), fall back to a local SQLite file so the site stays up for admin sign-in."""
+    from sqlalchemy import create_engine, text
+    url = _database_url()
+    state = {"kind": url.split(":", 1)[0].split("+")[0], "fallback": False, "error": ""}
+    if state["kind"] != "sqlite":
+        try:
+            eng = create_engine(url, connect_args={"connect_timeout": 10})
+            with eng.connect() as conn:
+                conn.execute(text("SELECT 1"))
+            eng.dispose()
+        except Exception as e:  # any connection problem
+            print(f"[database] cannot reach {state['kind']} database: {type(e).__name__}: {str(e)[:200]}", flush=True)
+            os.makedirs(INSTANCE_DIR, exist_ok=True)
+            url = f"sqlite:///{os.path.join(INSTANCE_DIR, 'data.db')}"
+            state.update(kind="sqlite", fallback=True, error=type(e).__name__)
+    return url, state
+
+
+DB_URL, DB_STATE = _resolve_database()
+ON_SERVER = bool(os.environ.get("RENDER"))
+
+
 app = Flask(__name__)
 app.secret_key = os.environ["SECRET_KEY"]
 app.config.update(
     TEMPLATES_AUTO_RELOAD=True,
-    SQLALCHEMY_DATABASE_URI=_database_url(),
+    SQLALCHEMY_DATABASE_URI=DB_URL,
     SQLALCHEMY_ENGINE_OPTIONS={"pool_pre_ping": True},
     SQLALCHEMY_TRACK_MODIFICATIONS=False,
-    MAX_CONTENT_LENGTH=25 * 1024 * 1024,  # imports up to 25 MB
+    MAX_CONTENT_LENGTH=25 * 1024 * 1024,  # uploads and Excel exports up to 25 MB
     REMEMBER_COOKIE_DURATION=timedelta(days=30),
     SESSION_COOKIE_HTTPONLY=True, SESSION_COOKIE_SAMESITE="Lax",
     SESSION_COOKIE_SECURE=bool(os.environ.get("RENDER")), REMEMBER_COOKIE_SECURE=bool(os.environ.get("RENDER")),
@@ -139,13 +164,6 @@ def _restricted_enabled() -> bool:
 
 def _mask(v: str) -> str:
     return ("•" * 8 + v[-4:]) if v and len(v) > 8 else ("•" * 8 if v else "")
-
-
-def _own_sheet(sheet_id: str) -> Sheet:
-    s = db.session.get(Sheet, sheet_id)
-    if not s or (s.owner_id != current_user.id and not current_user.is_admin):
-        abort(404)
-    return s
 
 
 def _own_job(job_id: str):
@@ -238,14 +256,38 @@ def change_password():
     return jsonify(ok=True)
 
 
-# ---------------------------------------------------------------- app shell
+# ---------------------------------------------------------------- app shell + PWA
+
+STATIC_DIR = os.path.join(BASE_DIR, "static")
+ASSET_FILES = ("app.css", "app.js", "sheetops.js", "store.js")
+
+
+def asset_version() -> str:
+    """Changes whenever a front-end file changes, so browsers and the service worker never serve stale code."""
+    h = hashlib.sha1()
+    for folder, _dirs, files in sorted(os.walk(STATIC_DIR)):
+        for name in sorted(files):
+            try:
+                path = os.path.join(folder, name)
+                st = os.stat(path)
+                h.update(f"{os.path.relpath(path, STATIC_DIR)}:{st.st_size}".encode())
+                h.update(open(path, "rb").read() if st.st_size < 400_000 else str(st.st_mtime_ns).encode())
+            except OSError:
+                pass
+    return h.hexdigest()[:10]
+
+
+@app.context_processor
+def inject_assets():
+    return {"v": asset_version()}
+
 
 @app.get("/")
 @login_required
 def index():
     return render_template(
         "index.html",
-        user={"username": current_user.username, "role": current_user.role},
+        user={"id": current_user.id, "username": current_user.username, "role": current_user.role},
         fields=extract.STANDARD_FIELDS,
         categories=list(places.CATEGORIES),
         regions=REGIONS,
@@ -254,24 +296,51 @@ def index():
     )
 
 
-@app.get("/api/dashboard")
-@login_required
-def dashboard():
-    runs = Run.query.filter_by(owner_id=current_user.id)
-    sheets_q = Sheet.query.filter_by(owner_id=current_user.id)
-    week = datetime.utcnow() - timedelta(days=7)
-    return jsonify(
-        runs_total=runs.count(),
-        runs_week=runs.filter(Run.started_at >= week).count(),
-        running=sum(1 for j in JOBS.values() if j.owner_id == current_user.id and j.status in ("queued", "running")),
-        sheets_total=sheets_q.count(),
-        rows_total=int(db.session.query(db.func.coalesce(db.func.sum(Sheet.row_count), 0))
-                       .filter(Sheet.owner_id == current_user.id).scalar() or 0),
-        ai_ready=bool(_vault(current_user.id).get("ai_api_key")),
-    )
+@app.get("/manifest.webmanifest")
+def manifest():
+    shortcut_icon = [{"src": "/static/icons/icon-192.png", "sizes": "192x192"}]
+    data = {
+        "id": "/", "name": "OneBridge Data Collector", "short_name": "Data Collector",
+        "description": "Collect public data from the web into spreadsheets, then merge, dedupe and export it.",
+        "start_url": "/", "scope": "/", "display": "standalone", "orientation": "any",
+        "background_color": "#ffffff", "theme_color": "#ffffff", "categories": ["business", "productivity"],
+        "icons": [
+            {"src": "/static/icons/icon-192.png", "sizes": "192x192", "type": "image/png", "purpose": "any"},
+            {"src": "/static/icons/icon-512.png", "sizes": "512x512", "type": "image/png", "purpose": "any"},
+            {"src": "/static/icons/icon-maskable-512.png", "sizes": "512x512", "type": "image/png", "purpose": "maskable"},
+            {"src": "/static/logo.svg", "sizes": "any", "type": "image/svg+xml", "purpose": "any"},
+        ],
+        "shortcuts": [
+            {"name": "Search the web", "url": "/#/new/web", "icons": shortcut_icon},
+            {"name": "Find places", "url": "/#/new/places", "icons": shortcut_icon},
+            {"name": "My sheets", "url": "/#/sheets", "icons": shortcut_icon},
+        ],
+    }
+    resp = jsonify(data)
+    resp.mimetype = "application/manifest+json"
+    resp.headers["Cache-Control"] = "no-cache"
+    return resp
 
 
-# ---------------------------------------------------------------- runs
+@app.get("/sw.js")
+def service_worker():
+    """Served from the site root so it can control every page. Never cached by the browser itself."""
+    v = asset_version()
+    assets = [f"/static/{n}?v={v}" for n in ASSET_FILES] + [
+        "/static/logo.svg", "/static/icons/icon-192.png", "/static/icons/icon-512.png",
+        "/static/icons/favicon-32.png", "/manifest.webmanifest", "/offline.html"]
+    resp = Response(render_template("sw.js", build=v, assets=assets), mimetype="text/javascript")
+    resp.headers["Cache-Control"] = "no-cache, max-age=0"
+    resp.headers["Service-Worker-Allowed"] = "/"
+    return resp
+
+
+@app.get("/offline.html")
+def offline_page():
+    return render_template("offline.html")
+
+
+# ---------------------------------------------------------------- runs (live only; results go to the browser)
 
 @app.post("/api/jobs")
 @roles_required("admin", "member")
@@ -321,13 +390,14 @@ def create_job():
                 "follow_contact": bool(d.get("follow_contact", True)), "one_per_site": bool(d.get("one_per_site")),
                 "require": d.get("require") if d.get("require") in ("emails", "phones", "any_contact") else "",
                 **common}
-    job = start_job(spec, app, current_user.id)
+    job = start_job(spec, current_user.id)
     return jsonify(id=job.id)
 
 
 @app.get("/api/jobs/<job_id>")
 @login_required
 def job_status(job_id):
+    purge_jobs()
     return jsonify(_own_job(job_id).to_dict())
 
 
@@ -338,130 +408,33 @@ def stop_job(job_id):
     return jsonify(ok=True)
 
 
-@app.get("/api/runs")
+@app.get("/api/jobs/<job_id>/result")
 @login_required
-def list_runs():
-    q = Run.query
-    if not (current_user.is_admin and request.args.get("all") == "1"):
-        q = q.filter_by(owner_id=current_user.id)
-    runs = q.order_by(Run.started_at.desc()).limit(200).all()
-    names = {u.id: u.username for u in User.query.all()}
-    sheet_by_run = {s.run_id: s.id for s in Sheet.query.filter(Sheet.run_id.in_([r.id for r in runs])).all()} if runs else {}
-    out = []
-    for r in runs:
-        d = r.to_dict(names.get(r.owner_id, ""))
-        live = JOBS.get(r.id)
-        if live and live.status in ("queued", "running"):
-            d["status"], d["rows"] = live.status, len(live.rows)
-        elif r.status in ("queued", "running") and not live:
-            d["status"] = "error"  # the server restarted while this run was going
-            d["error"] = d["error"] or "Interrupted by a server restart"
-        d["sheet_id"] = sheet_by_run.get(r.id)
-        out.append(d)
-    return jsonify(out)
+def job_result(job_id):
+    """The finished rows, for the browser to save in its own IndexedDB."""
+    job = _own_job(job_id)
+    if job.status in ("queued", "running"):
+        return jsonify(error="This run is still going."), 409
+    return jsonify(job.result())
 
 
-@app.get("/api/runs/<run_id>")
+@app.delete("/api/jobs/<job_id>")
 @login_required
-def get_run(run_id):
-    r = db.session.get(Run, run_id)
-    if not r or (r.owner_id != current_user.id and not current_user.is_admin):
-        abort(404)
-    d = r.to_dict()
-    sheet = Sheet.query.filter_by(run_id=run_id).first()
-    d["sheet_id"] = sheet.id if sheet else None
-    live = JOBS.get(run_id)
-    d["live"] = live.to_dict() if live else None
-    if not live and r.status in ("queued", "running"):
-        d["status"], d["error"] = "error", d["error"] or "Interrupted by a server restart"
-    return jsonify(d)
-
-
-@app.delete("/api/runs/<run_id>")
-@login_required
-def delete_run(run_id):
-    r = db.session.get(Run, run_id)
-    if not r or (r.owner_id != current_user.id and not current_user.is_admin):
-        abort(404)
-    if (job := JOBS.get(run_id)) and job.status in ("queued", "running"):
-        return jsonify(error="Stop the run before deleting it."), 400
-    Sheet.query.filter_by(run_id=run_id).update({"run_id": None})  # keep its sheet
-    db.session.delete(r)
-    db.session.commit()
+def forget_job(job_id):
+    """Called once the browser has saved the rows, so the server keeps nothing."""
+    job = _own_job(job_id)
+    if job.status in ("queued", "running"):
+        return jsonify(error="Stop the run first."), 409
+    JOBS.pop(job_id, None)
     return jsonify(ok=True)
 
 
-# ---------------------------------------------------------------- sheets
+# ---------------------------------------------------------------- stateless helpers for sheets
 
-@app.get("/api/sheets")
-@login_required
-def list_sheets():
-    rows = (db.session.query(Sheet, db.func.length(Sheet.file_data))
-            .filter(Sheet.owner_id == current_user.id, Sheet.file_data.isnot(None))
-            .order_by(Sheet.created_at.desc()).limit(500).all())
-    return jsonify([s.to_dict(size) for s, size in rows])
-
-
-@app.get("/api/sheets/<sheet_id>/rows")
-@login_required
-def sheet_rows(sheet_id):
-    s = _own_sheet(sheet_id)
-    columns, rows = sheets.read(s)
-    q = (request.args.get("q") or "").strip().lower()
-    if q:
-        rows = [r for r in rows if any(q in str(r.get(c, "")).lower() for c in columns)]
-    offset = max(0, int(request.args.get("offset", 0)))
-    limit = max(1, min(500, int(request.args.get("limit", 100))))
-    return jsonify(name=s.name, columns=columns, total=len(rows), rows=rows[offset:offset + limit])
-
-
-@app.get("/api/sheets/<sheet_id>/export")
-@login_required
-def export_sheet(sheet_id):
-    s = _own_sheet(sheet_id)
-    fmt = request.args.get("format", "xlsx")
-    base = os.path.splitext(s.name)[0]
-    if fmt == "xlsx":
-        return Response(s.file_data, mimetype="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                        headers={"Content-Disposition": f'attachment; filename="{base}.xlsx"'})
-    columns, rows = sheets.read(s)
-    if fmt == "csv":
-        buf = io.StringIO()
-        w = csv.DictWriter(buf, fieldnames=columns, extrasaction="ignore")
-        w.writeheader()
-        w.writerows(rows)
-        return Response("﻿" + buf.getvalue(), mimetype="text/csv",  # BOM so Excel reads Indian scripts correctly
-                        headers={"Content-Disposition": f'attachment; filename="{base}.csv"'})
-    if fmt == "json":
-        return Response(json.dumps(rows, ensure_ascii=False, indent=2, default=str), mimetype="application/json",
-                        headers={"Content-Disposition": f'attachment; filename="{base}.json"'})
-    abort(400)
-
-
-@app.patch("/api/sheets/<sheet_id>")
+@app.post("/api/parse")
 @roles_required("admin", "member")
-def rename_sheet(sheet_id):
-    s = _own_sheet(sheet_id)
-    name = _clean_name(request.get_json(force=True).get("name"), "")
-    if not name:
-        return jsonify(error="Enter a name."), 400
-    s.name = name if name.lower().endswith(".xlsx") else name + ".xlsx"
-    db.session.commit()
-    return jsonify(ok=True, name=s.name)
-
-
-@app.delete("/api/sheets/<sheet_id>")
-@roles_required("admin", "member")
-def delete_sheet(sheet_id):
-    db.session.delete(_own_sheet(sheet_id))
-    db.session.commit()
-    sheets.forget(sheet_id)
-    return jsonify(ok=True)
-
-
-@app.post("/api/sheets/import")
-@roles_required("admin", "member")
-def import_sheet():
+def parse_file():
+    """Reads an uploaded Excel/CSV/JSON file and returns its rows. Nothing is stored."""
     f = request.files.get("file")
     if not f or not f.filename:
         return jsonify(error="Choose a file to import."), 400
@@ -469,34 +442,28 @@ def import_sheet():
         columns, rows = sheets.parse_upload(f.filename, f.read())
     except ValueError as e:
         return jsonify(error=str(e)), 400
-    s = sheets.save(f"{_clean_name(os.path.splitext(f.filename)[0], 'Imported')}.xlsx", columns, rows,
-                    current_user.id, source="import", info={"Imported from": f.filename})
-    return jsonify(ok=True, id=s.id, rows=len(rows))
+    return jsonify(name=_clean_name(os.path.splitext(f.filename)[0], "Imported"), columns=columns, rows=rows)
 
 
-@app.post("/api/merge")
-@roles_required("admin", "member")
-def merge_sheets():
-    d = request.get_json(force=True)
-    ids = d.get("sheets") or []
-    if len(ids) < 1:
-        return jsonify(error="Choose at least one sheet."), 400
-    chosen = [_own_sheet(i) for i in ids]
+@app.post("/api/export/xlsx")
+@login_required
+def export_xlsx():
+    """Builds a formatted .xlsx from rows sent by the browser. Nothing is stored."""
+    d = request.get_json(force=True, silent=True) or {}
+    columns, rows = d.get("columns"), d.get("rows")
+    if not isinstance(columns, list) or not isinstance(rows, list) or not columns:
+        return jsonify(error="Nothing to export."), 400
+    columns = [str(c) for c in columns]
+    fd, path = tempfile.mkstemp(suffix=".xlsx")
+    os.close(fd)
     try:
-        result = sheets.merge(chosen, keys=d.get("keys") or [], match=d.get("match") or {},
-                              keep=d.get("keep", "first"), fill_empty=bool(d.get("fill_empty")))
-    except ValueError as e:
-        return jsonify(error=str(e)), 400
-    if d.get("preview"):
-        return jsonify(result.summary())
-    name = _clean_name(d.get("output_name"), "Merged") + f"_{datetime.now():%Y%m%d_%H%M%S}.xlsx"
-    s = sheets.save(name, result.columns, result.rows, current_user.id, source="merge",
-                    info={"Merged from": ", ".join(c.name for c in chosen), "Duplicate keys": ", ".join(d.get("keys") or []) or "none",
-                          "Rows in": result.rows_in, "Duplicates removed": result.removed})
-    if d.get("save_removed") and result.removed_rows:
-        sheets.save(name.replace(".xlsx", "_removed_duplicates.xlsx"), result.columns, result.removed_rows,
-                    current_user.id, source="merge", info={"Duplicates removed from": name})
-    return jsonify(ok=True, id=s.id, name=s.name, **result.summary())
+        write_workbook(path, columns, [r for r in rows if isinstance(r, dict)],
+                       {"Exported from": "OneBridge Data Collector", "Sheet": _clean_name(d.get("name"), "Sheet")})
+        with open(path, "rb") as f:
+            data = f.read()
+    finally:
+        os.remove(path)
+    return Response(data, mimetype="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
 
 
 # ---------------------------------------------------------------- settings (each user's own keys)
@@ -609,7 +576,8 @@ def admin_edit_user(user_id):
 @app.get("/api/admin/settings")
 @roles_required("admin")
 def admin_get_settings():
-    return jsonify(allow_restricted=_restricted_enabled())
+    return jsonify(allow_restricted=_restricted_enabled(),
+                   database={**DB_STATE, "persistent": DB_STATE["kind"] != "sqlite", "on_server": ON_SERVER})
 
 
 @app.post("/api/admin/settings")

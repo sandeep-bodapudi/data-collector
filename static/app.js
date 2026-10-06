@@ -52,6 +52,153 @@ async function api(path, opts = {}) {
   return data;
 }
 
+/* ---------------------------------------------------------------- local data helpers (sheets and runs live in this browser) */
+const nowIso = () => new Date().toISOString();
+const newId = () => (window.crypto && crypto.randomUUID ? crypto.randomUUID() : Date.now().toString(36) + Math.random().toString(36).slice(2, 10));
+const fileSafe = (n) => String(n || "").replace(/[\\/:*?"<>|]+/g, "").replace(/\s+/g, " ").trim().slice(0, 80) || "sheet";
+const fmtSize = (b) => b < 1024 ? `${b} B` : b < 1048576 ? `${(b / 1024).toFixed(b < 10240 ? 1 : 0)} KB` : b < 1073741824 ? `${(b / 1048576).toFixed(1)} MB` : `${(b / 1073741824).toFixed(2)} GB`;
+function stampName(base) {
+  const d = new Date();
+  return `${base} · ${d.toLocaleDateString(undefined, { day: "numeric", month: "short" })} ${d.toLocaleTimeString(undefined, { hour: "numeric", minute: "2-digit" })}`;
+}
+function saveBlob(blob, filename) {
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url; a.download = filename;
+  document.body.appendChild(a); a.click(); a.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 10000);
+}
+async function exportSheet(sheetId, format) {
+  let meta, data;
+  try { [meta, data] = await Promise.all([Store.sheets.get(sheetId), Store.sheets.data(sheetId)]); } catch (e) { return toast(e.message, "err"); }
+  if (!meta || !data) return toast("This sheet could not be found on this device.", "err");
+  const base = fileSafe(meta.name);
+  if (format === "csv") return saveBlob(new Blob([SheetOps.toCSV(data.columns, data.rows)], { type: "text/csv;charset=utf-8" }), base + ".csv");
+  if (format === "json") return saveBlob(new Blob([SheetOps.toJSON(data.columns, data.rows)], { type: "application/json" }), base + ".json");
+  toast("Preparing your Excel file…");  // the server only formats it; nothing is stored there
+  try {
+    const r = await fetch("/api/export/xlsx", { method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ name: meta.name, columns: data.columns, rows: data.rows }) });
+    if (r.status === 401) { location.href = "/login"; return; }
+    if (!r.ok) throw new Error(((await r.json().catch(() => ({}))).error) || "Could not create the Excel file.");
+    saveBlob(await r.blob(), base + ".xlsx");
+  } catch (e) {
+    // fetch() only throws a TypeError when the server can't be reached at all
+    toast(e instanceof TypeError ? "Can't reach the server for the Excel file. CSV and JSON downloads work without it." : e.message, "err");
+  }
+}
+
+/* ---------------------------------------------------------------- run tracker
+ * The server runs the collection. This watches every active run (even while you are on another page),
+ * and when one finishes it saves the rows as a sheet in this browser and lets the server forget them. */
+const Tracker = (() => {
+  const ACTIVE = ["queued", "running"], FINISHED = ["done", "cancelled", "error"];
+  const live = new Map(), watching = new Set(), saving = new Set(), listeners = new Set();
+  let timer = null, busy = false;
+
+  const updateNav = () => { const el = $("#nav-running"); if (el) { el.hidden = !watching.size; el.textContent = watching.size; } };
+  const emit = (id, final) => { listeners.forEach((fn) => { try { fn(id, final); } catch (e) { console.error(e); } }); updateNav(); };
+
+  async function save(run, job) {
+    saving.add(run.id); emit(run.id);
+    try {
+      let sheetId = null;
+      if (job.count > 0) {
+        const res = await api(`/api/jobs/${run.id}/result`);
+        sheetId = run.id;
+        await Store.sheets.put({ id: sheetId, name: stampName(run.name), source: "run", created: nowIso(), run_id: run.id }, res);
+        Store.persist();
+        api(`/api/jobs/${run.id}`, { method: "DELETE" }).catch(() => {});  // saved: the server can forget the rows
+      }
+      await Store.runs.put({ ...run, status: job.status, rows: job.count, with_email: job.with_email, with_phone: job.with_phone,
+        total: job.total, done: job.done, finished: nowIso(), duration: job.elapsed, error: job.error || "", sheet_id: sheetId, log: job.log, unsaved: false });
+    } catch (e) {
+      // The rows stay on the server for a while, so the person can free some space and try again.
+      await Store.runs.put({ ...run, status: "error", rows: job.count, finished: nowIso(), duration: job.elapsed, log: job.log, unsaved: true,
+        error: `The rows were collected but could not be saved on this device. ${e.message}` }).catch(() => {});
+    } finally { saving.delete(run.id); live.delete(run.id); emit(run.id, true); }
+  }
+
+  async function tick() {
+    if (busy) return;
+    busy = true;
+    try {
+      for (const id of [...watching]) {
+        let job;
+        try { job = await api(`/api/jobs/${id}`); }
+        catch (e) {
+          if (e.status === 404) {  // the server restarted or already handed the rows over
+            watching.delete(id); live.delete(id);
+            const run = await Store.runs.get(id);
+            if (run && ACTIVE.includes(run.status)) {
+              await Store.runs.put({ ...run, status: "error", finished: nowIso(), error: "The server restarted while this run was going, so it was lost. Please start it again." });
+            }
+            emit(id, true);
+          }
+          continue;  // network hiccup: try again on the next tick
+        }
+        live.set(id, job);
+        if (FINISHED.includes(job.status)) {
+          watching.delete(id);
+          // With two tabs open both see the finished run; only one may save it. The lock makes the second wait,
+          // and the re-check inside finds the run already saved by the first.
+          const saveOnce = async () => {
+            const run = await Store.runs.get(id);
+            if (run && ACTIVE.includes(run.status)) await save(run, job); else { live.delete(id); emit(id, true); }
+          };
+          if (navigator.locks) await navigator.locks.request("onebridge-save-" + id, saveOnce); else await saveOnce();
+        } else emit(id);
+      }
+    } finally {
+      busy = false;
+      if (!watching.size && timer) { clearInterval(timer); timer = null; }
+    }
+  }
+  const start = () => { if (!timer) timer = setInterval(tick, 1500); tick(); };
+
+  return {
+    live, saving,
+    on(fn) { listeners.add(fn); return () => listeners.delete(fn); },
+    watch(id) { watching.add(id); start(); updateNav(); },
+    /** On page load: pick up runs that were still going when the page was closed. */
+    async resume() {
+      try { for (const r of await Store.runs.list()) if (ACTIVE.includes(r.status)) watching.add(r.id); } catch { return; }
+      if (watching.size) start();
+      updateNav();
+    },
+    async retry(id) {
+      const run = await Store.runs.get(id);
+      const job = await api(`/api/jobs/${id}`);
+      await save({ ...run, status: "running" }, job);
+    },
+  };
+})();
+
+/* ---------------------------------------------------------------- installable app (PWA) */
+let deferredInstall = null;
+const isStandalone = () => matchMedia("(display-mode: standalone)").matches || navigator.standalone === true;
+function syncInstallButton() { const b = $("#install-btn"); if (b) b.hidden = !deferredInstall || isStandalone(); }
+window.addEventListener("beforeinstallprompt", (e) => { e.preventDefault(); deferredInstall = e; syncInstallButton(); window.dispatchEvent(new Event("install-state")); });
+window.addEventListener("appinstalled", () => { deferredInstall = null; syncInstallButton(); toast("Installed. Open Data Collector from your apps.", "ok"); window.dispatchEvent(new Event("install-state")); });
+async function promptInstall() {
+  if (!deferredInstall) return false;
+  deferredInstall.prompt();
+  const { outcome } = await deferredInstall.userChoice;
+  deferredInstall = null; syncInstallButton(); window.dispatchEvent(new Event("install-state"));
+  return outcome === "accepted";
+}
+function syncOffline() { const c = $("#offline-chip"); if (c) c.hidden = navigator.onLine; }
+window.addEventListener("online", () => { syncOffline(); toast("You're back online", "ok"); });
+window.addEventListener("offline", () => { syncOffline(); toast("You're offline. Your saved sheets still work."); });
+function registerServiceWorker() {
+  if (!("serviceWorker" in navigator)) return;
+  const hadController = !!navigator.serviceWorker.controller;
+  navigator.serviceWorker.register("/sw.js").catch((e) => console.warn("Service worker not registered:", e));
+  navigator.serviceWorker.addEventListener("controllerchange", () => {
+    if (hadController) toast("A new version is ready.", "", { label: "Reload", run: () => location.reload() });
+  });
+}
+
 /* ---------------------------------------------------------------- toasts, dialogs, menus */
 function toast(msg, kind = "", action) {
   const el = document.createElement("div");
@@ -119,12 +266,11 @@ function skeletonRows(n = 5, cols = 5) {
   return `<table class="tbl"><tbody>${Array.from({ length: n }, () =>
     `<tr>${Array.from({ length: cols }, () => '<td><div class="skel"></div></td>').join("")}</tr>`).join("")}</tbody></table>`;
 }
-function download(url) { const a = document.createElement("a"); a.href = url; a.download = ""; document.body.appendChild(a); a.click(); a.remove(); }
 function exportMenu(sheetId) {
   return [
-    { label: "Excel (.xlsx)", icon: "download", run: () => download(`/api/sheets/${sheetId}/export?format=xlsx`) },
-    { label: "CSV (.csv)", icon: "download", run: () => download(`/api/sheets/${sheetId}/export?format=csv`) },
-    { label: "JSON (.json)", icon: "download", run: () => download(`/api/sheets/${sheetId}/export?format=json`) },
+    { label: "Excel (.xlsx)", icon: "download", run: () => exportSheet(sheetId, "xlsx") },
+    { label: "CSV (.csv)", icon: "download", run: () => exportSheet(sheetId, "csv") },
+    { label: "JSON (.json)", icon: "download", run: () => exportSheet(sheetId, "json") },
   ];
 }
 
@@ -189,12 +335,10 @@ function setCrumbs(...parts) {
 
 async function refreshNavCounts() {
   try {
-    const d = await api("/api/dashboard");
-    const run = $("#nav-running"), sh = $("#nav-sheets");
-    run.hidden = !d.running; run.textContent = d.running;
-    sh.hidden = !d.sheets_total; sh.textContent = d.sheets_total;
-    return d;
-  } catch { return null; }
+    const sheets = await Store.sheets.list();
+    const sh = $("#nav-sheets");
+    sh.hidden = !sheets.length; sh.textContent = sheets.length;
+  } catch { /* local storage unavailable: the page itself explains it */ }
 }
 
 const ROUTES = [
@@ -267,15 +411,24 @@ async function viewHome() {
     <div id="home-lists" class="mt-24"></div>`;
   $("[data-import]", v)?.addEventListener("click", (e) => { e.preventDefault(); location.hash = "#/sheets"; setTimeout(pickImport, 150); });
 
-  const [d, runs, sheets] = await Promise.all([api("/api/dashboard"), api("/api/runs"), api("/api/sheets")]);
+  const [runs, sheets] = await Promise.all([Store.runs.list(), Store.sheets.list()]);
   if (stale(tk)) return;
+  const week = Date.now() - 7 * 864e5;
+  const d = { runs_total: runs.length, runs_week: runs.filter((r) => new Date(r.started).getTime() >= week).length,
+    running: runs.filter((r) => RUN_ACTIVE.includes(r.status)).length, sheets_total: sheets.length,
+    rows_total: sheets.reduce((a, x) => a + (x.rows || 0), 0) };
   $("#kpis").innerHTML = [
     ["runs", "Runs this week", fmtNum(d.runs_week), `${fmtNum(d.runs_total)} in total`],
     ["play", "Running now", fmtNum(d.running), d.running ? "Live progress in Runs" : "Nothing running"],
-    ["sheet", "Sheets", fmtNum(d.sheets_total), "Saved results and merges"],
+    ["sheet", "Sheets", fmtNum(d.sheets_total), "Saved on this device"],
     ["rows", "Rows collected", fmtNum(d.rows_total), "Across all your sheets"],
   ].map(([ic, label, val, sub]) => `<div class="card kpi"><small><span class="kpi-ico">${icon(ic)}</span>${label}</small><b>${val}</b><div class="sub">${sub}</div></div>`).join("");
-  if (!d.ai_ready && !IS_VIEWER) {
+  let aiReady = true;
+  if (!IS_VIEWER) {
+    try { aiReady = !!(await api("/api/settings")).ai_key_mask; } catch { /* offline: skip the hint */ }
+    if (stale(tk)) return;
+  }
+  if (!aiReady && !IS_VIEWER) {
     $("#home-ai").innerHTML = `<div class="callout info" style="margin-bottom:16px">${icon("sparkle")}<div class="grow"><b>Collect any detail with AI.</b> Add your own AI key (OpenAI, Gemini, Claude, OpenRouter, Groq…) to fill custom columns like “opening hours” or “services offered”.</div><a class="btn btn-sm" href="#/settings">Add AI key</a></div>`;
   }
   const lists = $("#home-lists");
@@ -292,7 +445,7 @@ async function viewHome() {
   lists.innerHTML = `<div class="grid grid-2">
     <div class="card"><div class="card-head"><h3>Recent runs</h3><a href="#/runs" class="small">View all</a></div>
       <div class="table-wrap">${runs.length ? `<table class="tbl compact"><tbody>${runs.slice(0, 6).map((r) => `
-        <tr class="clickable" data-href="#/runs/${r.id}"><td><div class="name-cell"><div><b>${esc(r.name)}</b><small>${r.connector === "places" ? "Places" : "Web search"} · ${timeAgo(r.started)}</small></div></div></td>
+        <tr class="clickable" data-href="#/runs/${r.id}"><td><div class="name-cell"><div><b>${esc(r.name)}</b><small>${r.mode === "places" ? "Places" : "Web search"} · ${timeAgo(r.started)}</small></div></div></td>
         <td>${badge(r.status)}</td><td class="num">${fmtNum(r.rows)} rows</td></tr>`).join("")}</tbody></table>`
         : emptyState("runs", "No runs yet", "Start a run to collect data.")}</div></div>
     <div class="card"><div class="card-head"><h3>Recent sheets</h3><a href="#/sheets" class="small">View all</a></div>
@@ -506,10 +659,19 @@ async function viewNewRun(mode) {
         max_results: $("#max_places").value, enrich: $("#enrich").checked });
       if (!locations.items.length) { toast("Add at least one location in step 2.", "err"); return locations.input.focus(); }
     }
+    if (!navigator.onLine) return toast("You're offline. Connect to the internet to start a run.", "err");
+    if (!Store.state.available) return toast(Store.state.error || "Local storage is not available, so results could not be kept.", "err");
     const btn = $("#start");
     btn.disabled = true; btn.innerHTML = '<span class="spinner"></span>Starting…';
     try {
       const r = await api("/api/jobs", { method: "POST", body });
+      const lines = (t) => String(t || "").split("\n").map((x) => x.trim()).filter(Boolean);
+      const spec = { ...body, queries: lines(body.queries), locations: lines(body.locations),
+        custom_fields: String(body.custom_fields || "").split(",").map((x) => x.trim()).filter(Boolean) };
+      const name = body.file_name || (mode === "places" ? `${body.category} in ${spec.locations.slice(0, 2).join(", ")}` : spec.queries[0]);
+      await Store.runs.put({ id: r.id, name, mode, spec, status: "running", started: nowIso(), rows: 0, with_email: 0, with_phone: 0,
+        duration: 0, error: "", sheet_id: null });
+      Tracker.watch(r.id);
       location.hash = `#/runs/${r.id}`;
     } catch (e) {
       toast(e.message, "err");
@@ -519,33 +681,43 @@ async function viewNewRun(mode) {
 }
 
 /* ================================================================ RUNS */
+const RUN_ACTIVE = ["queued", "running"];
+const RUN_FINISHED = ["done", "cancelled", "error"];
+// A run that is still going shows the live numbers from the server instead of the saved record.
+function effectiveRun(r) {
+  const j = Tracker.live.get(r.id);
+  if (j && RUN_ACTIVE.includes(r.status)) {
+    return { ...r, status: RUN_FINISHED.includes(j.status) ? "running" : j.status, rows: j.count, duration: j.elapsed };
+  }
+  return r;
+}
+
 async function viewRuns() {
   const tk = routeToken();
   setCrumbs("Runs");
   const v = $("#view");
-  const state = { q: "", status: "all", all: false };
+  const state = { q: "", status: "all" };
   v.innerHTML = `
-    <div class="page-head"><div><h1>Runs</h1><p>Every collection you've started, with live status.</p></div>
+    <div class="page-head"><div><h1>Runs</h1><p>Your collections. The history is kept on this device.</p></div>
       ${IS_VIEWER ? "" : `<div class="actions"><a class="btn btn-primary" href="#/new/web">${icon("plus")}New run</a></div>`}</div>
     <div class="card">
       <div class="toolbar">
         <div class="search grow" style="max-width:360px">${icon("search")}<input id="q" placeholder="Search runs" aria-label="Search runs"></div>
         <div class="seg" id="status">${[["all", "All"], ["running", "Running"], ["done", "Succeeded"], ["cancelled", "Cancelled"], ["error", "Failed"]].map(([k, l], i) => `<button data-s="${k}" class="${i ? "" : "active"}">${l}</button>`).join("")}</div>
-        ${IS_ADMIN ? '<label class="switch" style="margin-left:auto"><input type="checkbox" id="everyone"><span class="sw"></span><span><b>Everyone</b></span></label>' : ""}
       </div>
       <div class="table-wrap" id="list">${skeletonRows(6, 6)}</div>
     </div>`;
-  let runs = [], timer;
-  const load = async () => { const r = await api(`/api/runs${state.all ? "?all=1" : ""}`); if (stale(tk)) return; runs = r; render(); };
+  let runs = [];
+  const load = async () => { const r = await Store.runs.list(); if (stale(tk)) return; runs = r.map(effectiveRun); render(); };
   const render = () => {
     const list = runs.filter((r) => (state.status === "all" || r.status === state.status || (state.status === "running" && r.status === "queued"))
-      && (!state.q || r.name.toLowerCase().includes(state.q) || (r.owner || "").toLowerCase().includes(state.q)));
+      && (!state.q || r.name.toLowerCase().includes(state.q)));
     $("#list").innerHTML = !runs.length ? emptyState("runs", "No runs yet", "Start a run to collect data from the web.", IS_VIEWER ? "" : `<a class="btn btn-primary" href="#/new/web">${icon("plus")}New run</a>`)
       : !list.length ? emptyState("search", "No matching runs", "Try a different search or filter.")
-      : `<table class="tbl"><thead><tr><th>Run</th><th>Status</th>${state.all ? "<th>Owner</th>" : ""}<th>Started</th><th class="num">Duration</th><th class="num">Rows</th><th></th></tr></thead><tbody>
+      : `<table class="tbl"><thead><tr><th>Run</th><th>Status</th><th>Started</th><th class="num">Duration</th><th class="num">Rows</th><th></th></tr></thead><tbody>
         ${list.map((r) => `<tr class="clickable" data-id="${r.id}">
-          <td><div class="name-cell"><div class="kpi-ico">${icon(r.connector === "places" ? "pin" : "globe")}</div><div><b>${esc(r.name)}</b><small>${runSubtitle(r)}</small></div></div></td>
-          <td>${badge(r.status)}</td>${state.all ? `<td>${esc(r.owner)}</td>` : ""}
+          <td><div class="name-cell"><div class="kpi-ico">${icon(r.mode === "places" ? "pin" : "globe")}</div><div><b>${esc(r.name)}</b><small>${runSubtitle(r)}</small></div></div></td>
+          <td>${badge(r.status)}</td>
           <td class="nowrap" title="${esc(fmtDate(r.started))}">${timeAgo(r.started)}</td>
           <td class="num">${fmtDuration(r.duration)}</td><td class="num">${fmtNum(r.rows)}</td>
           <td class="actions"><span class="menu-wrap">${r.sheet_id ? `<a class="btn btn-sm" href="#/sheets/${r.sheet_id}" data-stop>Open sheet</a>` : ""}
@@ -554,7 +726,6 @@ async function viewRuns() {
   };
   $("#q").oninput = (e) => { state.q = e.target.value.trim().toLowerCase(); render(); };
   $$("#status button").forEach((b) => b.onclick = () => { $$("#status button").forEach((x) => x.classList.remove("active")); b.classList.add("active"); state.status = b.dataset.s; render(); });
-  $("#everyone")?.addEventListener("change", (e) => { state.all = e.target.checked; load(); });
   $("#list").addEventListener("click", (e) => {
     if (e.target.closest("[data-stop]")) return;
     const m = e.target.closest("[data-menu]");
@@ -565,9 +736,10 @@ async function viewRuns() {
         { label: "View details", icon: "eye", run: () => location.hash = `#/runs/${r.id}` },
         ...(r.sheet_id ? exportMenu(r.sheet_id) : []),
         "-",
-        { label: "Delete run", icon: "trash", danger: true, run: async () => {
-          if (!await confirmDialog("Delete this run?", "The run history is removed. Its sheet stays in Sheets.")) return;
-          try { await api(`/api/runs/${r.id}`, { method: "DELETE" }); toast("Run deleted", "ok"); load(); } catch (err) { toast(err.message, "err"); }
+        { label: "Delete from history", icon: "trash", danger: true, run: async () => {
+          if (RUN_ACTIVE.includes(r.status)) return toast("Stop the run before deleting it.", "err");
+          if (!await confirmDialog("Delete this run?", "The run is removed from your history. Its sheet stays in Sheets.")) return;
+          try { await Store.runs.remove(r.id); toast("Run deleted", "ok"); load(); } catch (err) { toast(err.message, "err"); }
         } },
       ]);
     }
@@ -575,13 +747,13 @@ async function viewRuns() {
     if (tr) location.hash = `#/runs/${tr.dataset.id}`;
   });
   await load();
-  timer = setInterval(() => { if (runs.some((r) => r.status === "running" || r.status === "queued")) load().catch(() => {}); }, 3000);
-  return () => clearInterval(timer);
+  const off = Tracker.on(() => load().catch(() => {}));
+  return off;
 }
 function runSubtitle(r) {
   const s = r.spec || {};
-  if (r.connector === "places") return `Places · ${esc(s.category || "")}${s.locations ? ` · ${esc(s.locations.slice(0, 2).join(", "))}` : ""}`;
-  return `Web search${s.queries ? ` · ${s.queries.length} search${s.queries.length > 1 ? "es" : ""}` : ""}${s.region ? ` · ${esc(CFG.regions[s.region] || "")}` : ""}`;
+  if (r.mode === "places") return `Places · ${esc(s.category || "")}${s.locations && s.locations.length ? ` · ${esc(s.locations.slice(0, 2).join(", "))}` : ""}`;
+  return `Web search${s.queries && s.queries.length ? ` · ${s.queries.length} search${s.queries.length > 1 ? "es" : ""}` : ""}${s.region ? ` · ${esc(CFG.regions[s.region] || "")}` : ""}`;
 }
 
 /* ================================================================ RUN DETAIL */
@@ -589,16 +761,13 @@ async function viewRunDetail(id) {
   const tk = routeToken();
   setCrumbs({ label: "Runs", href: "#/runs" }, "Run");
   const v = $("#view");
-  v.innerHTML = `<div class="card card-body"><div class="skel" style="width:40%;height:20px"></div><div class="skel mt-16"></div><div class="skel mt-8" style="width:70%"></div></div>`;
-  let run = null;
-  for (let i = 0; i < 6 && !run; i++) {  // a brand-new run takes a moment to be recorded
-    try { run = await api(`/api/runs/${id}`); } catch (e) { if (e.status !== 404) throw e; await sleep(600); }
-  }
+  let run = await Store.runs.get(id);
   if (stale(tk)) return;
   if (!run) return viewNotFound();
   setCrumbs({ label: "Runs", href: "#/runs" }, run.name);
+  const isPlaces = run.mode === "places";
   v.innerHTML = `
-    <div class="page-head"><div><div class="row-flex"><h1>${esc(run.name)}</h1><span id="badge">${badge(run.status)}</span></div>
+    <div class="page-head"><div><div class="row-flex"><h1>${esc(run.name)}</h1><span id="badge"></span></div>
       <p>${runSubtitle(run)} · started ${esc(fmtDate(run.started))}</p></div>
       <div class="actions" id="run-actions"></div></div>
     <div class="card"><div class="card-body">
@@ -622,86 +791,92 @@ async function viewRunDetail(id) {
     $$(".tabs button", v).forEach((x) => x.classList.toggle("active", x === b));
     ["results", "log", "input"].forEach((t) => $(`#tab-${t}`).hidden = t !== b.dataset.tab);
   });
+  const INPUT_LABELS = { queries: "Searches", category: "Category", locations: "Locations", region: "Country", fields: "Details", custom_fields: "AI details",
+    platforms: "Search on", max_results: "Max results", require: "Keep only rows with", follow_contact: "Check contact pages", one_per_site: "One row per website",
+    enrich: "Check websites", name_filter: "Name contains", file_name: "Sheet name" };
   const spec = run.spec || {};
-  $("#tab-input").innerHTML = `<ul class="summary-list">${Object.entries(spec).filter(([, val]) => val !== "" && val !== null && !(Array.isArray(val) && !val.length))
-    .map(([k, val]) => `<li><span>${esc(k.replace(/_/g, " "))}</span><b>${esc(Array.isArray(val) ? val.join("; ") : typeof val === "boolean" ? (val ? "Yes" : "No") : val)}</b></li>`).join("")}</ul>`;
+  $("#tab-input").innerHTML = `<ul class="summary-list">${Object.entries(spec).filter(([k, val]) => INPUT_LABELS[k] && val !== "" && val !== null && !(Array.isArray(val) && !val.length))
+    .map(([k, val]) => `<li><span>${INPUT_LABELS[k]}</span><b>${esc(k === "region" ? CFG.regions[val] || val : Array.isArray(val) ? val.join("; ") : typeof val === "boolean" ? (val ? "Yes" : "No") : val)}</b></li>`).join("")}</ul>`;
 
-  let timer, stopped = false;
-  const render = (j) => {
-    const status = j ? j.status : run.status;
-    const finished = !["queued", "running"].includes(status);
+  let sheetData = null;  // rows of the saved sheet, shown in Results once the run has finished
+  const paint = () => {
+    const job = Tracker.live.get(id) || null;
+    const finished = !RUN_ACTIVE.includes(run.status);
+    const jobDone = !!job && RUN_FINISHED.includes(job.status);
+    const savingNow = Tracker.saving.has(id) || (!finished && jobDone);
+    const status = finished ? run.status : (job && !jobDone ? job.status : "running");
     $("#badge").innerHTML = badge(status);
-    const isPlaces = (j?.mode || run.connector) === "places";
     const steps = isPlaces ? [["search", "Find places"], ["visit", "Check websites"], ["save", "Save sheet"], ["done", "Done"]]
                            : [["search", "Search"], ["visit", "Read websites"], ["save", "Save sheet"], ["done", "Done"]];
-    const phase = j ? j.phase : "done";
+    const phase = finished ? "done" : savingNow ? "save" : job ? job.phase : "search";
     const cur = steps.findIndex((s) => s[0] === phase);
     $("#steps").innerHTML = steps.map(([, l], i) => {
       const cls = finished ? "did" : i < cur ? "did" : i === cur ? "doing" : "";
       return `<div class="s ${cls}"><span class="d">${cls === "did" ? "✓" : i + 1}</span><span class="l">${l}</span></div>`;
     }).join("");
     $("#spin").hidden = finished;
-    $("#activity").textContent = j ? j.activity : finished ? "This run has finished." : "";
-    const bar = $("#bar"), pct = finished ? 100 : j && j.total ? Math.round(100 * j.done / j.total) : 0;
-    bar.classList.toggle("indeterminate", !finished && (!j || !j.total || j.phase === "search"));
-    $("#bar > div").style.width = pct + "%";
-    if (!finished && j && j.total && j.phase !== "search") {
-      $("#meta-l").textContent = `${fmtNum(j.done)} of ${fmtNum(j.total)} ${isPlaces && j.phase !== "visit" ? "locations" : "websites"} · ${pct}%`;
-      const left = j.done > 2 ? j.elapsed / j.done * (j.total - j.done) : null;
+    $("#activity").textContent = finished ? "This run has finished." : savingNow ? "Saving the sheet on this device…" : job ? job.activity : "Waiting for the server…";
+    const pct = finished ? 100 : job && job.total ? Math.round(100 * job.done / job.total) : 0;
+    $("#bar").classList.toggle("indeterminate", !finished && !savingNow && (!job || !job.total || job.phase === "search"));
+    $("#bar > div").style.width = (savingNow ? 100 : pct) + "%";
+    if (!finished && !savingNow && job && job.total && job.phase !== "search") {
+      $("#meta-l").textContent = `${fmtNum(job.done)} of ${fmtNum(job.total)} ${isPlaces && job.phase !== "visit" ? "locations" : "websites"} · ${pct}%`;
+      const left = job.done > 2 ? job.elapsed / job.done * (job.total - job.done) : null;
       $("#meta-r").textContent = left == null ? "Estimating time left…" : left < 60 ? "Less than a minute left" : `About ${Math.round(left / 60)} min left`;
-    } else { $("#meta-l").textContent = finished ? "" : "Working…"; $("#meta-r").textContent = ""; }
-    $("#s-rows").textContent = fmtNum(j ? j.count : run.rows);
-    $("#s-email").textContent = j ? fmtNum(j.with_email) : "—";
-    $("#s-phone").textContent = j ? fmtNum(j.with_phone) : "—";
-    $("#s-time").textContent = fmtDuration(j ? j.elapsed : run.duration);
-    const sheetId = (j && j.sheet_id) || run.sheet_id;
-    $("#run-actions").innerHTML = (!finished ? `<button class="btn btn-danger" id="stop">${icon("stop")}Stop &amp; keep results</button>` : "")
+    } else { $("#meta-l").textContent = finished || savingNow ? "" : "Working…"; $("#meta-r").textContent = ""; }
+    const src = job && !finished ? job : null;
+    $("#s-rows").textContent = fmtNum(src ? src.count : run.rows);
+    $("#s-email").textContent = fmtNum(src ? src.with_email : run.with_email);
+    $("#s-phone").textContent = fmtNum(src ? src.with_phone : run.with_phone);
+    $("#s-time").textContent = fmtDuration(src ? src.elapsed : run.duration);
+    const sheetId = run.sheet_id;
+    $("#run-actions").innerHTML = (!finished && job && !jobDone ? `<button class="btn btn-danger" id="stop">${icon("stop")}Stop &amp; keep results</button>` : "")
+      + (run.unsaved ? `<button class="btn btn-primary" id="retry">Try saving again</button>` : "")
       + (sheetId ? `<span class="menu-wrap"><button class="btn" id="dl">${icon("download")}Download</button></span><a class="btn btn-primary" href="#/sheets/${sheetId}">${icon("sheet")}Open sheet</a>` : "")
       + (finished && !IS_VIEWER ? `<a class="btn" href="#/new/${isPlaces ? "places" : "web"}">${icon("plus")}New run</a>` : "");
     $("#stop")?.addEventListener("click", async () => {
       $("#stop").disabled = true; $("#activity").textContent = "Stopping… finishing the pages already open.";
       try { await api(`/api/jobs/${id}/stop`, { method: "POST" }); } catch (e) { toast(e.message, "err"); }
     });
+    $("#retry")?.addEventListener("click", async () => {
+      $("#retry").disabled = true;
+      try { await Tracker.retry(id); } catch (e) { toast(e.status === 404 ? "The rows are no longer on the server. Please run it again." : e.message, "err"); $("#retry") && ($("#retry").disabled = false); }
+    });
     $("#dl")?.addEventListener("click", (e) => { e.stopPropagation(); openMenu($("#dl"), exportMenu(sheetId)); });
     if (finished) {
-      const err = (j && j.error) || run.error;
-      const rows = j ? j.count : run.rows;
-      $("#result").innerHTML = status === "error" ? `<div class="callout err mt-16">${icon("alert")}<div><b>The run stopped because of an error.</b> ${esc(err || "")} ${rows ? "The rows collected before the error were saved." : "Try again in a few minutes; if it keeps happening, share the Log tab with IT."}</div></div>`
-        : rows ? `<div class="callout ok mt-16">${icon("check")}<div class="grow"><b>${fmtNum(rows)} rows saved to a sheet.</b> Open it to search, merge or download it.</div></div>`
+      const rows = run.rows;
+      $("#result").innerHTML = status === "error" ? `<div class="callout err mt-16">${icon("alert")}<div><b>The run stopped because of an error.</b> ${esc(run.error || "")} ${rows && !run.unsaved ? "The rows collected before the error were saved." : ""}</div></div>`
+        : rows ? `<div class="callout ok mt-16">${icon("check")}<div class="grow"><b>${fmtNum(rows)} rows saved on this device.</b> Open the sheet to search, merge or download it.</div></div>`
         : `<div class="callout warn mt-16">${icon("info")}<div><b>No rows this time.</b> Try broader words, add the city or country, or choose “Everything” under Keep only rows that have.</div></div>`;
-    }
-    if (j) {
-      $("#tab-log").textContent = j.log.join("\n") || "No log yet.";
-      renderPreviewGrid($("#tab-results"), j.columns, j.preview.slice().reverse(), j.count, sheetId);
-    } else {
-      $("#tab-log").textContent = "The detailed log is only kept while the server is running this job.";
-      $("#tab-results").innerHTML = sheetId ? `<div class="card-body">${emptyState("sheet", "Results are in the sheet", "Open the sheet to see every row.", `<a class="btn btn-primary" href="#/sheets/${sheetId}">Open sheet</a>`)}</div>`
-        : `<div class="card-body">${emptyState("sheet", "No results", "This run didn't save any rows.")}</div>`;
-    }
-    return finished;
+    } else $("#result").innerHTML = "";
+    $("#tab-log").textContent = ((job && job.log) || run.log || []).join("\n") || "No log yet.";
+    if (job && !finished) renderPreviewGrid($("#tab-results"), job.columns, job.preview.slice().reverse(), job.count, null, "latest");
+    else if (sheetData) renderPreviewGrid($("#tab-results"), sheetData.columns, sheetData.rows.slice(0, 50), run.rows, sheetId, "first");
+    else $("#tab-results").innerHTML = `<div class="card-body">${emptyState("sheet", finished ? "No results" : "No rows yet", finished ? "This run didn't save any rows." : "Rows appear here as they are collected.")}</div>`;
   };
-  const poll = async () => {
-    if (stopped) return;
-    try {
-      const j = await api(`/api/jobs/${id}`);
-      if (render(j)) { refreshNavCounts(); run = await api(`/api/runs/${id}`).catch(() => run); return; }
-    } catch (e) {
-      if (e.status === 404) { run = await api(`/api/runs/${id}`); render(null); return; }
+  const refresh = async () => {
+    const r = await Store.runs.get(id);
+    if (stale(tk)) return;
+    if (r) run = r;
+    if (!RUN_ACTIVE.includes(run.status) && run.sheet_id && !sheetData) {
+      try { sheetData = await Store.sheets.data(run.sheet_id); } catch { /* the sheet may have been deleted */ }
+      if (stale(tk)) return;
     }
-    timer = setTimeout(poll, 1500);
+    paint();
   };
-  if (run.live) poll(); else render(null);
-  return () => { stopped = true; clearTimeout(timer); };
+  const off = Tracker.on((rid) => { if (rid === id) refresh(); });
+  await refresh();
+  return off;
 }
 
-function renderPreviewGrid(el, columns, rows, total, sheetId) {
+function renderPreviewGrid(el, columns, rows, total, sheetId, kind) {
   if (!rows.length) {
     el.innerHTML = `<div class="card-body">${emptyState("rows", "No rows yet", "Rows appear here as they are collected.")}</div>`;
     return;
   }
   el.innerHTML = `<div class="grid-scroll" style="max-height:440px"><table class="tbl grid-tbl"><thead><tr><th>#</th>${columns.map((c) => `<th>${esc(c)}</th>`).join("")}</tr></thead>
     <tbody>${rows.map((r, i) => `<tr><td>${i + 1}</td>${columns.map((c) => cellHtml(r[c])).join("")}</tr>`).join("")}</tbody></table></div>
-    <div class="pager"><span>Showing the latest ${fmtNum(rows.length)} of ${fmtNum(total)} rows</span>${sheetId ? `<a href="#/sheets/${sheetId}">Open full sheet →</a>` : "<span>The sheet is saved when the run finishes.</span>"}</div>`;
+    <div class="pager"><span>Showing ${kind === "first" ? "the first" : "the latest"} ${fmtNum(rows.length)} of ${fmtNum(total)} rows</span>${sheetId ? `<a href="#/sheets/${sheetId}">Open full sheet →</a>` : "<span>The sheet is saved when the run finishes.</span>"}</div>`;
 }
 function cellHtml(val, q = "") {
   const s = val === null || val === undefined ? "" : String(val);
@@ -720,9 +895,10 @@ async function viewSheets() {
   const v = $("#view");
   const state = { q: "", source: "all", selected: new Set() };
   v.innerHTML = `
-    <div class="page-head"><div><h1>Sheets</h1><p>Results from your runs, merges and imports.</p></div>
+    <div class="page-head"><div><h1>Sheets</h1><p>Results from your runs, merges and imports, saved on this device.</p></div>
       ${IS_VIEWER ? "" : `<div class="actions"><button class="btn" id="import">${icon("upload")}Import file</button><a class="btn btn-primary" href="#/new/web">${icon("plus")}New run</a></div>`}</div>
     <input type="file" id="import-file" accept=".xlsx,.csv,.tsv,.json" hidden>
+    ${deviceNote()}
     <div class="card">
       <div class="toolbar">
         <div class="search grow" style="max-width:360px">${icon("search")}<input id="q" placeholder="Search sheets" aria-label="Search sheets"></div>
@@ -734,7 +910,7 @@ async function viewSheets() {
       <div class="table-wrap" id="list">${skeletonRows(6, 6)}</div>
     </div>`;
   let sheets = [];
-  const load = async () => { const r = await api("/api/sheets"); if (stale(tk)) return; sheets = r; state.selected = new Set([...state.selected].filter((id) => sheets.some((s) => s.id === id))); render(); };
+  const load = async () => { const r = await Store.sheets.list(); if (stale(tk)) return; sheets = r; state.selected = new Set([...state.selected].filter((id) => sheets.some((s) => s.id === id))); render(); };
   const render = () => {
     const list = sheets.filter((s) => (state.source === "all" || s.source === state.source) && (!state.q || s.name.toLowerCase().includes(state.q)));
     const allSel = list.length && list.every((s) => state.selected.has(s.id));
@@ -746,7 +922,7 @@ async function viewSheets() {
         ${list.map((s) => `<tr class="clickable" data-id="${s.id}">${IS_VIEWER ? "" : `<td data-stop><input type="checkbox" data-sel="${s.id}" ${state.selected.has(s.id) ? "checked" : ""} aria-label="Select ${esc(s.name)}"></td>`}
           <td><div class="name-cell"><div class="file-ico">${icon("sheet")}</div><div><b>${esc(s.name)}</b><small>${s.columns.slice(0, 4).map(esc).join(" · ")}${s.columns.length > 4 ? " …" : ""}</small></div></div></td>
           <td><span class="badge plain ${s.source === "merge" ? "accent" : ""}">${SOURCE_LABEL[s.source] || "Run"}</span></td>
-          <td class="num">${fmtNum(s.rows)}</td><td class="num">${s.columns.length || "—"}</td><td class="num">${s.size_kb} KB</td>
+          <td class="num">${fmtNum(s.rows)}</td><td class="num">${s.columns.length || "—"}</td><td class="num">${fmtSize(s.size || 0)}</td>
           <td class="nowrap" title="${esc(fmtDate(s.created))}">${timeAgo(s.created)}</td>
           <td class="actions" data-stop><span class="menu-wrap"><button class="btn btn-sm" data-dl="${s.id}">${icon("download")}Download</button>
             ${IS_VIEWER ? "" : `<button class="btn btn-ghost btn-sm btn-icon" data-menu="${s.id}" aria-label="More actions">${icon("dots")}</button>`}</span></td></tr>`).join("")}
@@ -760,9 +936,13 @@ async function viewSheets() {
     const f = e.target.files[0]; e.target.value = "";
     if (!f) return;
     const fd = new FormData(); fd.append("file", f);
-    toast(`Importing ${f.name}…`);
-    try { const r = await api("/api/sheets/import", { method: "POST", body: fd }); toast(`Imported ${fmtNum(r.rows)} rows`, "ok"); await load(); }
-    catch (err) { toast(err.message, "err"); }
+    toast(`Reading ${f.name}…`);
+    try {
+      const r = await api("/api/parse", { method: "POST", body: fd });
+      await Store.sheets.put({ id: newId(), name: r.name, source: "import", created: nowIso() }, { columns: r.columns, rows: r.rows });
+      Store.persist();
+      toast(`Imported ${fmtNum(r.rows.length)} rows`, "ok"); await load();
+    } catch (err) { toast(navigator.onLine ? err.message : "Importing needs a connection to read the file.", "err"); }
   };
   $("#q").oninput = (e) => { state.q = e.target.value.trim().toLowerCase(); render(); };
   $$("#source button").forEach((b) => b.onclick = () => { $$("#source button").forEach((x) => x.classList.remove("active")); b.classList.add("active"); state.source = b.dataset.s; render(); });
@@ -770,7 +950,7 @@ async function viewSheets() {
   $("#bulk-del").onclick = async () => {
     const n = state.selected.size;
     if (!await confirmDialog(`Delete ${n} sheet${n > 1 ? "s" : ""}?`, "This can't be undone. Download anything you want to keep first.")) return;
-    for (const id of state.selected) { try { await api(`/api/sheets/${id}`, { method: "DELETE" }); } catch (err) { toast(err.message, "err"); } }
+    for (const id of state.selected) { try { await Store.sheets.remove(id); } catch (err) { toast(err.message, "err"); } }
     state.selected.clear(); toast(`Deleted ${n} sheet${n > 1 ? "s" : ""}`, "ok"); load();
   };
   $("#list").addEventListener("click", async (e) => {
@@ -795,7 +975,7 @@ async function viewSheets() {
         "-",
         { label: "Delete", icon: "trash", danger: true, run: async () => {
           if (!await confirmDialog("Delete this sheet?", `“${s.name}” will be removed. This can't be undone.`)) return;
-          try { await api(`/api/sheets/${s.id}`, { method: "DELETE" }); toast("Sheet deleted", "ok"); load(); } catch (err) { toast(err.message, "err"); }
+          try { await Store.sheets.remove(s.id); toast("Sheet deleted", "ok"); load(); } catch (err) { toast(err.message, "err"); }
         } },
       ]);
     }
@@ -808,9 +988,19 @@ async function viewSheets() {
 function renameSheet(s, after) {
   return modal({
     title: "Rename sheet", confirm: "Save",
-    body: `<label class="label" for="rn">Name</label><input class="input" id="rn" maxlength="80" value="${esc(s.name.replace(/\.xlsx$/i, ""))}">`,
-    onConfirm: async (ov) => { await api(`/api/sheets/${s.id}`, { method: "PATCH", body: { name: $("#rn", ov).value } }); toast("Sheet renamed", "ok"); after?.(); },
+    body: `<label class="label" for="rn">Name</label><input class="input" id="rn" maxlength="120" value="${esc(s.name)}">`,
+    onConfirm: async (ov) => {
+      const name = $("#rn", ov).value.trim();
+      if (!name) throw new Error("Enter a name.");
+      await Store.sheets.rename(s.id, name); toast("Sheet renamed", "ok"); after?.();
+    },
   });
+}
+// A reminder that sheets are kept in this browser. Dismissible, remembered on this device.
+function deviceNote() {
+  try { if (localStorage.getItem("deviceNoteDismissed")) return ""; } catch {}
+  return `<div class="callout info" id="device-note" style="margin-bottom:16px">${icon("info")}<div class="grow"><b>Your sheets live on this device.</b> They aren't uploaded to the server, so they won't show up on other computers or if you clear your browser data. <a href="#/settings">Back them up in Settings</a>.</div>
+    <button class="btn btn-ghost btn-sm" onclick="try{localStorage.setItem('deviceNoteDismissed','1')}catch(e){};this.closest('#device-note').remove()">Got it</button></div>`;
 }
 
 /* ================================================================ SHEET VIEW (data grid) */
@@ -818,46 +1008,56 @@ async function viewSheet(id) {
   const tk = routeToken();
   setCrumbs({ label: "Sheets", href: "#/sheets" }, "Sheet");
   const v = $("#view");
-  const meta = (await api("/api/sheets")).find((s) => s.id === id);
+  const meta = await Store.sheets.get(id);
   if (stale(tk)) return;
   if (!meta) return viewNotFound();
   setCrumbs({ label: "Sheets", href: "#/sheets" }, meta.name);
+  const data = await Store.sheets.data(id);
+  if (stale(tk)) return;
+  if (!data) return viewNotFound();
   const PAGE = 100;
-  const state = { q: "", offset: 0, total: 0, columns: [], rows: [] };
+  const state = { q: "", offset: 0, rows: data.rows };
   v.innerHTML = `
-    <div class="page-head"><div><h1>${esc(meta.name)}</h1><p>${fmtNum(meta.rows)} rows · ${meta.columns.length} columns · ${SOURCE_LABEL[meta.source] || "Run"} · ${esc(fmtDate(meta.created))}</p></div>
+    <div class="page-head"><div><h1>${esc(meta.name)}</h1><p>${fmtNum(meta.rows)} rows · ${meta.columns.length} columns · ${SOURCE_LABEL[meta.source] || "Run"} · ${esc(fmtDate(meta.created))} · saved on this device</p></div>
       <div class="actions">${IS_VIEWER ? "" : `<button class="btn" id="rename">${icon("edit")}Rename</button><a class="btn" href="#/merge?ids=${id}">${icon("merge")}Dedupe / merge</a>`}
         <span class="menu-wrap"><button class="btn btn-primary" id="export">${icon("download")}Export</button></span></div></div>
     <div class="card">
       <div class="toolbar"><div class="search grow" style="max-width:420px">${icon("search")}<input id="q" placeholder="Search all columns" aria-label="Search all columns"></div>
         <span class="muted small" id="count"></span></div>
-      <div class="grid-scroll" id="grid"><div class="card-body">${skeletonRows(8, 6)}</div></div>
+      <div class="grid-scroll" id="grid"></div>
       <div class="pager"><span id="range"></span><div class="row-flex"><button class="btn btn-sm" id="prev">Previous</button><button class="btn btn-sm" id="next">Next</button></div></div>
     </div>`;
   $("#export").onclick = (e) => { e.stopPropagation(); openMenu($("#export"), exportMenu(id)); };
   $("#rename")?.addEventListener("click", () => renameSheet(meta, () => route()));
-  const load = async () => {
-    const d = await api(`/api/sheets/${id}/rows?offset=${state.offset}&limit=${PAGE}&q=${encodeURIComponent(state.q)}`);
-    if (stale(tk)) return;
-    Object.assign(state, { total: d.total, columns: d.columns, rows: d.rows });
-    $("#grid").innerHTML = !d.rows.length ? emptyState("search", state.q ? "No rows match" : "This sheet is empty", state.q ? "Try a different search." : "")
-      : `<table class="tbl grid-tbl"><thead><tr><th>#</th>${d.columns.map((c) => `<th>${esc(c)}</th>`).join("")}</tr></thead><tbody>
-        ${d.rows.map((r, i) => `<tr class="clickable" data-i="${i}"><td>${state.offset + i + 1}</td>${d.columns.map((c) => cellHtml(r[c], state.q)).join("")}</tr>`).join("")}</tbody></table>`;
-    $("#count").textContent = state.q ? `${fmtNum(d.total)} matching rows` : "";
-    $("#range").textContent = d.total ? `Rows ${fmtNum(state.offset + 1)}–${fmtNum(Math.min(state.offset + PAGE, d.total))} of ${fmtNum(d.total)}` : "";
+  const draw = () => {
+    const slice = state.rows.slice(state.offset, state.offset + PAGE);
+    $("#grid").innerHTML = !slice.length ? emptyState("search", state.q ? "No rows match" : "This sheet is empty", state.q ? "Try a different search." : "")
+      : `<table class="tbl grid-tbl"><thead><tr><th>#</th>${data.columns.map((c) => `<th>${esc(c)}</th>`).join("")}</tr></thead><tbody>
+        ${slice.map((r, i) => `<tr class="clickable" data-i="${i}"><td>${state.offset + i + 1}</td>${data.columns.map((c) => cellHtml(r[c], state.q)).join("")}</tr>`).join("")}</tbody></table>`;
+    $("#count").textContent = state.q ? `${fmtNum(state.rows.length)} matching rows` : "";
+    $("#range").textContent = state.rows.length ? `Rows ${fmtNum(state.offset + 1)}–${fmtNum(Math.min(state.offset + PAGE, state.rows.length))} of ${fmtNum(state.rows.length)}` : "";
     $("#prev").disabled = state.offset === 0;
-    $("#next").disabled = state.offset + PAGE >= d.total;
+    $("#next").disabled = state.offset + PAGE >= state.rows.length;
   };
   let deb;
-  $("#q").oninput = (e) => { clearTimeout(deb); deb = setTimeout(() => { state.q = e.target.value.trim(); state.offset = 0; load(); }, 250); };
-  $("#prev").onclick = () => { state.offset = Math.max(0, state.offset - PAGE); load(); $("#grid").scrollTop = 0; };
-  $("#next").onclick = () => { state.offset += PAGE; load(); $("#grid").scrollTop = 0; };
+  $("#q").oninput = (e) => {
+    clearTimeout(deb);
+    deb = setTimeout(() => {
+      state.q = e.target.value.trim();
+      const q = state.q.toLowerCase();
+      state.rows = q ? data.rows.filter((r) => data.columns.some((c) => String(r[c] ?? "").toLowerCase().includes(q))) : data.rows;
+      state.offset = 0; draw();
+    }, 200);
+  };
+  $("#prev").onclick = () => { state.offset = Math.max(0, state.offset - PAGE); draw(); $("#grid").scrollTop = 0; };
+  $("#next").onclick = () => { state.offset += PAGE; draw(); $("#grid").scrollTop = 0; };
   $("#grid").addEventListener("click", (e) => {
     if (e.target.closest("a")) return;
     const tr = e.target.closest("tr[data-i]");
-    if (tr) rowDrawer(state.columns, state.rows[+tr.dataset.i], state.offset + +tr.dataset.i + 1);
+    if (tr) rowDrawer(data.columns, state.rows[state.offset + +tr.dataset.i], state.offset + +tr.dataset.i + 1);
   });
-  await load();
+  draw();
+  return () => clearTimeout(deb);
 }
 function rowDrawer(columns, row, n) {
   const ov = document.createElement("div");
@@ -884,7 +1084,7 @@ async function viewMerge(preselected) {
   const v = $("#view");
   if (IS_VIEWER) return viewNotFound();
   const tk = routeToken();
-  const sheets = await api("/api/sheets");
+  const sheets = await Store.sheets.list();
   if (stale(tk)) return;
   const st = { step: preselected.length ? 2 : 1, selected: new Set(preselected.filter((id) => sheets.some((s) => s.id === id))),
     keys: [], match: { trim: true, ignore_case: true, smart: true, ignore_punct: false }, keep: "first", fill_empty: true,
@@ -914,7 +1114,7 @@ async function viewMerge(preselected) {
           ${sheets.map((s) => `<tr class="clickable" data-id="${s.id}" data-name="${esc(s.name.toLowerCase())}"><td><input type="checkbox" ${st.selected.has(s.id) ? "checked" : ""} aria-label="Select ${esc(s.name)}"></td>
             <td><div class="name-cell"><div class="file-ico">${icon("sheet")}</div><div><b>${esc(s.name)}</b><small>${s.columns.length} columns</small></div></div></td>
             <td class="num">${fmtNum(s.rows)}</td><td>${timeAgo(s.created)}</td></tr>`).join("")}</tbody></table></div>
-        <div class="pager"><span>Pick one sheet to remove its duplicates, or several to combine them. Earlier sheets win when rows match.</span><button class="btn btn-primary" id="next1">Next ${icon("arrow")}</button></div>`;
+        <div class="pager"><span>Pick one sheet to remove its duplicates, or several to combine them. When rows match, the sheet you selected first wins.</span><button class="btn btn-primary" id="next1">Next ${icon("arrow")}</button></div>`;
       const sync = () => {
         const rows = sheets.filter((s) => st.selected.has(s.id)).reduce((a, s) => a + s.rows, 0);
         $("#seln") && ($("#seln").textContent = st.selected.size ? `${st.selected.size} selected · ${fmtNum(rows)} rows` : "Nothing selected");
@@ -971,7 +1171,16 @@ async function viewMerge(preselected) {
       $("#next2").onclick = async () => {
         if (st.selected.size === 1 && !st.keys.length) return toast("Choose at least one column to find duplicates in a single sheet.", "err");
         const b = $("#next2"); b.disabled = true; b.innerHTML = '<span class="spinner"></span>Checking…';
-        try { st.preview = await api("/api/merge", { method: "POST", body: mergeBody(st, true) }); st.step = 3; render(); }
+        try {
+          await new Promise((r) => setTimeout(r, 30));  // let the spinner paint before the heavy work
+          const picked = await Promise.all([...st.selected].map(async (id) => {
+            const m = sheets.find((x) => x.id === id), d = await Store.sheets.data(id);
+            return { name: m.name, columns: d.columns, rows: d.rows };
+          }));
+          st.result = SheetOps.merge(picked, { keys: st.keys, match: st.match, keep: st.keep, fillEmpty: st.fill_empty });
+          st.preview = SheetOps.mergeSummary(st.result);
+          st.step = 3; render();
+        }
         catch (e) { toast(e.message, "err"); b.disabled = false; b.innerHTML = `Preview ${icon("arrow")}`; }
       };
     } else {
@@ -993,20 +1202,20 @@ async function viewMerge(preselected) {
       $("#save").onclick = async () => {
         const b = $("#save"); b.disabled = true; b.innerHTML = '<span class="spinner"></span>Saving…';
         try {
-          const r = await api("/api/merge", { method: "POST", body: mergeBody(st, false) });
-          toast(`Saved “${r.name}” with ${fmtNum(r.rows_out)} rows`, "ok");
-          location.hash = `#/sheets/${r.id}`;
+          const name = stampName(st.output_name.trim() || "Merged");
+          const meta = await Store.sheets.put({ id: newId(), name, source: "merge", created: nowIso() }, { columns: st.result.columns, rows: st.result.rows });
+          if (st.save_removed && st.result.removedRows.length) {
+            await Store.sheets.put({ id: newId(), name: name + " (removed duplicates)", source: "merge", created: nowIso() }, { columns: st.result.columns, rows: st.result.removedRows });
+          }
+          Store.persist();
+          toast(`Saved “${name}” with ${fmtNum(meta.rows)} rows`, "ok");
+          location.hash = `#/sheets/${meta.id}`;
         } catch (e) { toast(e.message, "err"); b.disabled = false; b.innerHTML = `${icon("check")}Save new sheet`; }
       };
     }
   };
   render();
 }
-function mergeBody(st, preview) {
-  return { sheets: [...st.selected], keys: st.keys, match: st.match, keep: st.keep, fill_empty: st.fill_empty,
-    save_removed: st.save_removed, output_name: st.output_name || "Merged", preview };
-}
-
 /* ================================================================ SETTINGS */
 const PROVIDER_ORDER = ["openai", "gemini", "anthropic", "openrouter", "groq", "custom"];
 const PROVIDER_HELP = {
@@ -1051,6 +1260,23 @@ async function viewSettings() {
           <button class="btn btn-primary" id="save-social">Save</button>
         </div>
       </section>` : ""}
+      <section class="card">
+        <div class="card-head"><div><h3>${icon("sheet")} Data on this device</h3><p>Your sheets and run history are saved in this browser. The server never stores them.</p></div></div>
+        <div class="card-body">
+          <div id="usage"><div class="skel" style="width:60%"></div></div>
+          <div class="callout info mt-16">${icon("info")}<div>Sheets don't follow you to another computer or browser. Download a backup to move them or keep a safe copy.</div></div>
+          <div class="row-flex mt-16">
+            <button class="btn" id="backup">${icon("download")}Download backup</button>
+            <button class="btn" id="restore">${icon("upload")}Restore from backup</button>
+            <input type="file" id="restore-file" accept=".json,application/json" hidden>
+            <button class="btn btn-danger" id="wipe">${icon("trash")}Delete all data on this device</button>
+          </div>
+        </div>
+      </section>
+      <section class="card">
+        <div class="card-head"><div><h3>${icon("download")} Install the app</h3><p>Add Data Collector to your desktop or phone. It opens in its own window and works offline with your saved sheets.</p></div></div>
+        <div class="card-body" id="install-body"></div>
+      </section>
       <section class="card">
         <div class="card-head"><div><h3>${icon("key")} Password</h3><p>Change the password you use to sign in.</p></div></div>
         <div class="card-body"><div class="grid grid-3">
@@ -1128,9 +1354,69 @@ async function viewSettings() {
   const syncTheme = () => { const t = document.documentElement.dataset.theme || "system"; $$("#theme button").forEach((b) => b.classList.toggle("active", b.dataset.t === t)); };
   $$("#theme button").forEach((b) => b.onclick = () => { setTheme(b.dataset.t); syncTheme(); });
   syncTheme();
+
+  /* data on this device */
+  const paintUsage = async () => {
+    try {
+      const [u, shs, rns] = await Promise.all([Store.usage(), Store.sheets.list(), Store.runs.list()]);
+      if (stale(tk)) return;
+      $("#usage").innerHTML = `<ul class="summary-list">
+        <li><span>Sheets</span><b>${fmtNum(shs.length)} (${fmtNum(shs.reduce((a, x) => a + (x.rows || 0), 0))} rows)</b></li>
+        <li><span>Run history</span><b>${fmtNum(rns.length)} run${rns.length === 1 ? "" : "s"}</b></li>
+        <li><span>Space used by this app</span><b>${fmtSize(u.used)}${u.quota ? ` of ${fmtSize(u.quota)} available` : ""}</b></li>
+        <li><span>Protected from automatic cleanup</span><b>${u.persisted ? "Yes" : 'No &nbsp;<button class="btn btn-sm" id="protect">Protect my data</button>'}</b></li></ul>`;
+      $("#protect")?.addEventListener("click", async () => {
+        toast((await Store.persist()) ? "Your sheets are now protected from automatic cleanup." : "Your browser didn't allow it. Installing the app usually helps.", "");
+        paintUsage();
+      });
+    } catch (e) { $("#usage").innerHTML = `<div class="callout err">${icon("alert")}<div>${esc(e.message)}</div></div>`; }
+  };
+  paintUsage();
+  $("#backup").onclick = async () => {
+    try {
+      const all = await Store.exportAll();
+      saveBlob(new Blob([JSON.stringify(all)], { type: "application/json" }), `onebridge-backup-${new Date().toISOString().slice(0, 10)}.json`);
+      toast(`Backup of ${all.sheets.length} sheet${all.sheets.length === 1 ? "" : "s"} downloaded`, "ok");
+    } catch (e) { toast(e.message, "err"); }
+  };
+  $("#restore").onclick = () => $("#restore-file").click();
+  $("#restore-file").onchange = async (e) => {
+    const f = e.target.files[0]; e.target.value = "";
+    if (!f) return;
+    try {
+      const n = await Store.importAll(JSON.parse(await f.text()));
+      toast(`Restored ${n} sheet${n === 1 ? "" : "s"}`, "ok"); paintUsage(); refreshNavCounts();
+    } catch (err) { toast(err instanceof SyntaxError ? "That file isn't a valid backup." : err.message, "err"); }
+  };
+  $("#wipe").onclick = async () => {
+    if (!await confirmDialog("Delete everything on this device?", "All your sheets and your run history on this device will be removed. Download a backup first if you may need them.", "Delete everything")) return;
+    try { await Store.clearAll(); toast("Data on this device deleted", "ok"); paintUsage(); refreshNavCounts(); } catch (e) { toast(e.message, "err"); }
+  };
+
+  /* install */
+  const paintInstall = () => {
+    const el = $("#install-body");
+    if (!el) return;
+    const ios = /iphone|ipad|ipod/i.test(navigator.userAgent);
+    el.innerHTML = isStandalone() ? `<div class="callout ok">${icon("check")}<div>You're using the installed app.</div></div>`
+      : deferredInstall ? `<button class="btn btn-primary" id="install-now">${icon("download")}Install on this device</button>`
+      : ios ? `<p class="muted" style="margin:0">On iPhone or iPad: tap the <b>Share</b> button in Safari, then choose <b>Add to Home Screen</b>.</p>`
+      : `<p class="muted" style="margin:0">In Chrome or Edge, open the browser menu (⋮) and choose <b>Install Data Collector</b>, or click the install icon at the right end of the address bar. If you don't see it, this browser may not support installing apps.</p>`;
+    $("#install-now")?.addEventListener("click", promptInstall);
+  };
+  paintInstall();
+  window.addEventListener("install-state", paintInstall);
+  return () => window.removeEventListener("install-state", paintInstall);
 }
 
 /* ================================================================ ADMIN */
+function databaseNotice(db) {
+  db = db || {};
+  const label = { postgresql: "PostgreSQL", mysql: "MySQL", sqlite: "a SQLite file" }[db.kind] || db.kind || "the database";
+  if (db.fallback) return `<div class="callout err">${icon("alert")}<div><b>The configured database could not be reached (${esc(db.error)}).</b> The app is using temporary storage instead, so new users and saved AI keys will be lost when the server restarts. Check <code>DATABASE_URL</code> on the server and whether the database has expired.</div></div>`;
+  if (db.kind === "sqlite" && db.on_server) return `<div class="callout warn">${icon("alert")}<div><b>Users are saved in a temporary file on the server</b> and will be lost on every restart or update. Connect a PostgreSQL database by setting <code>DATABASE_URL</code> on the server.</div></div>`;
+  return `<div class="callout ok">${icon("check")}<div class="grow"><b>Connected to ${esc(label)}.</b> User accounts and saved AI keys are stored here.</div></div>`;
+}
 async function viewAdmin() {
   setCrumbs("Admin");
   const v = $("#view");
@@ -1150,6 +1436,10 @@ async function viewAdmin() {
             <td>${u.last_login ? timeAgo(u.last_login) : '<span class="muted">Never</span>'}</td><td>${fmtDate(u.created, false)}</td>
             <td class="actions"><span class="menu-wrap"><button class="btn btn-ghost btn-sm btn-icon" data-menu aria-label="More actions">${icon("dots")}</button></span></td></tr>`).join("")}
         </tbody></table></div>
+      </div>
+      <div class="card mt-16">
+        <div class="card-head"><div><h3>${icon("sheet")} Where data is stored</h3><p>User accounts and saved AI keys are in the database. Sheets and run history never leave each person's own device.</p></div></div>
+        <div class="card-body">${databaseNotice(settings.database)}</div>
       </div>
       <div class="card mt-16">
         <div class="card-head"><div><h3>${icon("shield")} Connector policy</h3><p>Restricted connectors are off by default. Turn them on only with legal approval.</p></div></div>
@@ -1212,6 +1502,17 @@ function addUser(list, render) {
 }
 
 /* ---------------------------------------------------------------- start */
-if (!location.hash) history.replaceState(null, "", "#/home");
-route();
-setInterval(refreshNavCounts, 15000);
+(async function boot() {
+  syncOffline(); syncInstallButton();
+  $("#install-btn")?.addEventListener("click", promptInstall);
+  // On sign-out, forget the cached signed-in page so the next person on this browser never sees it.
+  document.querySelector(".sidebar-foot form")?.addEventListener("submit", () => {
+    try { navigator.serviceWorker && navigator.serviceWorker.controller && navigator.serviceWorker.controller.postMessage("purge-pages"); } catch {}
+  });
+  await Store.init(CFG.user.id);
+  await Tracker.resume();
+  if (!location.hash) history.replaceState(null, "", "#/home");
+  route();
+  registerServiceWorker();
+  setInterval(refreshNavCounts, 15000);
+})();

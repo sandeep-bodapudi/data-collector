@@ -1,7 +1,10 @@
-"""Database models. Works with MySQL (XAMPP), PostgreSQL or SQLite - set DATABASE_URL."""
+"""Database models. Works with PostgreSQL, MySQL (XAMPP) or SQLite - set DATABASE_URL.
+
+The database holds ONLY user accounts, per-user settings (encrypted AI keys) and admin switches.
+Sheets and run history live in each person's browser (IndexedDB), never on the server.
+"""
 import base64
 import hashlib
-import json
 import os
 from datetime import datetime
 
@@ -87,50 +90,6 @@ class VaultCredential(db.Model):
             return decrypt(self.encrypted_value)
         except Exception:  # unreadable (e.g. key changed) - treat as not set
             return ""
-
-
-class Run(db.Model):
-    __tablename__ = "runs"
-    id = db.Column(db.String(36), primary_key=True)
-    name = db.Column(db.String(255), nullable=True)
-    connector = db.Column(db.String(50), nullable=False)  # web, places
-    status = db.Column(db.String(20), default="queued")   # queued, running, done, error, cancelled
-    spec_json = db.Column(db.Text, nullable=False)        # input parameters, secrets removed
-    total_items = db.Column(db.Integer, default=0)
-    done_items = db.Column(db.Integer, default=0)
-    row_count = db.Column(db.Integer, default=0)
-    error = db.Column(db.Text, nullable=True)
-    owner_id = db.Column(db.Integer, db.ForeignKey("users.id"), nullable=True)
-    started_at = db.Column(db.DateTime, default=datetime.utcnow)
-    completed_at = db.Column(db.DateTime, nullable=True)
-
-    def to_dict(self, owner_name=""):
-        end = self.completed_at or datetime.utcnow()
-        return {"id": self.id, "name": self.name or "Untitled run", "connector": self.connector,
-                "status": self.status, "rows": self.row_count or 0, "owner": owner_name,
-                "started": iso(self.started_at),
-                "duration": int((end - self.started_at).total_seconds()) if self.started_at else 0,
-                "error": self.error or "", "spec": json.loads(self.spec_json or "{}")}
-
-
-class Sheet(db.Model):
-    __tablename__ = "sheets"
-    id = db.Column(db.String(36), primary_key=True)
-    name = db.Column(db.String(255), nullable=False)
-    source = db.Column(db.String(50), default="run")      # run, merge, import
-    run_id = db.Column(db.String(36), db.ForeignKey("runs.id"), nullable=True)
-    row_count = db.Column(db.Integer, default=0)
-    columns_json = db.Column(db.Text, nullable=True)
-    file_path = db.Column(db.String(255), nullable=True)
-    file_data = db.Column(db.LargeBinary(length=(2 ** 32) - 1), nullable=True)
-    owner_id = db.Column(db.Integer, db.ForeignKey("users.id"), nullable=True)
-    created_at = db.Column(db.DateTime, default=datetime.utcnow)
-
-    def to_dict(self, size=None):
-        return {"id": self.id, "name": self.name, "source": self.source or "run", "rows": self.row_count or 0,
-                "columns": json.loads(self.columns_json or "[]"),
-                "size_kb": round((size if size is not None else len(self.file_data or b"")) / 1024, 1),
-                "created": iso(self.created_at)}
 
 
 class AppSetting(db.Model):

@@ -4,11 +4,16 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>{% if is_setup %}Set up{% else %}Sign in{% endif %} · OneBridge Data Collector</title>
-<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><rect width='32' height='32' rx='8' fill='%232563eb'/><path d='M9 11h14M9 16h14M9 21h9' stroke='white' stroke-width='2.5' stroke-linecap='round'/></svg>">
+<link rel="icon" type="image/svg+xml" href="{{ url_for('static', filename='logo.svg') }}">
+<link rel="icon" type="image/png" sizes="32x32" href="{{ url_for('static', filename='icons/favicon-32.png') }}">
+<link rel="apple-touch-icon" href="{{ url_for('static', filename='icons/apple-touch-icon.png') }}">
+<link rel="manifest" href="/manifest.webmanifest">
+<meta name="theme-color" content="#0b1a3a" media="(min-width: 901px)">
+<meta name="theme-color" content="#ffffff" media="(max-width: 900px)">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap">
 <script>try { const t = localStorage.getItem("theme"); if (t) document.documentElement.dataset.theme = t; } catch (e) {}</script>
-<link rel="stylesheet" href="{{ url_for('static', filename='app.css') }}">
+<link rel="stylesheet" href="{{ url_for('static', filename='app.css') }}?v={{ v }}">
 <style>
   .auth { min-height: 100vh; display: grid; grid-template-columns: 1fr 1fr; }
   .auth-side { background: #0b1a3a; color: #dbe5ff; padding: 48px; display: flex; flex-direction: column; justify-content: space-between; position: relative; overflow: hidden; }
@@ -40,7 +45,7 @@
 <div class="auth">
   <aside class="auth-side">
     <div class="brand" style="position:relative;z-index:1">
-      <div class="brand-mark"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><rect x="3" y="3" width="18" height="18" rx="2"/><path d="M3 9h18M3 15h18M9 3v18"/></svg></div>
+      <img class="brand-logo" src="{{ url_for('static', filename='logo.svg') }}" alt="OneBridge" width="50" height="40">
       <div><b>OneBridge</b><small>Data Collector</small></div>
     </div>
     <div style="position:relative;z-index:1">
