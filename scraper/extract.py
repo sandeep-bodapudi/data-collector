@@ -17,6 +17,7 @@ STANDARD_FIELDS = {
     "text_snippet": "Page Text (first 500 chars)",
 }
 
+PIN_RE = re.compile(r"(?<!\d)[1-9]\d{2}\s?\d{3}(?!\d)")  # Indian PIN code, e.g. 500090 or 500 090
 EMAIL_RE = re.compile(r"[A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+\.[A-Za-z]{2,24}")
 # Obfuscated emails: "info [at] school [dot] edu", "info(at)school.edu", "info AT school DOT edu".
 # Only explicit markers count, so ordinary text like "Great place.Visit" is never read as an email.
@@ -277,10 +278,15 @@ def _extract_address(soup, text: str) -> str:
             return addr[:400]
 
     # 4. Footer: look for divs/sections labelled "address" or containing pin patterns
-    for el in soup.find_all(["div", "p", "section", "footer", "span"], class_=re.compile(r"address|location|contact", re.I)):
+    best = ""
+    for el in soup.find_all(["div", "p", "section", "footer", "span", "li"], class_=re.compile(r"address|location|contact", re.I)):
         addr = el.get_text(" ", strip=True)
-        if len(addr) > 15:
-            return addr[:400]
+        # A whole "contact" section also holds phones, emails and form labels. Only short text that looks like an address
+        # (has a 6-digit PIN code) counts; the shortest such element is the address itself.
+        if 15 < len(addr) <= 300 and PIN_RE.search(addr) and (not best or len(addr) < len(best)):
+            best = addr
+    if best:
+        return best[:400]
 
     # 5. Text pattern: "Address:" label
     for pattern in [

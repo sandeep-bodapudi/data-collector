@@ -6,6 +6,7 @@ result that looks like the place's own site (not a directory or social page), an
 """
 import math
 import re
+import socket
 import time
 from urllib.parse import urlparse
 
@@ -78,6 +79,73 @@ def pick_official(name: str, hits: list[dict]) -> str | None:
         # ... or the page title mentions at least two of them (for names with several distinctive words).
         if len(toks) >= 2 and sum(t in title for t in toks) >= 2:
             return _home(url)
+    return None
+
+
+# ---------------------------------------------------------------- guessing the website without a search engine
+# Indian colleges almost always use their initials: GRIET -> griet.ac.in, CBIT -> cbit.ac.in, VNR VJIET -> vnrvjiet.ac.in.
+# Checking a handful of such addresses needs no search engine (so no blocking or pacing), and each guess is verified by
+# reading the page, so a wrong guess is rejected rather than shown.
+GUESS_TLDS = (".ac.in", ".edu.in", ".in", ".edu", ".org", ".com")
+EDU_WORDS = re.compile(r"college|institute|university|engineering|technolog|polytechnic|academy|school", re.I)
+PLACE_WORDS = {"hyderabad", "secunderabad", "telangana"}
+
+
+def guess_stems(name: str, aliases=()) -> list[str]:
+    """Likely domain names (no ending) for an institution, most likely first."""
+    stems: list[str] = []
+    for n in (name, *aliases):
+        words = [w for w in _words(n) if w not in LINK_WORDS]
+        if not words:
+            continue
+        for t in tokens(n):                                   # a distinctive one-word name: "griet", "bvrit", "vjiet"
+            if t.isalpha() and 3 <= len(t) <= 12:
+                stems.append(t)
+        if len(words) >= 2:
+            stems.append("".join(w[0] for w in words))                         # initials: "gokaraju rangaraju institute..." -> griet
+            stems.append("".join(w[0] for w in words if w not in GENERIC_WORDS))  # initials of the distinctive words
+            stems.append("".join(words[:2]))                                   # "malla reddy" -> mallareddy
+            stems.append("".join(words[:3]))
+    seen, out = set(), []
+    for st in stems:
+        if 3 <= len(st) <= 30 and st.isalnum() and st not in seen:
+            seen.add(st)
+            out.append(st)
+    return out[:6]
+
+
+def verify_page(text: str, name: str, aliases=(), area: str = "") -> bool:
+    """Is this page really that institution's? It must read like an education site AND mention the place's name (a
+    distinctive word or its initials); a bare initials match must also mention the city or area, since short
+    initials collide with unrelated organisations."""
+    low = text.lower()
+    if not EDU_WORDS.search(low):
+        return False
+    words = set(re.findall(r"[a-z0-9]+", low))
+    strong = [t for n in (name, *aliases) for t in tokens(n) if len(t) >= 4]
+    if sum(t in words for t in set(strong)) >= (2 if len(set(strong)) >= 2 else 1):
+        return True
+    initials = {"".join(w[0] for w in _words(n) if w not in LINK_WORDS) for n in (name, *aliases)}
+    where = {w for w in re.findall(r"[a-z]{4,}", area.lower())} | PLACE_WORDS
+    return any(len(i) >= 3 and i in words for i in initials) and bool(where & words)
+
+
+def guess_website(fetcher, name: str, area: str = "", aliases=(), resolve=socket.gethostbyname) -> str | None:
+    """Try the likely addresses; return the home page of the first one that exists and is verified, else None."""
+    for stem in guess_stems(name, aliases):
+        for tld in GUESS_TLDS:
+            host = stem + tld
+            try:
+                resolve(host)
+            except OSError:
+                continue
+            for scheme in ("https", "http"):
+                html, _ = fetcher.get_html(f"{scheme}://{host}/")
+                if html:
+                    head = re.sub(r"<script.*?</script>|<style.*?</style>", " ", html[:60000], flags=re.S | re.I)
+                    if verify_page(re.sub(r"<[^>]+>", " ", head)[:6000], name, aliases, area):
+                        return f"{scheme}://{host}/"
+                    break  # the address exists but is someone else's: try the next one
     return None
 
 

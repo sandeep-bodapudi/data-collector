@@ -250,6 +250,18 @@ def _run_web(job: Job):
 
 # ---------------------------------------------------------------- places mode
 
+FREE_MAIL = ("gmail.com", "yahoo.com", "yahoo.in", "outlook.com", "hotmail.com", "rediffmail.com")
+
+
+def _own_emails(emails: list[str], site: str) -> list[str]:
+    """A site lists emails of web designers, partners and ad networks too. Keep the ones on the place's own domain (and
+    plain Gmail/Yahoo-style ones, which small institutions really use); only if there are none, fall back to the first two."""
+    root = discover.root_domain(domain_of(site))
+    own = [e for e in emails if e.rsplit("@", 1)[-1] == root or e.rsplit("@", 1)[-1].endswith("." + root)]
+    free = [e for e in emails if e.rsplit("@", 1)[-1] in FREE_MAIL and e not in own]
+    return (own + free)[:5] or emails[:2]
+
+
 def _enrich_place(job: Job, fetcher: Fetcher, row: dict) -> dict:
     url = row.get("Website", "")
     if url and not url.startswith("http"):
@@ -259,6 +271,7 @@ def _enrich_place(job: Job, fetcher: Fetcher, row: dict) -> dict:
     html, note = fetcher.get_html(url)
     row["Website Status"] = note
     if not html:
+        job.say(f"  could not read {url}: {note}")
         return row
     page = extract.parse(html, url)
 
@@ -277,10 +290,13 @@ def _enrich_place(job: Job, fetcher: Fetcher, row: dict) -> dict:
         if sub_html:
             _merge_pages(page, extract.parse(sub_html, sub_url))
 
-    if page["emails"]:
-        row["Email"] = "; ".join(dict.fromkeys(([row["Email"]] if row["Email"] else []) + page["emails"]))
+    emails = _own_emails(page["emails"], url)
+    if emails:
+        row["Email"] = "; ".join(dict.fromkeys(([row["Email"]] if row["Email"] else []) + emails))
     if not row["Phone"] and page["phones"]:
-        row["Phone"] = "; ".join(extract.dedupe_phones(page["phones"]))
+        row["Phone"] = "; ".join(extract.dedupe_phones(page["phones"])[:3])  # the first few are the contact ones; the rest are page noise
+    if not row.get("Address") and page["address"]:
+        row["Address"] = page["address"]
     if job.spec["custom_fields"]:
         row.update(ai_extract.extract_fields(job.spec["custom_fields"], page["_text"], url, row["Name"], job.spec["ai"]))
     return row
@@ -308,6 +324,33 @@ def _current_gap() -> float:
     if os.environ.get("BRAVE_API_KEY") or (os.environ.get("GOOGLE_CSE_KEY") and os.environ.get("GOOGLE_CSE_CX")):
         return min(SEARCH_GAP, KEYED_GAP)  # never slower than the no-key pacing, only ever faster
     return SEARCH_GAP
+
+
+def _guess_websites(job: Job, fetcher: Fetcher, rows: list[dict]):
+    """First, with no search engine at all: try the address a college would normally have (initials + .ac.in etc.) and
+    keep it only if the page really is that college's. Fast, and not subject to search-engine blocking."""
+    todo = [r for r in rows if not r.get("Website") and r.get("Name")]
+    if not todo:
+        return
+    job.phase, job.total, job.done = "visit", len(todo), 0
+    job.say(f"Checking the likely website addresses of {len(todo)} places…")
+    job.activity = f"Checking likely website addresses for {len(todo)} places…"
+
+    def one(r):
+        if job.cancelled.is_set():
+            return None
+        try:
+            return discover.guess_website(fetcher, r["Name"], r.get("Search Location", ""), r.get("_aliases", []))
+        except Exception:  # a guess that fails must never stop the run
+            return None
+
+    with ThreadPoolExecutor(WORKERS) as pool:
+        for r, url in zip(todo, pool.map(one, todo)):
+            job.done += 1
+            if url:
+                r["Website"], r["Website Source"] = url, "Guessed from the name and verified"
+                job.say(f"  {r['Name']}: {url}")
+    job.say(f"  found {sum(1 for r in todo if r.get('Website'))} of {len(todo)} that way.")
 
 
 def _discover_websites(job: Job, rows: list[dict]):
@@ -363,9 +406,7 @@ def _discover_websites(job: Job, rows: list[dict]):
 
 def _run_places(job: Job):
     spec = job.spec
-    job.columns = list(places.PLACE_COLUMNS)
-    if spec.get("enrich"):
-        job.columns += spec["custom_fields"] + ["Website Source", "Website Status"]
+    job.columns = list(places.OUTPUT_COLUMNS) + (spec["custom_fields"] if spec.get("enrich") else [])
     all_rows = []
     job.total = len(spec["locations"])
     for loc in spec["locations"]:
@@ -390,8 +431,6 @@ def _run_places(job: Job):
         all_rows += found
         job.done += 1
         time.sleep(1)
-    if "Search Location" not in job.columns:
-        job.columns.insert(0, "Search Location")
 
     all_rows, merged = discover.merge_duplicates(all_rows)  # one place listed twice on the map under similar names
     if merged:
@@ -404,7 +443,11 @@ def _run_places(job: Job):
     for r in all_rows:
         if r.get("Website"):
             r["Website Source"] = "Map"
+    fetcher = Fetcher(spec)
     if spec.get("find_websites", True):
+        _guess_websites(job, fetcher, all_rows)
+        if job.cancelled.is_set():
+            return
         _discover_websites(job, all_rows)
         if not job.cancelled.is_set():
             all_rows, merged = discover.merge_duplicates(all_rows)  # now also by shared website
@@ -416,7 +459,6 @@ def _run_places(job: Job):
     job.total, job.done = len(with_site), 0
     job.phase, job.activity = "visit", f"Visiting {len(with_site)} websites to find emails and phone numbers…"
     job.say(f"Visiting {len(with_site)} websites for emails/phones…")
-    fetcher = Fetcher(spec)
     with ThreadPoolExecutor(WORKERS) as pool:
         futures = {pool.submit(_enrich_place, job, fetcher, r): r for r in with_site}
         for fut in as_completed(futures):
@@ -430,3 +472,4 @@ def _run_places(job: Job):
             except Exception as e:
                 job.say(f"  website failed: {e}")
                 job.rows.append(futures[fut])
+    job.rows.sort(key=lambda r: not (r.get("Email") or r.get("Phone")))  # places with contact details first
