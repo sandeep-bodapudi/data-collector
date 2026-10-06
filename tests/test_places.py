@@ -53,6 +53,7 @@ g = places.geocode("Bachupally")
 ok("an exact area name needs no fallback", g["kind"] == "area" and g["fallback"] is False)
 
 places._nominatim = lambda q, limit=8: [poi]
+places._geocode_photon = lambda q: None  # the backup geocoder has nothing better either, for this test
 g = places.geocode("Some Shop, Hyderabad")
 ok("only a business found: search around it and say so", g["kind"] == "around" and g["radius"] == 3000 and g["approx"] is True)
 ok("the approximate case is described honestly", "Couldn't find an area" in places.describe_location(g, "Some Shop, Hyderabad"))
@@ -60,6 +61,30 @@ ok("the approximate case is described honestly", "Couldn't find an area" in plac
 places._nominatim = lambda q, limit=8: []
 places._geocode_photon = lambda q: {"kind": "box", "bbox": (1, 2, 3, 4), "label": "Backup Town"}
 ok("the backup geocoder is used when the main one knows nothing", places.geocode("Nowhere")["label"] == "Backup Town")
+
+# ---- a typo'd state/district name doesn't quietly turn into "a few km around some unrelated business" ---------
+# Real failure: "Telengana, India" (a common misspelling of "Telangana") matched no area in Nominatim, but did
+# fuzzy-match a random bank branch whose name happened to contain the word - old code used that immediately
+# without ever trying the backup geocoder, turning a request for the whole state into a 3 km search around a bank.
+ok("a common state-name misspelling is corrected before geocoding", places._fix_spelling("Telengana, India") == "telangana, India")
+bank = {**poi, "display_name": "Telengana Cooperative bank, Vanasthalipuram, Hyderabad"}
+calls.clear()
+def fake_nominatim_typo(q, limit=8):
+    calls.append(q)
+    return [bank]  # Nominatim's best (and only) fuzzy match: an unrelated small business, not an area
+places._nominatim = fake_nominatim_typo
+places._geocode_photon = lambda q: {"kind": "box", "bbox": (1, 2, 3, 4), "label": "Telangana (backup match)"}
+g = places.geocode("Telengana, India")
+ok("the backup geocoder is tried (and preferred) before settling for an unrelated point match",
+   g["label"] == "Telangana (backup match)", str(g))
+ok("it was asked for the corrected spelling", calls and "telangana" in calls[0].lower(), calls)
+
+places._geocode_photon = lambda q: None
+g = places.geocode("Telengana, India")
+ok("only once the backup geocoder also comes up empty does it fall back to the point match",
+   g["kind"] == "around" and g["approx"] is True, str(g))
+
+places._nominatim = lambda q, limit=8: []
 places._geocode_photon = lambda q: None
 try:
     places.geocode("Nowhere")

@@ -7,6 +7,18 @@ import requests
 from .extract import normalize_phone
 
 
+# Common misspellings of Indian state/city names worth correcting before asking the map to geocode them - a
+# structured geocoder like Nominatim is much less typo-tolerant than a search engine, so a simple misspelling
+# ("Telengana" for "Telangana") can make it return nothing useful at all for what is otherwise a perfectly
+# well-known place.
+LOCATION_SPELLING = {"telengana": "telangana", "andra pradesh": "andhra pradesh", "bangalore": "bengaluru"}
+
+
+def _fix_spelling(location: str) -> str:
+    parts = [LOCATION_SPELLING.get(p.strip().lower(), p.strip()) for p in location.split(",")]
+    return ", ".join(parts)
+
+
 NOMINATIM = "https://nominatim.openstreetmap.org/search"
 PHOTON = "https://photon.komoot.io/api/"
 # Public Overpass servers; tried in order when one is busy.
@@ -122,14 +134,16 @@ def geocode(location: str) -> dict:
 
     "Bachupally, Hyderabad" used to match a single junior college, so the search covered 10 metres and found nothing.
     Now: look for an area in the full text; if the matches are all businesses, retry with just the first part
-    ("Bachupally"); if that fails too, search a few kilometres around the best match and say so."""
-    parts = [x.strip() for x in location.split(",") if x.strip()]
-    attempts = [location] + ([parts[0]] if len(parts) > 1 else [])
-    first_match, reached = None, False
+    ("Bachupally"); if that fails too, try the backup geocoder (it has its own fuzzy matching, and sometimes
+    resolves a typo or area Nominatim's stricter parser missed); only then search a few kilometres around the
+    best match and say so, rather than silently turning "a whole state" into a few km around an unrelated shop."""
+    query_text = _fix_spelling(location)
+    parts = [x.strip() for x in query_text.split(",") if x.strip()]
+    attempts = [query_text] + ([parts[0]] if len(parts) > 1 else [])
+    first_match = None
     for q in attempts:
         try:
             cands = _nominatim(q)
-            reached = True
         except requests.RequestException:
             cands = []
         time.sleep(1.0)  # the free map search allows one request per second
@@ -137,18 +151,17 @@ def geocode(location: str) -> dict:
             area = _as_area(c)
             if area:
                 area["label"] = c.get("display_name", q)
-                area["fallback"] = q != location
+                area["fallback"] = q != query_text
                 return area
         if cands and first_match is None:
             first_match = cands[0]
-    if not reached or first_match is None:  # the main service was unreachable or knew nothing: try the backup
-        try:
-            found = _geocode_photon(location)
-        except requests.RequestException:
-            found = None
-        if found:
-            found["fallback"] = False
-            return found
+    try:
+        found = _geocode_photon(query_text)
+    except requests.RequestException:
+        found = None
+    if found:
+        found["fallback"] = False
+        return found
     if first_match is not None:
         return {"kind": "around", "lat": float(first_match["lat"]), "lon": float(first_match["lon"]), "radius": POINT_RADIUS,
                 "label": first_match.get("display_name", location), "approx": True, "fallback": False}
