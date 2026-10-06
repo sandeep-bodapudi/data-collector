@@ -5,7 +5,7 @@ import sys
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from scraper import discover, fetch, jobs, places  # noqa: E402
+from scraper import discover, fetch, jobs, listings, places  # noqa: E402
 
 failures = []
 
@@ -518,7 +518,7 @@ jobs.web_search = lambda q, region, n, say: (off_topic_hits + [
 j2 = FakeJob2()
 j2.spec = {"queries": ["engineering colleges in Bachupally, Hyderabad"], "platforms": ["web"], "max_results": 50,
            "one_per_site": False, "region": "in-en"}
-rows = jobs._search(j2)
+rows, _ = jobs._search(j2)
 ok("end to end: only the real college survives, the unrelated pages the engine padded its answer with are dropped",
    [r["url"] for r in rows] == ["https://griet.ac.in/"], str(rows))
 ok("the run log says how many unrelated results were skipped", any("unrelated" in m and "skipped" in m for m in j2.log), j2.log)
@@ -538,9 +538,63 @@ hyperlocal_hits = [
 jobs.web_search = lambda q, region, n, say: hyperlocal_hits
 j3 = FakeJob2()
 j3.spec = {"queries": ["engineering colleges in Tarnaka"], "platforms": ["web"], "max_results": 50, "one_per_site": False, "region": "in-en"}
-rows3 = jobs._search(j3)
+rows3, _ = jobs._search(j3)
 ok("the real official site survives once a directory result confirms the engine understood the area",
    [r["url"] for r in rows3] == ["https://www.uceou.edu/contactus.php"], str(rows3))
+jobs.web_search = real_jobs_web_search
+
+# ---- listing pages: a directory page with no dedicated parser is still just dropped, but one with a parser -------
+# (scraper/listings.py) is expanded into one row per real name, instead of one row for the whole listing page or
+# (the old behaviour) being thrown away entirely. Markup below is a trimmed real fragment of colleges9.in's own
+# category pages: a <table> of <tr>s, each holding <td><b>NAME</b><br>address</td> next to a /colleges/.../ link.
+COLLEGES9_FIXTURE = """
+<table class="crs"><tr>
+  <td>1</td>
+  <td><b>AAR MAHAVEER ENGINEERING COLLEGE</b><br>Vyasapuri, Bandlaguda, Kesavagiri 500005, Hyderabad District.</td>
+  <td>AARM</td>
+  <td><a href="/colleges/AAR-MAHAVEER-ENGINEERING-COLLEGE/EN728/">College Details</a></td>
+</tr><tr>
+  <td>2</td>
+  <td><b>BVRIT COLLEGE OF ENGINEERING FOR WOMEN</b><br>Nizampet Road, Bachupalli, Hyderabad.</td>
+  <td>BVRITW</td>
+  <td><a href="/colleges/BVRIT-COLLEGE-OF-ENGINEERING-FOR-WOMEN/EN748/">College Details</a></td>
+</tr></table>
+"""
+items = listings.extract_listing(COLLEGES9_FIXTURE, "https://www.colleges9.in/Telangana/Hyderabad/Engineering-Colleges/")
+ok("a registered site's listing page yields one real row per college", len(items) == 2, items)
+ok("the name comes from the <b> tag, not the generic 'College Details' link text",
+   {i["name"] for i in items} == {"AAR MAHAVEER ENGINEERING COLLEGE", "BVRIT COLLEGE OF ENGINEERING FOR WOMEN"}, items)
+ok("the address is whatever follows the name in the same cell",
+   next(i["address"] for i in items if "AAR" in i["name"]) == "Vyasapuri, Bandlaguda, Kesavagiri 500005, Hyderabad District.")
+ok("the link is resolved to an absolute URL", items[0]["href"].startswith("https://www.colleges9.in/colleges/"))
+ok("a site with no registered parser yields nothing (never guessed at generically - see the module docstring)",
+   listings.extract_listing(COLLEGES9_FIXTURE, "https://www.some-other-directory.example/list/") == [])
+ok("malformed markup for a registered site fails safe (empty, not a crash)",
+   listings.extract_listing("<table><tr><td><a href='/colleges/X/'>broken", "https://www.colleges9.in/x/") == [])
+
+# ---- listing pages, end to end through _run_web: real rows, deduplicated against names already found ------------
+class FakeFetcher2:
+    def get_html(self, url):
+        if "colleges9.in" in url:
+            return COLLEGES9_FIXTURE, "ok"
+        return "<html><title>AAR Mahaveer Engineering College</title><body>Hyderabad</body></html>", "ok"
+real_fetcher = jobs.Fetcher
+jobs.Fetcher = lambda spec: FakeFetcher2()
+jobs.web_search = lambda q, region, n, say: [
+    {"href": "https://www.colleges9.in/Telangana/Hyderabad/Engineering-Colleges/", "title": "Engineering Colleges List", "body": ""},
+    {"href": "https://aarmahaveer.ac.in/", "title": "AAR Mahaveer Engineering College", "body": "Hyderabad"},
+]
+j4 = jobs.Job({"queries": ["engineering colleges in Hyderabad"], "platforms": ["web"], "max_results": 50,
+               "one_per_site": False, "region": "in-en", "fields": ["address"], "custom_fields": [], "require": "",
+               "follow_contact": False, "ai": {}})
+jobs._run_web(j4)
+names = sorted(r["Name"] for r in j4.rows)
+ok("the listing page is expanded instead of kept as one row for the page itself",
+   "BVRIT COLLEGE OF ENGINEERING FOR WOMEN" in names, names)
+ok("a name already found as a real official site is not duplicated from the listing",
+   sum(1 for n in names if n.lower() == "aar mahaveer engineering college") == 1, names)
+ok("two real rows total: the one official site plus the one new name from the listing", len(j4.rows) == 2, names)
+jobs.Fetcher = real_fetcher
 jobs.web_search = real_jobs_web_search
 
 print(f"\n{len(failures)} failure(s)" if failures else "\nAll tests passed")

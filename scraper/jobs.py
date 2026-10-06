@@ -11,7 +11,7 @@ import uuid
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 
-from . import ai_extract, discover, extract, places
+from . import ai_extract, discover, extract, listings, places
 from .excel import SECRET_KEYS
 from .fetch import WORKERS, Fetcher, domain_of
 from .search import SearchBlocked, web_search
@@ -155,7 +155,7 @@ def _on_topic(h: dict, url: str, signal: list[str]) -> bool:
     return any(s in text for s in signal)
 
 
-def _search(job: Job) -> list[dict]:
+def _search(job: Job) -> tuple[list[dict], list[dict]]:
     spec = job.spec
     platforms = spec.get("platforms", ["web"])
     expanded_queries = []
@@ -166,7 +166,7 @@ def _search(job: Job) -> list[dict]:
             if p != "web":
                 expanded_queries.append(f"{q} site:{p}")
 
-    results, seen = [], set()
+    results, listing_hits, seen = [], [], set()
     for q in expanded_queries:
         if job.cancelled.is_set():
             break
@@ -203,6 +203,11 @@ def _search(job: Job) -> list[dict]:
             seen.add(key)
             if "site:" not in q and not discover._is_official_candidate(url):
                 directory += 1  # a directory, social or map page lists other places; it is not one itself
+                # Most directories have no dedicated parser (see scraper/listings.py) and are just dropped, same as
+                # before - but a few do, and one of THEIR pages is a real list of 20-30+ real names worth keeping,
+                # not one row for the directory page itself.
+                if domain_of(url) in listings.LISTING_PARSERS:
+                    listing_hits.append({"url": url})
                 continue
             if not area_confirmed and not _on_topic(h, url, signal):
                 off_topic += 1
@@ -214,7 +219,36 @@ def _search(job: Job) -> list[dict]:
         job.say(f"  {new} new result{'s' if new != 1 else ''}" + (f" ({', '.join(skipped)} skipped)" if skipped else ""))
         if q != expanded_queries[-1]:
             time.sleep(_current_gap())  # measured-safe pacing; shorter automatically once an official search key is set
-    return results
+    return results, listing_hits
+
+
+def _expand_listings(job: Job, fetcher: Fetcher, listing_hits: list[dict], known_names: set) -> list[dict]:
+    """Turn each listing-page hit into one row per name found on it, instead of one row for the page itself.
+    Fast by design: just the name, address (when the listing shows one) and the directory's own profile link for
+    that entry - not yet verified as the institution's own official site. Run those rows through Search the web
+    again (now with real individual names as queries) to fill in Emails/Phone Numbers/Website."""
+    rows = []
+    for hit in listing_hits:
+        if job.cancelled.is_set():
+            break
+        html, note = fetcher.get_html(hit["url"])
+        if not html:
+            job.say(f"  could not read listing page {hit['url']}: {note}")
+            continue
+        items = listings.extract_listing(html, hit["url"])
+        added = 0
+        for it in items:
+            key = it["name"].lower()
+            if key in known_names:
+                continue
+            known_names.add(key)
+            rows.append({"Name": it["name"], "Address": it.get("address", ""), "Website": it["href"]})
+            added += 1
+        if items:
+            dupes = len(items) - added
+            job.say(f"  {domain_of(hit['url'])}: {added} new name{'s' if added != 1 else ''} from its listing"
+                    + (f" ({dupes} already found elsewhere)" if dupes else ""))
+    return rows
 
 
 def _merge_pages(base: dict, extra: dict):
@@ -278,11 +312,12 @@ def _run_web(job: Job):
     spec = job.spec
     job.columns = (["Name"] + [extract.STANDARD_FIELDS[k] for k in spec["fields"] if k != "title"]
                    + ["Website"] + spec["custom_fields"])
-    hits = _search(job)
-    job.total = len(hits)
+    hits, listing_hits = _search(job)
+    job.total = len(hits) + len(listing_hits)
     job.phase, job.activity = "visit", f"Reading {len(hits)} websites and picking out the details…"
     job.say(f"Visiting {len(hits)} pages…")
     fetcher = Fetcher(spec)
+    known_names = set()
     with ThreadPoolExecutor(WORKERS) as pool:
         futures = {pool.submit(_process_page, job, fetcher, h): h for h in hits}
         for fut in as_completed(futures):
@@ -296,8 +331,17 @@ def _run_web(job: Job):
             except Exception as e:
                 job.say(f"  failed {futures[fut]['url']}: {e}")
                 continue
+            known_names.add(row["Name"].lower())
             if _keep(spec, row):
                 job.rows.append(row)
+
+    if listing_hits and not job.cancelled.is_set():
+        job.activity = f"Reading {len(listing_hits)} listing page{'s' if len(listing_hits) != 1 else ''} for individual names…"
+        job.say(f"Expanding {len(listing_hits)} listing page{'s' if len(listing_hits) != 1 else ''} into individual rows…")
+        for row in _expand_listings(job, fetcher, listing_hits, known_names):
+            if _keep(spec, row):
+                job.rows.append(row)
+        job.done = job.total
 
 
 # ---------------------------------------------------------------- places mode

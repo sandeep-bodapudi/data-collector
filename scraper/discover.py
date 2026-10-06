@@ -27,6 +27,7 @@ NOT_OFFICIAL = (
     # through as if they were someone's own site on a live "engineering colleges in <neighbourhood>" run - each
     # lists many unrelated colleges per area/category, same as the directories above.
     "indiastudychannel.com", "asklaila.com", "webindia123.com", "colleges9.in", "collegeandfees.com", "fullhyderabad.com",
+    "vedantu.com", "telugucolleges.com", "educationdunia.com", "careercartz.com",
 )
 # Words that say what kind of place it is, not which one. They don't identify the right website.
 GENERIC_WORDS = {
