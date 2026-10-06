@@ -524,6 +524,24 @@ ok("end to end: only the real college survives, the unrelated pages the engine p
 ok("the run log says how many unrelated results were skipped", any("unrelated" in m and "skipped" in m for m in j2.log), j2.log)
 jobs.web_search = real_jobs_web_search
 
+# ---- a genuine official site for a hyperlocal query is kept even when it never repeats the micro-area name --------
+# Real failure, found on a live run: "engineering colleges in Tarnaka" returned Osmania University's own engineering
+# college page, whose own text says "Hyderabad - 500 007" (city + PIN code) and never "Tarnaka" - a real institution
+# describes its own location by city, not by a search engine's choice of neighbourhood. Directory pages for the same
+# query DO say "Tarnaka" (that's literally their business), so their presence proves the engine understood the area;
+# that should be enough to stop demanding the official site repeat it too.
+hyperlocal_hits = [
+    {"title": "20+ Engineering Colleges in Tarnaka - Justdial", "body": "", "href": "https://www.justdial.com/Hyderabad/Engineering-Colleges-in-Tarnaka/nct-1"},
+    {"title": "University College of Engineering - Osmania University", "body": "Osmania University, Hyderabad - 500 007, Telangana",
+     "href": "https://www.uceou.edu/contactus.php"},
+]
+jobs.web_search = lambda q, region, n, say: hyperlocal_hits
+j3 = FakeJob2()
+j3.spec = {"queries": ["engineering colleges in Tarnaka"], "platforms": ["web"], "max_results": 50, "one_per_site": False, "region": "in-en"}
+rows3 = jobs._search(j3)
+ok("the real official site survives once a directory result confirms the engine understood the area",
+   [r["url"] for r in rows3] == ["https://www.uceou.edu/contactus.php"], str(rows3))
+jobs.web_search = real_jobs_web_search
 
 print(f"\n{len(failures)} failure(s)" if failures else "\nAll tests passed")
 sys.exit(1 if failures else 0)

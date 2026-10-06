@@ -178,6 +178,19 @@ def _search(job: Job) -> list[dict]:
             job.problems.append(str(e))
             hits = []
         signal = _signal_words(q)
+        # Real failure, found on live micro-neighbourhood queries (e.g. "engineering colleges in Tarnaka"): a
+        # genuine official college site for the exact right place still got dropped by _on_topic, because its own
+        # homepage describes its location as "Hyderabad - 500 007" (city + PIN code), never the neighbourhood name
+        # a hyperlocal query used - real institutions don't repeat hyperlocal names, only directory/listing pages do.
+        # So: check whether any DIRECTORY hit (one that will be filtered out below anyway) confirms the engine
+        # understood the place - directories put the area name in their own title/URL as a matter of course, so
+        # that's real evidence, not a guess. Confirmation must come from a directory hit specifically, never from
+        # an official-candidate hit itself (otherwise one good match would "vouch" for every other result in the
+        # same batch, including genuine padding junk like Britannica/Oregon State - that's the original bug, and
+        # since none of those are directory hits either, they correctly provide no such confirmation).
+        def _is_directory(h):
+            return "site:" not in q and not discover._is_official_candidate(h.get("href", ""))
+        area_confirmed = not signal or any(_on_topic(h, h.get("href", ""), signal) for h in hits if _is_directory(h))
         new, off_topic, directory, dup = 0, 0, 0, 0
         for h in hits:
             url = h.get("href", "")
@@ -191,7 +204,7 @@ def _search(job: Job) -> list[dict]:
             if "site:" not in q and not discover._is_official_candidate(url):
                 directory += 1  # a directory, social or map page lists other places; it is not one itself
                 continue
-            if not _on_topic(h, url, signal):
+            if not area_confirmed and not _on_topic(h, url, signal):
                 off_topic += 1
                 continue
             results.append({"query": q, "title": h.get("title", ""), "url": url, "snippet": h.get("body", "")})
