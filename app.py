@@ -47,7 +47,7 @@ def _secret_key() -> str:
 _load_env_file()
 _secret_key()
 
-from models import ROLES, AppSetting, Share, User, VaultCredential, db, encrypt  # noqa: E402
+from models import ROLES, AppSetting, Share, User, VaultCredential, db, decrypt, encrypt  # noqa: E402
 from scraper import ai_extract, extract, places, sheets  # noqa: E402
 from scraper.excel import write_workbook  # noqa: E402
 from scraper.jobs import JOBS, REGIONS, purge_jobs, start_job  # noqa: E402
@@ -619,7 +619,8 @@ def create_share():
                expires_at=datetime.utcnow() + timedelta(days=days), allow_export=True if external else bool(d.get("allow_export", True)),
                link_access=link_access, recipients_json=json.dumps(recipients),
                kind="external" if external else "internal", customer=customer, message=message,
-               passcode_hash=generate_password_hash(passcode) if passcode else None, acknowledged=external, views=0, downloads=0)
+               passcode_hash=generate_password_hash(passcode) if passcode else None,
+               passcode_enc=encrypt(passcode) if passcode else None, acknowledged=external, views=0, downloads=0)
     db.session.add(sh)
     db.session.commit()
     return jsonify(_share_meta(sh, _user_names()))
@@ -654,6 +655,22 @@ def open_share(share_id):
     if sh.owner_id == current_user.id:
         meta["allow_export"] = True
     return jsonify({**meta, "columns": json.loads(sh.columns_json), "rows_data": rows, "mine": sh.owner_id == current_user.id})
+
+
+@app.get("/api/shares/<share_id>/passcode")
+@login_required
+def share_passcode(share_id):
+    """The passcode of a customer link, for the person who made it and nobody else (not even admins)."""
+    sh = db.session.get(Share, share_id)
+    if not sh or not sh.is_external or sh.owner_id != current_user.id or not sh.is_live():
+        abort(404)
+    code = None
+    if sh.passcode_enc:
+        try:
+            code = decrypt(sh.passcode_enc)
+        except Exception:  # the secret key changed since: it can't be read any more
+            code = None
+    return jsonify(has_passcode=bool(sh.passcode_hash), passcode=code)
 
 
 @app.delete("/api/shares/<share_id>")

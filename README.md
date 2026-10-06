@@ -67,7 +67,7 @@ node tests/sheetops.test.js     # browser logic: merge & dedupe, CSV/JSON export
 
 A customer link is `https://<your-site>/s/<random code>`. It works without an account, so treat it like the file itself:
 
-- The code is long and unguessable, and the page tells search engines not to index it. Turn on the **passcode** (default) and send it in a separate message.
+- The code is long and unguessable, and the page tells search engines not to index it. Turn on the **passcode** (default) and send it in a separate message. The sender can look it up again under **Shared → Shared by me → Passcode**; it is stored encrypted, and nobody else, including admins, can see it.
 - Wrong passcodes are locked out after 5 tries (10 minutes). The link stops working on its expiry date and is deleted; an admin or the sender can stop it sooner.
 - Opens and downloads are counted, ignoring the sender's own visits and chat-app link previews, so you can see whether the customer received it.
 - Before creating a link, the sender must tick a confirmation that the company may share this data with that customer. The sheet probably contains **personal details of people** (for example students). Check the agreement with the customer and the privacy rules that apply, including India's DPDP Act and rules for people abroad.

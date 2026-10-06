@@ -132,7 +132,8 @@ class Share(db.Model):
     kind = db.Column(db.String(12), default="internal")      # "internal" (colleagues) or "external" (customer link)
     customer = db.Column(db.String(160), nullable=True)      # who it was prepared for
     message = db.Column(db.Text, nullable=True)              # note from the sender, shown on the customer's page
-    passcode_hash = db.Column(db.String(255), nullable=True) # optional passcode (hashed, never shown again)
+    passcode_hash = db.Column(db.String(255), nullable=True) # optional passcode, hashed: used to check what the customer types
+    passcode_enc = db.Column(db.Text, nullable=True)         # the same passcode, encrypted, so the sender can look it up again
     acknowledged = db.Column(db.Boolean, default=False)      # sender confirmed they may share this data
     views = db.Column(db.Integer, default=0)
     downloads = db.Column(db.Integer, default=0)

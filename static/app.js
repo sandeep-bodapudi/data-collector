@@ -1268,7 +1268,7 @@ async function shareDialog(meta) {
           <div class="input-row"><input class="input mono" id="sh-url" readonly value="${esc(url)}"><button class="btn btn-primary" type="button" id="sh-copy">Copy link</button></div></div>
         ${r.kind === "external" && createdOpts.passcode ? `<div class="field"><label class="label" for="sh-code">Passcode</label>
           <div class="input-row"><input class="input mono" id="sh-code" readonly value="${esc(createdOpts.passcode)}"><button class="btn" type="button" id="sh-copy-code">Copy passcode</button></div>
-          <div class="hint">Send this in a <b>separate message</b>, for example on WhatsApp or by phone. It can't be shown again after you close this window.</div></div>` : ""}
+          <div class="hint">Send this in a <b>separate message</b>, for example on WhatsApp or by phone. You can see it again any time under <b>Shared → Shared by me → Passcode</b>.</div></div>` : ""}
         <div class="field"><span class="label">Send the link</span><div class="send-row" id="sh-send"></div>
           <div class="hint">Only the sheet's name, size and link go in the message${r.kind === "external" ? ". The passcode is not included" : ""}.</div></div>
         ${r.kind === "external" ? `<div class="field"><span class="label">Or send the file</span>
@@ -1286,6 +1286,25 @@ async function shareDialog(meta) {
       $("[data-ok]", ov).textContent = "Done";
       $("[data-x]", ov)?.remove();
       return false;
+    },
+  });
+}
+
+// Shows the passcode of a customer link to the person who created it (the server only gives it to them).
+async function showPasscode(share) {
+  let r;
+  try { r = await api(`/api/shares/${share.id}/passcode`); } catch (e) { return toast(e.message, "err"); }
+  if (!r.passcode) {
+    return modal({ title: "Passcode", confirm: "OK", cancel: "",
+      body: `<div class="callout warn">${icon("alert")}<div>This link has a passcode, but it was created before passcodes could be viewed, so it can't be shown. Stop sharing and create a new link to set one you can see.</div></div>` });
+  }
+  return modal({
+    title: `Passcode for ${share.customer}`, confirm: "Done", cancel: "",
+    body: `<div class="input-row"><input class="input mono" id="pc-val" readonly value="${esc(r.passcode)}" aria-label="Passcode"><button class="btn btn-primary" type="button" id="pc-copy">Copy passcode</button></div>
+      <div class="hint">Send it to the customer in a <b>separate message</b>, not together with the link. Only you can see this. Not even admins can.</div>`,
+    onOpen: (ov) => {
+      $("#pc-val", ov).onfocus = (e) => e.target.select();
+      $("#pc-copy", ov).onclick = async () => toast((await copyText(r.passcode)) ? "Passcode copied" : "Couldn't copy the passcode.", "ok");
     },
   });
 }
@@ -1316,7 +1335,7 @@ async function viewShared() {
           <td>${mine ? (s.kind === "external" ? `<b>${esc(s.customer)}</b>` : esc([...s.recipients, ...(s.link_access ? ["anyone with the link"] : [])].join(", ") || "—")) : esc(s.owner)}</td>
           ${mine ? `<td>${activity(s)}</td>` : ""}
           <td class="num">${fmtNum(s.rows)}</td><td class="nowrap">${timeAgo(s.created)}</td><td class="nowrap" title="${esc(fmtDate(s.expires))}">${esc(expiresIn(s.expires))}</td>
-          <td class="actions" data-stop><span class="menu-wrap">${mine ? `<button class="btn btn-sm" data-copy="${s.id}">${icon("link")}Copy link</button><button class="btn btn-sm" data-send="${s.id}">${icon("send")}Send…</button><button class="btn btn-sm btn-danger" data-stopshare="${s.id}">Stop sharing</button>`
+          <td class="actions" data-stop><span class="menu-wrap">${mine ? `<button class="btn btn-sm" data-copy="${s.id}">${icon("link")}Copy link</button>${s.kind === "external" && s.has_passcode ? `<button class="btn btn-sm" data-pass="${s.id}">${icon("key")}Passcode</button>` : ""}<button class="btn btn-sm" data-send="${s.id}">${icon("send")}Send…</button><button class="btn btn-sm btn-danger" data-stopshare="${s.id}">Stop sharing</button>`
             : `<a class="btn btn-sm" href="#/shared/${s.id}">Open</a>`}</span></td></tr>`).join("")}</tbody></table>`;
   };
   const load = async () => {
@@ -1332,6 +1351,8 @@ async function viewShared() {
   $("#list").addEventListener("click", async (e) => {
     const copy = e.target.closest("[data-copy]");
     if (copy) return toast((await copyText(linkFor(items.find((x) => x.id === copy.dataset.copy)))) ? "Link copied" : "Couldn't copy the link.", "ok");
+    const pass = e.target.closest("[data-pass]");
+    if (pass) { e.stopPropagation(); return showPasscode(items.find((x) => x.id === pass.dataset.pass)); }
     const send = e.target.closest("[data-send]");
     if (send) { e.stopPropagation(); return openMenu(send, shareChannels(items.find((x) => x.id === send.dataset.send))); }
     const stop = e.target.closest("[data-stopshare]");
@@ -1368,7 +1389,7 @@ async function viewSharedSheet(id) {
       <p>${rowsText(s.rows)} · ${s.kind === "external" ? `prepared for ${esc(s.customer)} · ${s.views || s.downloads ? `opened ${s.views}×, downloaded ${s.downloads}×` : "not opened yet"}` : s.mine ? "shared by you" : `shared by ${esc(s.owner)}`} · stops working ${esc(expiresIn(s.expires))}${s.allow_export ? "" : " · downloads are off"}</p></div>
       <div class="actions">
         ${s.allow_export ? `<button class="btn" id="save-copy">${icon("sheet")}Save a copy to my device</button><span class="menu-wrap"><button class="btn btn-primary" id="export">${icon("download")}Export</button></span>` : ""}
-        ${s.mine && s.kind === "external" ? `<a class="btn" href="${customerUrl(s.id)}" target="_blank" rel="noopener">${icon("eye")}View as customer</a>` : ""}${s.mine ? `<span class="menu-wrap"><button class="btn" id="send">${icon("send")}Send link</button></span><button class="btn btn-danger" id="stop">${icon("trash")}Stop sharing</button>` : ""}</div></div>
+        ${s.mine && s.kind === "external" && s.has_passcode ? `<button class="btn" id="pass">${icon("key")}Passcode</button>` : ""}${s.mine && s.kind === "external" ? `<a class="btn" href="${customerUrl(s.id)}" target="_blank" rel="noopener">${icon("eye")}View as customer</a>` : ""}${s.mine ? `<span class="menu-wrap"><button class="btn" id="send">${icon("send")}Send link</button></span><button class="btn btn-danger" id="stop">${icon("trash")}Stop sharing</button>` : ""}</div></div>
     ${GRID_CARD}`;
   $("#export")?.addEventListener("click", (e) => { e.stopPropagation(); openMenu($("#export"), exportDataMenu(s.name, data.columns, data.rows)); });
   $("#save-copy")?.addEventListener("click", async () => {
@@ -1378,6 +1399,7 @@ async function viewSharedSheet(id) {
       toast("Saved to your sheets", "ok", { label: "Open", run: () => { location.hash = `#/sheets/${meta.id}`; } });
     } catch (e) { toast(e.message, "err"); }
   });
+  $("#pass")?.addEventListener("click", () => showPasscode(s));
   $("#send")?.addEventListener("click", (e) => { e.stopPropagation(); openMenu($("#send"), shareChannels(s)); });
   $("#stop")?.addEventListener("click", async () => {
     if (!await confirmDialog("Stop sharing?", "This copy will be deleted from the server and nobody will be able to open it any more.", "Stop sharing")) return;

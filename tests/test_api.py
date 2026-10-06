@@ -227,6 +227,14 @@ ok("customer link is created", created.status_code == 200 and ext["kind"] == "ex
 ok("response never contains the data or the passcode", "rows_data" not in ext and "Hyd2026" not in json.dumps(ext)
    and "passcode_hash" not in ext and ext["has_passcode"] is True)
 
+ok("the sender can look their passcode up again", c.get(f"/api/shares/{eid}/passcode").get_json() == {"has_passcode": True, "passcode": "Hyd2026"})
+ok("no one else can see the passcode", meena.get(f"/api/shares/{eid}/passcode").status_code == 404 and app.test_client().get(f"/api/shares/{eid}/passcode").status_code == 401)
+with app.app_context():
+    stored = _db.session.get(Share, eid)
+    ok("the passcode is encrypted in the database, not plain text", stored.passcode_enc and "Hyd2026" not in stored.passcode_enc and "Hyd2026" not in stored.passcode_hash)
+ok("share lists never carry the passcode", "Hyd2026" not in json.dumps(c.get("/api/shares?box=by-me").get_json()) and "Hyd2026" not in json.dumps(c.get("/api/admin/shares").get_json()))
+ok("a link without a passcode has none to show", c.get(f"/api/shares/{c.post('/api/shares', json=cpay(name='Plain', customer='X')).get_json()['id']}/passcode").get_json() == {"has_passcode": False, "passcode": None})
+
 anon = app.test_client()
 H = {"X-Forwarded-For": "203.0.113.5"}
 locked = anon.get(f"/s/{eid}", headers=H)
