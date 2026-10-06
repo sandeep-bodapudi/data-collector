@@ -1102,21 +1102,31 @@ async function copyText(text) {
   }
 }
 
-// What gets sent when a share link goes out by mail or chat: the sheet's name, its size and the link. Never the data.
+// What goes out when a link is sent by mail or chat: the sheet's name, its size and the link. Never the data.
+// A customer message is written for someone outside the company; a colleague message assumes they have an account.
+const customerUrl = (id) => `${location.origin}/s/${id}`;
+const linkFor = (r) => (r.kind === "external" ? customerUrl(r.id) : shareUrl(r.id));
 function shareMessage(r) {
-  const intro = `Hi, I've shared the sheet “${r.name}” (${rowsText(r.rows)}) with you on OneBridge Data Collector.`;
-  const url = shareUrl(r.id);
-  const note = `You'll need to sign in to open it. The link stops working on ${fmtDate(r.expires, false)}.`;
+  const url = linkFor(r), until = fmtDate(r.expires, false), company = CFG.company;
+  if (r.kind === "external") {
+    const intro = `Hello, here is the spreadsheet you asked for from ${company}: “${r.name}” (${rowsText(r.rows)}).`;
+    const note = `${r.has_passcode ? "It is protected, and I will send you the passcode separately. " : ""}The link works until ${until}, and you can download the file as Excel or CSV.`;
+    return { subject: `Your data from ${company}: ${r.name}`, intro, url, note,
+      full: `Hello,\n\nHere is the spreadsheet you asked for from ${company}: “${r.name}” (${rowsText(r.rows)}).\n\nOpen it here: ${url}\n\n${note}\n\nRegards,\n${company}` };
+  }
+  const intro = `Hi, I've shared the sheet “${r.name}” (${rowsText(r.rows)}) with you on ${company} Data Collector.`;
+  const note = `You'll need to sign in to open it. The link stops working on ${until}.`;
   return { subject: `Shared sheet: ${r.name}`, intro, url, note, full: `${intro}\n\nOpen it here: ${url}\n\n${note}` };
 }
 // The ways to send a link. Gmail, WhatsApp and Telegram open their own pages with the message filled in;
 // "More apps" opens the device's own share menu (phones, tablets and the installed app) when it exists.
-function shareChannels(r) {
+function shareChannels(r, opts = {}) {
   const m = shareMessage(r), enc = encodeURIComponent;
+  const to = /^[^\s@,;]+@[^\s@,;]+\.[^\s@,;]+$/.test(opts.to || "") ? opts.to : "";
   const openPage = (url) => window.open(url, "_blank", "noopener");
   const items = [
-    { id: "gmail", label: "Gmail", icon: "mail", run: () => openPage(`https://mail.google.com/mail/?view=cm&fs=1&su=${enc(m.subject)}&body=${enc(m.full)}`) },
-    { id: "mail", label: "Email app", icon: "mail", run: () => { const a = document.createElement("a"); a.href = `mailto:?subject=${enc(m.subject)}&body=${enc(m.full)}`; document.body.appendChild(a); a.click(); a.remove(); } },
+    { id: "gmail", label: "Gmail", icon: "mail", run: () => openPage(`https://mail.google.com/mail/?view=cm&fs=1${to ? `&to=${enc(to)}` : ""}&su=${enc(m.subject)}&body=${enc(m.full)}`) },
+    { id: "mail", label: "Email app", icon: "mail", run: () => { const a = document.createElement("a"); a.href = `mailto:${to}?subject=${enc(m.subject)}&body=${enc(m.full)}`; document.body.appendChild(a); a.click(); a.remove(); } },
     { id: "whatsapp", label: "WhatsApp", icon: "chat", run: () => openPage(`https://wa.me/?text=${enc(m.full)}`) },
     { id: "telegram", label: "Telegram", icon: "send", run: () => openPage(`https://t.me/share/url?url=${enc(m.url)}&text=${enc(m.intro + " " + m.note)}`) },
   ];
@@ -1128,10 +1138,26 @@ function shareChannels(r) {
   }
   return items;
 }
-function renderSendRow(el, r) {
-  const channels = shareChannels(r);
+function renderSendRow(el, r, opts) {
+  const channels = shareChannels(r, opts);
   el.innerHTML = channels.map((c, i) => `<button type="button" class="btn send-${c.id}" data-i="${i}">${icon(c.icon)}${esc(c.label)}</button>`).join("");
   el.onclick = (e) => { const b = e.target.closest("[data-i]"); if (b) channels[+b.dataset.i].run(); };
+}
+
+const PASSCODE_CHARS = "abcdefghjkmnpqrstuvwxyz23456789";  // no look-alikes (0/o, 1/l)
+function genPasscode(n = 7) {
+  const a = new Uint32Array(n); crypto.getRandomValues(a);
+  return [...a].map((x) => PASSCODE_CHARS[x % PASSCODE_CHARS.length]).join("");
+}
+const XLSX_MIME = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet";
+async function buildFile(name, columns, rows) {
+  // Prefer the real Excel file; if the server can't be reached, fall back to CSV.
+  const base = fileSafe(name);
+  try {
+    const r = await fetch("/api/export/xlsx", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ name, columns, rows }) });
+    if (r.ok) return new File([await r.blob()], base + ".xlsx", { type: XLSX_MIME });
+  } catch { /* offline */ }
+  return new File([SheetOps.toCSV(columns, rows)], base + ".csv", { type: "text/csv" });
 }
 
 async function shareDialog(meta) {
@@ -1140,27 +1166,67 @@ async function shareDialog(meta) {
   catch (e) { return toast(navigator.onLine ? e.message : "Sharing needs a connection.", "err"); }
   if (!data) return toast("This sheet could not be found on this device.", "err");
   const picked = new Set();
-  const canFile = !!(navigator.canShare && navigator.canShare({ files: [new File(["x"], "x.csv", { type: "text/csv" })] }));
-  let created = null;
+  let mode = "customer";
+  try { mode = localStorage.getItem("shareMode") === "colleagues" ? "colleagues" : "customer"; } catch {}
+  const canFiles = !!(navigator.canShare && navigator.canShare({ files: [new File(["x"], "x.csv", { type: "text/csv" })] }));
+  let created = null, createdOpts = {};
   const body = `
-    <div class="field">
-      <label class="label">Share with</label>
-      ${people.length ? `<div class="search" style="margin-bottom:8px">${icon("search")}<input id="sh-find" placeholder="Find a person" aria-label="Find a person"></div>
-        <div class="people" id="sh-people">${people.map((p) => `<label class="person" data-name="${esc(p.username.toLowerCase())}"><input type="checkbox" value="${p.id}"><span class="avatar" style="width:26px;height:26px;font-size:11px">${esc(p.username.slice(0, 2))}</span><span>${esc(p.username)}</span></label>`).join("")}</div>`
-        : `<div class="callout info">${icon("info")}<div>No one else has an account yet. Ask an admin to add people, or share with the link below.</div></div>`}
-      <label class="switch mt-8"><input type="checkbox" id="sh-link"><span class="sw"></span><span><b>Anyone in the company with the link</b><small>They still have to sign in first.</small></span></label>
+    <div class="seg" id="sh-mode" style="margin-bottom:18px">
+      <button type="button" data-m="customer">Customer outside the company</button>
+      <button type="button" data-m="colleagues">Colleagues</button>
     </div>
-    <div class="grid grid-2">
-      <div class="field"><label class="label" for="sh-days">Stops working</label>
-        <select class="input" id="sh-days"><option value="1">After 1 day</option><option value="7" selected>After 7 days</option><option value="30">After 30 days</option></select></div>
-      <div class="field"><span class="label">Downloads</span>
-        <label class="switch"><input type="checkbox" id="sh-export" checked><span class="sw"></span><span><b>Allow downloads</b><small>Hides the download buttons. It can't stop someone copying what they see.</small></span></label></div>
+
+    <div id="sh-customer">
+      <div class="field"><label class="label" for="sh-cname">Customer or company name</label>
+        <input class="input" id="sh-cname" maxlength="160" placeholder="e.g. Global Education Services" autocomplete="off"></div>
+      <div class="field"><label class="label" for="sh-cmail">Customer's email <span class="opt">(optional)</span></label>
+        <input class="input" id="sh-cmail" type="email" placeholder="name@company.com" autocomplete="off">
+        <div class="hint">Only used to fill in the "To" box when you send the email. It isn't saved.</div></div>
+      <div class="field"><label class="label" for="sh-cmsg">Message for the customer <span class="opt">(optional)</span></label>
+        <textarea class="input" id="sh-cmsg" maxlength="1000" rows="2" placeholder="Shown at the top of their page, e.g. “Student leads for the September intake.”"></textarea></div>
+      <div class="field">
+        <label class="switch"><input type="checkbox" id="sh-pass-on" checked><span class="sw"></span><span><b>Protect with a passcode</b><small>Recommended. Send the passcode in a separate message, for example on WhatsApp or by phone.</small></span></label>
+        <div class="input-row mt-8" id="sh-pass-row"><input class="input mono" id="sh-pass" value="${genPasscode()}" autocomplete="off" spellcheck="false" aria-label="Passcode"><button class="btn" type="button" id="sh-pass-new">New</button></div>
+      </div>
+      <div class="field"><label class="label" for="sh-cdays">Link works for</label>
+        <select class="input" id="sh-cdays"><option value="1">1 day</option><option value="7" selected>7 days</option><option value="30">30 days</option></select></div>
+      <label class="switch"><input type="checkbox" id="sh-ack"><span class="sw"></span><span><b>I confirm we are allowed to share this data with this customer</b><small>This sheet may contain personal details. Check your agreement and the privacy rules that apply (including for people abroad) before sending.</small></span></label>
     </div>
-    <div class="callout info">${icon("info")}<div>This shares a <b>copy as it is now</b> (${rowsText(data.rows.length)}). Later changes to your sheet aren't included. The copy is kept on the server until it expires or you stop sharing, then it is deleted.</div></div>
-    ${canFile ? `<div class="mt-16"><button class="btn" id="sh-file" type="button">${icon("share")}Send as a file instead…</button></div>` : ""}`;
+
+    <div id="sh-colleagues" hidden>
+      <div class="field">
+        <label class="label">Share with</label>
+        ${people.length ? `<div class="search" style="margin-bottom:8px">${icon("search")}<input id="sh-find" placeholder="Find a person" aria-label="Find a person"></div>
+          <div class="people" id="sh-people">${people.map((p) => `<label class="person" data-name="${esc(p.username.toLowerCase())}"><input type="checkbox" value="${p.id}"><span class="avatar" style="width:26px;height:26px;font-size:11px">${esc(p.username.slice(0, 2))}</span><span>${esc(p.username)}</span></label>`).join("")}</div>`
+          : `<div class="callout info">${icon("info")}<div>No one else has an account yet. Ask an admin to add people, or share with the link below.</div></div>`}
+        <label class="switch mt-8"><input type="checkbox" id="sh-link"><span class="sw"></span><span><b>Anyone in the company with the link</b><small>They still have to sign in first.</small></span></label>
+      </div>
+      <div class="grid grid-2">
+        <div class="field"><label class="label" for="sh-days">Stops working</label>
+          <select class="input" id="sh-days"><option value="1">After 1 day</option><option value="7" selected>After 7 days</option><option value="30">After 30 days</option></select></div>
+        <div class="field"><span class="label">Downloads</span>
+          <label class="switch"><input type="checkbox" id="sh-export" checked><span class="sw"></span><span><b>Allow downloads</b><small>Hides the download buttons. It can't stop someone copying what they see.</small></span></label></div>
+      </div>
+    </div>
+
+    <div class="callout info mt-16">${icon("info")}<div>This shares a <b>copy as it is now</b> (${rowsText(data.rows.length)}). Later changes to your sheet aren't included. The copy is kept on the server until it expires or you stop sharing, then it is deleted.</div></div>
+    ${canFiles ? `<div class="mt-16"><button class="btn" id="sh-file" type="button">${icon("share")}Send the file itself instead…</button></div>` : ""}`;
+
   return modal({
-    title: `Share “${meta.name}”`, confirm: "Create share", wide: true, body,
+    title: `Share “${meta.name}”`, confirm: "Create link", wide: true, body,
     onOpen: (ov) => {
+      const setMode = (m) => {
+        mode = m;
+        try { localStorage.setItem("shareMode", m); } catch {}
+        $$("#sh-mode button", ov).forEach((b) => b.classList.toggle("active", b.dataset.m === m));
+        $("#sh-customer", ov).hidden = m !== "customer";
+        $("#sh-colleagues", ov).hidden = m !== "colleagues";
+        $("[data-ok]", ov).textContent = m === "customer" ? "Create customer link" : "Share with colleagues";
+      };
+      $$("#sh-mode button", ov).forEach((b) => b.onclick = () => setMode(b.dataset.m));
+      setMode(mode);
+      $("#sh-pass-new", ov).onclick = () => { $("#sh-pass", ov).value = genPasscode(); };
+      $("#sh-pass-on", ov).onchange = (e) => { $("#sh-pass-row", ov).hidden = !e.target.checked; };
       $$("#sh-people input", ov).forEach((c) => c.onchange = () => c.checked ? picked.add(+c.value) : picked.delete(+c.value));
       $("#sh-find", ov)?.addEventListener("input", (e) => {
         const q = e.target.value.trim().toLowerCase();
@@ -1168,29 +1234,55 @@ async function shareDialog(meta) {
       });
       $("#sh-file", ov)?.addEventListener("click", async () => {
         try {
-          const file = new File([SheetOps.toCSV(data.columns, data.rows)], fileSafe(meta.name) + ".csv", { type: "text/csv" });
+          const file = await buildFile(meta.name, data.columns, data.rows);
           await navigator.share({ files: [file], title: meta.name });
         } catch (e) { if (e.name !== "AbortError") toast("Your device couldn't share the file.", "err"); }
       });
+      setTimeout(() => (mode === "customer" ? $("#sh-cname", ov) : $("#sh-find", ov))?.focus(), 50);
     },
     onConfirm: async (ov) => {
-      if (created) return true;  // second click is "Done"
-      const link = $("#sh-link", ov).checked;
-      if (!picked.size && !link) { toast("Pick at least one person, or allow anyone with the link.", "err"); return false; }
-      const r = await api("/api/shares", { method: "POST", body: { name: meta.name, columns: data.columns, rows: data.rows,
-        recipients: [...picked], link_access: link, expires_days: +$("#sh-days", ov).value, allow_export: $("#sh-export", ov).checked } });
+      if (created) return true;  // after creating, the button reads "Done"
+      let payload;
+      if (mode === "customer") {
+        const customer = $("#sh-cname", ov).value.trim();
+        const passOn = $("#sh-pass-on", ov).checked, pass = $("#sh-pass", ov).value.trim();
+        if (!customer) { toast("Enter the customer's name.", "err"); $("#sh-cname", ov).focus(); return false; }
+        if (passOn && (pass.length < 4 || pass.length > 40)) { toast("A passcode needs 4 to 40 characters.", "err"); $("#sh-pass", ov).focus(); return false; }
+        if (!$("#sh-ack", ov).checked) { toast("Please confirm that you're allowed to share this data with the customer.", "err"); return false; }
+        payload = { kind: "external", customer, message: $("#sh-cmsg", ov).value, passcode: passOn ? pass : "", acknowledged: true, expires_days: +$("#sh-cdays", ov).value };
+        createdOpts = { to: $("#sh-cmail", ov).value.trim(), passcode: passOn ? pass : "" };
+      } else {
+        const link = $("#sh-link", ov).checked;
+        if (!picked.size && !link) { toast("Pick at least one person, or allow anyone with the link.", "err"); return false; }
+        payload = { kind: "internal", recipients: [...picked], link_access: link, expires_days: +$("#sh-days", ov).value, allow_export: $("#sh-export", ov).checked };
+        createdOpts = {};
+      }
+      const r = await api("/api/shares", { method: "POST", body: { name: meta.name, columns: data.columns, rows: data.rows, ...payload } });
       created = r;
-      const who = [...(r.recipients.length ? [r.recipients.join(", ")] : []), ...(r.link_access ? ["anyone signed in with the link"] : [])].join(" and ");
+      const url = linkFor(r);
+      const who = r.kind === "external" ? esc(r.customer)
+        : esc([...(r.recipients.length ? [r.recipients.join(", ")] : []), ...(r.link_access ? ["anyone signed in with the link"] : [])].join(" and "));
       $(".modal-body", ov).innerHTML = `
-        <div class="callout ok">${icon("check")}<div><b>Shared.</b> Opens for ${esc(who)}. Stops working ${esc(expiresIn(r.expires))}.</div></div>
+        <div class="callout ok">${icon("check")}<div><b>${r.kind === "external" ? "Ready to send to" : "Shared with"} ${who}.</b> The link stops working ${esc(expiresIn(r.expires))}.</div></div>
         <div class="field mt-16"><label class="label" for="sh-url">Link</label>
-          <div class="input-row"><input class="input mono" id="sh-url" readonly value="${esc(shareUrl(r.id))}"><button class="btn btn-primary" type="button" id="sh-copy">Copy link</button></div>
-          <div class="hint">People you chose will also find it under <b>Shared</b>. You can stop sharing any time from there.</div></div>
+          <div class="input-row"><input class="input mono" id="sh-url" readonly value="${esc(url)}"><button class="btn btn-primary" type="button" id="sh-copy">Copy link</button></div></div>
+        ${r.kind === "external" && createdOpts.passcode ? `<div class="field"><label class="label" for="sh-code">Passcode</label>
+          <div class="input-row"><input class="input mono" id="sh-code" readonly value="${esc(createdOpts.passcode)}"><button class="btn" type="button" id="sh-copy-code">Copy passcode</button></div>
+          <div class="hint">Send this in a <b>separate message</b>, for example on WhatsApp or by phone. It can't be shown again after you close this window.</div></div>` : ""}
         <div class="field"><span class="label">Send the link</span><div class="send-row" id="sh-send"></div>
-          <div class="hint">Only the sheet's name, size and link are put in the message. The data stays on the server until the link expires.</div></div>`;
-      renderSendRow($("#sh-send", ov), r);
+          <div class="hint">Only the sheet's name, size and link go in the message${r.kind === "external" ? ". The passcode is not included" : ""}.</div></div>
+        ${r.kind === "external" ? `<div class="field"><span class="label">Or send the file</span>
+          <div class="send-row"><button class="btn" type="button" id="sh-dl">${icon("download")}Download Excel to attach yourself</button>${canFiles ? `<button class="btn" type="button" id="sh-sendfile">${icon("share")}Send the file itself…</button>` : ""}</div></div>
+          <div class="callout info">${icon("info")}<div>You'll see when the customer opens or downloads it under <b>Shared → Shared by me</b>.</div></div>` : `<div class="hint">People you chose will also find it under <b>Shared</b>. You can stop sharing any time from there.</div>`}`;
+      renderSendRow($("#sh-send", ov), r, createdOpts);
       $("#sh-url", ov).onfocus = (e) => e.target.select();
-      $("#sh-copy", ov).onclick = async () => toast((await copyText(shareUrl(r.id))) ? "Link copied" : "Copy the link by hand: select it and press Ctrl+C.", "ok");
+      $("#sh-copy", ov).onclick = async () => toast((await copyText(url)) ? "Link copied" : "Copy the link by hand: select it and press Ctrl+C.", "ok");
+      $("#sh-copy-code", ov)?.addEventListener("click", async () => toast((await copyText(createdOpts.passcode)) ? "Passcode copied" : "Couldn't copy the passcode.", "ok"));
+      $("#sh-dl", ov)?.addEventListener("click", () => exportData(meta.name, data.columns, data.rows, "xlsx"));
+      $("#sh-sendfile", ov)?.addEventListener("click", async () => {
+        try { await navigator.share({ files: [await buildFile(meta.name, data.columns, data.rows)], title: meta.name }); }
+        catch (e) { if (e.name !== "AbortError") toast("Your device couldn't share the file.", "err"); }
+      });
       $("[data-ok]", ov).textContent = "Done";
       $("[data-x]", ov)?.remove();
       return false;
@@ -1204,20 +1296,25 @@ async function viewShared() {
   const v = $("#view");
   const state = { box: "with-me" };
   v.innerHTML = `
-    <div class="page-head"><div><h1>Shared</h1><p>Copies of sheets that people shared. Each one expires automatically.</p></div></div>
+    <div class="page-head"><div><h1>Shared</h1><p>Sheets you've sent to customers or colleagues, and ones colleagues shared with you. Each one expires automatically.</p></div></div>
     <div class="card">
       <div class="toolbar"><div class="seg" id="box"><button data-b="with-me" class="active">Shared with me</button><button data-b="by-me">Shared by me</button></div></div>
       <div class="table-wrap" id="list">${skeletonRows(4, 5)}</div>
     </div>`;
   let items = [];
+  const activity = (x) => x.kind !== "external" ? '<span class="muted">—</span>'
+    : !x.views && !x.downloads ? '<span class="muted">Not opened yet</span>'
+    : `<div>${[x.views ? `Opened ${x.views}×` : "", x.downloads ? `downloaded ${x.downloads}×` : ""].filter(Boolean).join(" · ")}</div><div class="muted small">last ${timeAgo(x.last_opened)}</div>`;
+  const kindNote = (x) => x.kind === "external" ? `Customer link${x.has_passcode ? " · passcode" : ""}` : x.allow_export ? "Downloads allowed" : "Downloads off";
   const render = () => {
     const mine = state.box === "by-me";
     $("#list").innerHTML = !items.length
-      ? emptyState("share", mine ? "You haven't shared anything" : "Nothing has been shared with you", mine ? "Open a sheet and press Share to send a copy to a colleague." : "When someone shares a sheet with you, it appears here.",
+      ? emptyState("share", mine ? "You haven't shared anything" : "Nothing has been shared with you", mine ? "Open a sheet and press Share to send it to a customer or a colleague." : "When a colleague shares a sheet with you, it appears here.",
           mine && !IS_VIEWER ? '<a class="btn btn-primary" href="#/sheets">Go to Sheets</a>' : "")
-      : `<table class="tbl"><thead><tr><th>Sheet</th><th>${mine ? "Shared with" : "Shared by"}</th><th class="num">Rows</th><th>Shared</th><th>Stops working</th><th></th></tr></thead><tbody>
-        ${items.map((s) => `<tr class="clickable" data-id="${s.id}"><td><div class="name-cell"><div class="file-ico">${icon("sheet")}</div><div><b>${esc(s.name)}</b><small>${s.allow_export ? "Downloads allowed" : "Downloads off"}</small></div></div></td>
-          <td>${mine ? esc([...s.recipients, ...(s.link_access ? ["anyone with the link"] : [])].join(", ") || "—") : esc(s.owner)}</td>
+      : `<table class="tbl"><thead><tr><th>Sheet</th><th>${mine ? "Shared with" : "Shared by"}</th>${mine ? "<th>Activity</th>" : ""}<th class="num">Rows</th><th>Shared</th><th>Stops working</th><th></th></tr></thead><tbody>
+        ${items.map((s) => `<tr class="clickable" data-id="${s.id}"><td><div class="name-cell"><div class="file-ico">${icon("sheet")}</div><div><b>${esc(s.name)}</b><small>${esc(kindNote(s))}</small></div></div></td>
+          <td>${mine ? (s.kind === "external" ? `<b>${esc(s.customer)}</b>` : esc([...s.recipients, ...(s.link_access ? ["anyone with the link"] : [])].join(", ") || "—")) : esc(s.owner)}</td>
+          ${mine ? `<td>${activity(s)}</td>` : ""}
           <td class="num">${fmtNum(s.rows)}</td><td class="nowrap">${timeAgo(s.created)}</td><td class="nowrap" title="${esc(fmtDate(s.expires))}">${esc(expiresIn(s.expires))}</td>
           <td class="actions" data-stop><span class="menu-wrap">${mine ? `<button class="btn btn-sm" data-copy="${s.id}">${icon("link")}Copy link</button><button class="btn btn-sm" data-send="${s.id}">${icon("send")}Send…</button><button class="btn btn-sm btn-danger" data-stopshare="${s.id}">Stop sharing</button>`
             : `<a class="btn btn-sm" href="#/shared/${s.id}">Open</a>`}</span></td></tr>`).join("")}</tbody></table>`;
@@ -1234,7 +1331,7 @@ async function viewShared() {
   });
   $("#list").addEventListener("click", async (e) => {
     const copy = e.target.closest("[data-copy]");
-    if (copy) return toast((await copyText(shareUrl(copy.dataset.copy))) ? "Link copied" : "Couldn't copy the link.", "ok");
+    if (copy) return toast((await copyText(linkFor(items.find((x) => x.id === copy.dataset.copy)))) ? "Link copied" : "Couldn't copy the link.", "ok");
     const send = e.target.closest("[data-send]");
     if (send) { e.stopPropagation(); return openMenu(send, shareChannels(items.find((x) => x.id === send.dataset.send))); }
     const stop = e.target.closest("[data-stopshare]");
@@ -1267,11 +1364,11 @@ async function viewSharedSheet(id) {
   setCrumbs({ label: "Shared", href: "#/shared" }, s.name);
   const data = { columns: s.columns, rows: s.rows_data };
   v.innerHTML = `
-    <div class="page-head"><div><div class="row-flex"><h1>${esc(s.name)}</h1><span class="badge accent plain">Shared copy</span></div>
-      <p>${rowsText(s.rows)} · ${s.mine ? "shared by you" : `shared by ${esc(s.owner)}`} · stops working ${esc(expiresIn(s.expires))}${s.allow_export ? "" : " · downloads are off"}</p></div>
+    <div class="page-head"><div><div class="row-flex"><h1>${esc(s.name)}</h1><span class="badge accent plain">${s.kind === "external" ? "Customer link" : "Shared copy"}</span></div>
+      <p>${rowsText(s.rows)} · ${s.kind === "external" ? `prepared for ${esc(s.customer)} · ${s.views || s.downloads ? `opened ${s.views}×, downloaded ${s.downloads}×` : "not opened yet"}` : s.mine ? "shared by you" : `shared by ${esc(s.owner)}`} · stops working ${esc(expiresIn(s.expires))}${s.allow_export ? "" : " · downloads are off"}</p></div>
       <div class="actions">
         ${s.allow_export ? `<button class="btn" id="save-copy">${icon("sheet")}Save a copy to my device</button><span class="menu-wrap"><button class="btn btn-primary" id="export">${icon("download")}Export</button></span>` : ""}
-        ${s.mine ? `<span class="menu-wrap"><button class="btn" id="send">${icon("send")}Send link</button></span><button class="btn btn-danger" id="stop">${icon("trash")}Stop sharing</button>` : ""}</div></div>
+        ${s.mine && s.kind === "external" ? `<a class="btn" href="${customerUrl(s.id)}" target="_blank" rel="noopener">${icon("eye")}View as customer</a>` : ""}${s.mine ? `<span class="menu-wrap"><button class="btn" id="send">${icon("send")}Send link</button></span><button class="btn btn-danger" id="stop">${icon("trash")}Stop sharing</button>` : ""}</div></div>
     ${GRID_CARD}`;
   $("#export")?.addEventListener("click", (e) => { e.stopPropagation(); openMenu($("#export"), exportDataMenu(s.name, data.columns, data.rows)); });
   $("#save-copy")?.addEventListener("click", async () => {
@@ -1651,7 +1748,8 @@ async function viewAdmin() {
   setCrumbs("Admin");
   const v = $("#view");
   const tk = routeToken();
-  const [users, settings] = await Promise.all([api("/api/admin/users"), api("/api/admin/settings")]);
+  const [users, settings, allShares] = await Promise.all([api("/api/admin/users"), api("/api/admin/settings"), api("/api/admin/shares")]);
+  let shares = allShares;
   if (stale(tk)) return;
   const render = (list) => {
     v.innerHTML = `
@@ -1668,6 +1766,19 @@ async function viewAdmin() {
         </tbody></table></div>
       </div>
       <div class="card mt-16">
+        <div class="card-head"><div><h3>${icon("share")} Data sent to customers</h3><p>Every customer link that is active right now: who sent it, to whom, and whether it was opened. Expired links are deleted automatically.</p></div></div>
+        ${(() => {
+          const out = shares.filter((x) => x.kind === "external");
+          return !out.length ? emptyState("share", "Nothing is shared with customers right now", "Customer links appear here while they are active.")
+            : `<div class="table-wrap"><table class="tbl"><thead><tr><th>Sheet</th><th>Customer</th><th>Sent by</th><th class="num">Rows</th><th>Activity</th><th>Stops working</th><th></th></tr></thead><tbody>
+              ${out.map((x) => `<tr><td><div class="name-cell"><div class="file-ico">${icon("sheet")}</div><div><b>${esc(x.name)}</b><small>${x.has_passcode ? "Passcode" : "No passcode"} · sent ${timeAgo(x.created)}</small></div></div></td>
+                <td><b>${esc(x.customer)}</b></td><td>${esc(x.owner)}</td><td class="num">${fmtNum(x.rows)}</td>
+                <td>${!x.views && !x.downloads ? '<span class="muted">Not opened yet</span>' : `${x.views ? `Opened ${x.views}×` : ""}${x.views && x.downloads ? " · " : ""}${x.downloads ? `downloaded ${x.downloads}×` : ""}`}</td>
+                <td class="nowrap" title="${esc(fmtDate(x.expires))}">${esc(expiresIn(x.expires))}</td>
+                <td class="actions"><button class="btn btn-sm btn-danger" data-admin-stop="${x.id}">Stop</button></td></tr>`).join("")}</tbody></table></div>`;
+        })()}
+      </div>
+      <div class="card mt-16">
         <div class="card-head"><div><h3>${icon("sheet")} Where data is stored</h3><p>User accounts and saved AI keys are in the database. Sheets and run history never leave each person's own device.</p></div></div>
         <div class="card-body">${databaseNotice(settings.database)}</div>
       </div>
@@ -1680,6 +1791,11 @@ async function viewAdmin() {
         </div>
       </div>`;
     $("#add-user").onclick = () => addUser(list, render);
+    $$("[data-admin-stop]", v).forEach((b) => b.onclick = async () => {
+      const x = shares.find((y) => y.id === b.dataset.adminStop);
+      if (!await confirmDialog("Stop this customer link?", `“${x.name}” for ${x.customer} will be deleted from the server and the link will stop working immediately.`, "Stop sharing")) return;
+      try { await api(`/api/shares/${x.id}`, { method: "DELETE" }); shares = shares.filter((y) => y.id !== x.id); toast("Link stopped", "ok"); render(list); } catch (e) { toast(e.message, "err"); }
+    });
     $$("[data-role]", v).forEach((sel) => sel.onchange = async () => {
       const id = sel.closest("tr").dataset.id;
       try { const u = await api(`/api/admin/users/${id}`, { method: "PATCH", body: { role: sel.value } }); Object.assign(list.find((x) => x.id == id), u); toast("Role updated", "ok"); }

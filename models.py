@@ -128,6 +128,16 @@ class Share(db.Model):
     link_access = db.Column(db.Boolean, default=False)       # any signed-in user with the link
     recipients_json = db.Column(db.Text, default="[]")       # user ids who can open it
     revoked = db.Column(db.Boolean, default=False)
+    # Customer links: a copy for someone outside the company, opened without an account.
+    kind = db.Column(db.String(12), default="internal")      # "internal" (colleagues) or "external" (customer link)
+    customer = db.Column(db.String(160), nullable=True)      # who it was prepared for
+    message = db.Column(db.Text, nullable=True)              # note from the sender, shown on the customer's page
+    passcode_hash = db.Column(db.String(255), nullable=True) # optional passcode (hashed, never shown again)
+    acknowledged = db.Column(db.Boolean, default=False)      # sender confirmed they may share this data
+    views = db.Column(db.Integer, default=0)
+    downloads = db.Column(db.Integer, default=0)
+    first_opened_at = db.Column(db.DateTime, nullable=True)
+    last_opened_at = db.Column(db.DateTime, nullable=True)
 
     @property
     def recipients(self) -> list[int]:
@@ -139,5 +149,14 @@ class Share(db.Model):
     def is_live(self) -> bool:
         return not self.revoked and self.expires_at > datetime.utcnow()
 
+    @property
+    def is_external(self) -> bool:
+        return self.kind == "external"
+
     def can_open(self, user) -> bool:
-        return self.is_live() and (user.id == self.owner_id or self.link_access or user.id in self.recipients)
+        """Signed-in access. A customer link is opened through its public page, so inside the app only its owner sees it."""
+        if not self.is_live():
+            return False
+        if self.is_external:
+            return user.id == self.owner_id
+        return user.id == self.owner_id or bool(self.link_access) or user.id in self.recipients

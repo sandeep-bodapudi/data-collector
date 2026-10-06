@@ -6,6 +6,12 @@
       "runtimeExecutable": ".venv\\Scripts\\python.exe",
       "runtimeArgs": ["app.py"],
       "port": 5000
+    },
+    {
+      "name": "ui-test",
+      "runtimeExecutable": ".venv\\Scripts\\python.exe",
+      "runtimeArgs": ["C:\\Users\\bodap\\AppData\\Local\\Temp\\claude\\D--Onebridge-projects-scrapper\\37e8e573-bab9-495e-bf77-5a54c24958f1\\scratchpad\\run_test_server.py"],
+      "port": 5055
     }
   ]
 }

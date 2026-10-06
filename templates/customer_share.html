@@ -1,0 +1,88 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="robots" content="noindex, nofollow">
+<meta name="referrer" content="no-referrer">
+<title>{% if state == "open" %}{{ sh.name }} · {{ company }}{% elif state == "locked" %}Protected file · {{ company }}{% else %}Link unavailable · {{ company }}{% endif %}</title>
+<link rel="icon" type="image/svg+xml" href="{{ url_for('static', filename='logo.svg') }}">
+<link rel="icon" type="image/png" sizes="32x32" href="{{ url_for('static', filename='icons/favicon-32.png') }}">
+{# What a chat app shows when this link is pasted: nothing about the data inside #}
+<meta property="og:type" content="website">
+<meta property="og:title" content="Your file from {{ company }}">
+<meta property="og:description" content="A private download link prepared for you.">
+<meta property="og:image" content="{{ request.url_root }}static/icons/icon-512.png">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap">
+<link rel="stylesheet" href="{{ url_for('static', filename='app.css') }}?v={{ v }}">
+<style>
+  body { min-height: 100vh; display: flex; flex-direction: column; }
+  .cs-top { background: var(--surface); border-bottom: 1px solid var(--line); }
+  .cs-top .in { max-width: 1100px; margin: 0 auto; padding: 14px 24px; display: flex; align-items: center; gap: 12px; }
+  .cs-top .brand { padding: 0; }
+  .cs-top .tag { margin-left: auto; color: var(--muted); font-size: 13px; display: flex; align-items: center; gap: 6px; }
+  .cs-main { flex: 1; width: 100%; max-width: 1100px; margin: 0 auto; padding: 32px 24px 48px; }
+  .cs-narrow { max-width: 440px; margin: 48px auto 0; text-align: center; }
+  .cs-narrow .card-body { padding: 32px 28px; }
+  .cs-ico { width: 52px; height: 52px; border-radius: 14px; background: var(--accent-soft); color: var(--accent-text); display: grid; place-items: center; margin: 0 auto 16px; }
+  .cs-narrow h1 { margin: 0 0 6px; font-size: 20px; }
+  .cs-narrow p { margin: 0 0 20px; color: var(--muted); }
+  .cs-narrow form { text-align: left; }
+  .cs-head h1 { margin: 0; font-size: 24px; letter-spacing: -.3px; }
+  .cs-head p { margin: 6px 0 0; color: var(--muted); }
+  .cs-actions { display: flex; flex-wrap: wrap; gap: 10px; margin: 22px 0; }
+  .cs-note { white-space: pre-wrap; }
+  .cs-foot { text-align: center; color: var(--faint); font-size: 12.5px; padding: 0 24px 28px; }
+  @media (max-width: 600px) { .cs-main { padding: 20px 16px 32px; } .cs-top .in { padding: 12px 16px; } .cs-actions .btn { flex: 1 1 100%; } }
+</style>
+</head>
+<body>
+<header class="cs-top"><div class="in">
+  <div class="brand"><img class="brand-logo" src="{{ url_for('static', filename='logo.svg') }}" alt="" width="44" height="35"><div><b>{{ company }}</b><small>Data delivery</small></div></div>
+  <span class="tag"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="4" y="10.5" width="16" height="10" rx="2"/><path d="M8 10.5V7a4 4 0 0 1 8 0v3.5"/></svg>Private link</span>
+</div></header>
+
+<main class="cs-main">
+{% if state == "gone" %}
+  <div class="card cs-narrow"><div class="card-body">
+    <div class="cs-ico"><svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="12" cy="12" r="9.5"/><path d="M12 7.5v5.5M12 16.5h.01"/></svg></div>
+    <h1>This link is no longer available</h1>
+    <p>It may have expired or been withdrawn. Please contact {{ company }} and we'll send you a new one.</p>
+  </div></div>
+
+{% elif state == "locked" %}
+  <div class="card cs-narrow"><div class="card-body">
+    <div class="cs-ico"><svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="4" y="10.5" width="16" height="10" rx="2"/><path d="M8 10.5V7a4 4 0 0 1 8 0v3.5"/></svg></div>
+    <h1>This file is protected</h1>
+    <p>Prepared for <b>{{ sh.customer }}</b>. Enter the passcode that {{ company }} sent you.</p>
+    {% if error %}<div class="callout err" role="alert" style="margin-bottom:16px;text-align:left"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="12" cy="12" r="9.5"/><path d="M12 7.5v5.5M12 16.5h.01"/></svg><div>{{ error }}</div></div>{% endif %}
+    <form method="post" autocomplete="off">
+      <label class="label" for="passcode">Passcode</label>
+      <input class="input" id="passcode" name="passcode" type="text" autocomplete="off" autocapitalize="off" spellcheck="false" required autofocus>
+      <button class="btn btn-primary btn-lg btn-block" style="margin-top:16px" type="submit">Open file</button>
+    </form>
+  </div></div>
+
+{% else %}
+  <div class="cs-head">
+    <h1>{{ sh.name }}</h1>
+    <p>Prepared for <b>{{ sh.customer }}</b> by {{ company }} · {{ "{:,}".format(total) }} row{{ "" if total == 1 else "s" }} · available until {{ sh.expires_at.strftime("%d %b %Y") }}</p>
+  </div>
+  {% if sh.message %}<div class="callout info mt-16"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="12" cy="12" r="9.5"/><path d="M12 11v5.5M12 7.5h.01"/></svg><div class="cs-note">{{ sh.message }}</div></div>{% endif %}
+  <div class="cs-actions">
+    <a class="btn btn-primary btn-lg" href="{{ url_for('customer_file', token=sh.id, ext='xlsx') }}"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3v12m0 0-4.5-4.5M12 15l4.5-4.5M4 15v4a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-4"/></svg>Download Excel (.xlsx)</a>
+    <a class="btn btn-lg" href="{{ url_for('customer_file', token=sh.id, ext='csv') }}">Download CSV</a>
+  </div>
+  <div class="card">
+    <div class="card-head"><div><h3>Preview</h3><p>{% if total > preview|length %}The first {{ preview|length }} of {{ "{:,}".format(total) }} rows. Download the file to get all of them.{% else %}All {{ total }} row{{ "" if total == 1 else "s" }}.{% endif %}</p></div></div>
+    <div class="grid-scroll" style="max-height:520px">
+      <table class="tbl grid-tbl"><thead><tr><th>#</th>{% for c in columns %}<th>{{ c }}</th>{% endfor %}</tr></thead>
+        <tbody>{% for r in preview %}<tr><td>{{ loop.index }}</td>{% for c in columns %}{% set v = r.get(c) %}{% if v is none or v == "" %}<td class="empty">—</td>{% else %}<td title="{{ v }}">{{ v }}</td>{% endif %}{% endfor %}</tr>{% endfor %}</tbody></table>
+    </div>
+  </div>
+{% endif %}
+</main>
+<footer class="cs-foot">This link is private to {% if state == "gone" %}its recipient{% else %}you{% endif %}. Please don't forward it. Questions? Contact {{ company }}.</footer>
+</body>
+</html>

@@ -211,6 +211,103 @@ first = c.post("/api/shares", json=payload(link_access=True))
 ok("the number of active shares per person is capped", first.status_code == 200 and c.post("/api/shares", json=payload(link_access=True)).status_code == 400)
 appmod.SHARE_MAX_ACTIVE = old_active
 
+# ---- customer links (public pages for people outside the company) --------------------------------
+CROWS = [{"Name": "శ్రీ Academy", "Email": "info@academy.in", "Note": "=HYPERLINK(\"http://evil\",\"x\")", "Phone": "+91 98480 12345"},
+         {"Name": "B College", "Email": "", "Note": "ok", "Phone": "040-2345678"}]
+cpay = lambda **kw: {"kind": "external", "name": "Student leads", "columns": ["Name", "Email", "Note", "Phone"], "rows": CROWS,
+                     "customer": "Global Education Services", "acknowledged": True, "expires_days": 7, **kw}
+ok("customer link needs the customer's name", c.post("/api/shares", json=cpay(customer="  ")).status_code == 400)
+ok("customer link needs the confirmation", c.post("/api/shares", json=cpay(acknowledged=False)).status_code == 400)
+ok("passcode must be 4 to 40 characters", c.post("/api/shares", json=cpay(passcode="abc")).status_code == 400)
+ok("viewer cannot create a customer link", viewer.post("/api/shares", json=cpay()).status_code == 403)
+
+created = c.post("/api/shares", json=cpay(passcode="Hyd2026", message="Hello,\nhere is the data you asked for."))
+ext = created.get_json(); eid = ext["id"]
+ok("customer link is created", created.status_code == 200 and ext["kind"] == "external" and ext["customer"] == "Global Education Services")
+ok("response never contains the data or the passcode", "rows_data" not in ext and "Hyd2026" not in json.dumps(ext)
+   and "passcode_hash" not in ext and ext["has_passcode"] is True)
+
+anon = app.test_client()
+H = {"X-Forwarded-For": "203.0.113.5"}
+locked = anon.get(f"/s/{eid}", headers=H)
+ok("the public page opens without signing in", locked.status_code == 200)
+ok("before the passcode, no data and no sheet name is shown", b"protected" in locked.data and "Academy".encode() not in locked.data
+   and b"Student leads" not in locked.data and "Global Education Services".encode() in locked.data)
+ok("a protected page counts nothing before it is unlocked", c.get("/api/shares?box=by-me").get_json()[0]["views"] == 0)
+ok("downloads need the passcode first", anon.get(f"/s/{eid}/file.csv", headers=H).status_code == 302)
+wrong = anon.post(f"/s/{eid}", data={"passcode": "nope"}, headers=H)
+ok("a wrong passcode is refused kindly", wrong.status_code == 200 and b"isn&#39;t right" in wrong.data and b"Academy" not in wrong.data)
+for _ in range(5):
+    last = anon.post(f"/s/{eid}", data={"passcode": "guess"}, headers=H)
+ok("repeated wrong passcodes are locked out", b"Too many wrong attempts" in last.data)
+ok("even the right passcode waits during the lockout", b"Too many wrong attempts" in anon.post(f"/s/{eid}", data={"passcode": "Hyd2026"}, headers=H).data)
+
+cust = app.test_client()
+H2 = {"X-Forwarded-For": "198.51.100.7"}
+r = cust.post(f"/s/{eid}", data={"passcode": "Hyd2026"}, headers=H2)
+ok("the right passcode opens the file", r.status_code == 302)
+page = cust.get(f"/s/{eid}", headers=H2)
+ok("the customer sees their data, the sender's note and the company", page.status_code == 200 and "శ్రీ Academy".encode() in page.data
+   and b"Student leads" in page.data and b"Global Education Services" in page.data and b"here is the data" in page.data
+   and b"OneBridge Infotech" in page.data)
+ok("page is private: no caching, no indexing, no referrer", page.headers["Cache-Control"] == "no-store"
+   and "noindex" in page.headers["X-Robots-Tag"] and page.headers["Referrer-Policy"] == "no-referrer")
+
+csvr = cust.get(f"/s/{eid}/file.csv", headers=H2)
+text = csvr.data.decode("utf-8-sig")
+ok("CSV download works with a byte-order mark", csvr.status_code == 200 and csvr.data[:3] == b"\xef\xbb\xbf"
+   and "attachment" in csvr.headers["Content-Disposition"])
+ok("CSV keeps Telugu text and phone numbers", "శ్రీ Academy" in text and "+91 98480 12345" in text)
+ok("CSV neutralises a formula but not a phone number", "'=HYPERLINK" in text and "'+91" not in text)
+xr = cust.get(f"/s/{eid}/file.xlsx", headers=H2)
+wbx = load_workbook(io.BytesIO(xr.data))
+info = {row[0].value: row[1].value for row in wbx["Run Info"].iter_rows(min_row=2)}
+ok("Excel download works and says who it was prepared for", xr.status_code == 200 and xr.data[:2] == b"PK"
+   and info.get("Prepared for") == "Global Education Services")
+ok("Excel keeps a formula as text", wbx["Data"]["C2"].data_type == "s")
+ok("only csv and xlsx can be downloaded", cust.get(f"/s/{eid}/file.exe", headers=H2).status_code == 404)
+
+mine = c.get("/api/shares?box=by-me").get_json()
+row = next(x for x in mine if x["id"] == eid)
+ok("the sender sees how many times it was opened and downloaded", row["views"] == 1 and row["downloads"] == 2
+   and row["last_opened"] and row["first_opened"], str(row))
+ok("another member cannot open the customer share inside the app", meena.get(f"/api/shares/{eid}").status_code == 404)
+ok("the owner can still preview it inside the app", c.get(f"/api/shares/{eid}").status_code == 200)
+ok("customer shares are not listed as Shared with me", all(x["id"] != eid for x in meena.get("/api/shares").get_json()))
+
+# no passcode: counted for real visitors, not for the sender or chat-app link previews
+open_ = c.post("/api/shares", json=cpay(name="No passcode", customer="Acme Edu")).get_json()
+ok("a link without a passcode opens straight away", app.test_client().get(f"/s/{open_['id']}").status_code == 200)
+app.test_client().get(f"/s/{open_['id']}", headers={"User-Agent": "WhatsApp/2.23.20 A"})
+app.test_client().get(f"/s/{open_['id']}", headers={"User-Agent": "TelegramBot (like TwitterBot)"})
+c.get(f"/s/{open_['id']}")
+ok("chat-app link previews and the sender's own visits are not counted",
+   next(x for x in c.get("/api/shares?box=by-me").get_json() if x["id"] == open_["id"])["views"] == 1)
+
+prot = c.post("/api/shares", json=cpay(passcode="Owner123", name="Owner preview")).get_json()
+ok("the sender can preview a protected customer page without the passcode",
+   b"Owner preview" in c.get(f"/s/{prot['id']}").data and c.get(f"/s/{prot['id']}/file.csv").status_code == 200)
+ok("the sender's preview is not counted as a customer visit",
+   next(x for x in c.get("/api/shares?box=by-me").get_json() if x["id"] == prot["id"])["views"] == 0)
+ok("someone else signed in still needs the passcode", b"protected" in meena.get(f"/s/{prot['id']}").data)
+
+# who can reach what
+gone = app.test_client().get("/s/doesnotexist123")
+ok("an unknown link shows a friendly page, not an error", gone.status_code == 404 and b"no longer available" in gone.data)
+internal = c.post("/api/shares", json=payload(link_access=True)).get_json()
+ok("a colleague share is not reachable through the public address", app.test_client().get(f"/s/{internal['id']}").status_code == 404
+   and app.test_client().get(f"/s/{internal['id']}/file.csv").status_code == 404)
+admin_list = c.get("/api/admin/shares").get_json()
+ok("an admin can list everything shared, without the data", any(x["id"] == eid for x in admin_list)
+   and all("rows_data" not in x for x in admin_list))
+ok("members cannot use the admin share list", meena.get("/api/admin/shares").status_code == 403)
+ok("an admin can stop a customer link", meena.delete(f"/api/shares/{eid}").status_code == 404 and c.delete(f"/api/shares/{eid}").status_code == 200)
+ok("a stopped link stops working at once", cust.get(f"/s/{eid}", headers=H2).status_code == 404
+   and cust.get(f"/s/{eid}/file.csv", headers=H2).status_code == 404)
+with app.app_context():
+    row = _db.session.get(Share, open_["id"]); row.expires_at = _dt.utcnow() - _td(minutes=1); _db.session.commit()
+ok("an expired link stops working", app.test_client().get(f"/s/{open_['id']}").status_code == 404)
+
 # ---- database fallback: a dead database must not take the site down ---------------------------
 os.environ["DATABASE_URL"] = "postgresql://user:pw@127.0.0.1:1/none"
 t0 = time.time()

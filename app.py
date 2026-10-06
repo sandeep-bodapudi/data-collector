@@ -11,8 +11,9 @@ import time
 from datetime import datetime, timedelta
 from functools import wraps
 
-from flask import Flask, Response, abort, jsonify, redirect, render_template, request, url_for
+from flask import Flask, Response, abort, jsonify, redirect, render_template, request, send_file, session, url_for
 from flask_login import LoginManager, current_user, login_required, login_user, logout_user
+from werkzeug.security import check_password_hash, generate_password_hash
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 INSTANCE_DIR = os.path.join(BASE_DIR, "instance")
@@ -85,6 +86,7 @@ def _resolve_database() -> tuple[str, dict]:
 
 DB_URL, DB_STATE = _resolve_database()
 ON_SERVER = bool(os.environ.get("RENDER"))
+COMPANY_NAME = os.environ.get("COMPANY_NAME", "OneBridge Infotech")
 
 
 app = Flask(__name__)
@@ -295,6 +297,7 @@ def index():
         regions=REGIONS,
         providers={k: {"label": v["label"], "model": v["model"]} for k, v in ai_extract.PROVIDERS.items()},
         restricted=_restricted_enabled(),
+        company=COMPANY_NAME,
     )
 
 
@@ -542,11 +545,16 @@ def _purge_shares():
 
 
 def _share_meta(sh: Share, names: dict) -> dict:
+    stamp = lambda d: d.strftime("%Y-%m-%dT%H:%M:%SZ") if d else ""
     return {"id": sh.id, "name": sh.name, "rows": sh.row_count, "size": sh.size_bytes,
             "owner": names.get(sh.owner_id, "Someone"), "owner_id": sh.owner_id,
-            "created": sh.created_at.strftime("%Y-%m-%dT%H:%M:%SZ"), "expires": sh.expires_at.strftime("%Y-%m-%dT%H:%M:%SZ"),
+            "created": stamp(sh.created_at), "expires": stamp(sh.expires_at),
             "allow_export": bool(sh.allow_export), "link_access": bool(sh.link_access),
-            "recipients": [names[i] for i in sh.recipients if i in names]}
+            "recipients": [names[i] for i in sh.recipients if i in names],
+            "kind": "external" if sh.is_external else "internal", "customer": sh.customer or "",
+            "has_passcode": bool(sh.passcode_hash), "views": sh.views or 0, "downloads": sh.downloads or 0,
+            "first_opened": stamp(sh.first_opened_at), "last_opened": stamp(sh.last_opened_at),
+            "acknowledged": bool(sh.acknowledged)}
 
 
 def _user_names() -> dict:
@@ -572,31 +580,46 @@ def create_share():
     rows = [{c: ("" if r.get(c) is None else r.get(c)) for c in columns} for r in rows if isinstance(r, dict)]
     if not rows:
         return jsonify(error="There is nothing to share."), 400
-    valid_ids = {u.id for u in User.query.filter_by(is_active_user=True).all()} - {current_user.id}
-    recipients = sorted({int(i) for i in (d.get("recipients") or []) if str(i).isdigit() and int(i) in valid_ids})
-    link_access = bool(d.get("link_access"))
-    if not recipients and not link_access:
-        return jsonify(error="Choose who to share with: pick people, or allow anyone with the link."), 400
+
+    external = d.get("kind") == "external"
+    recipients, link_access, customer, message, passcode = [], False, None, None, ""
+    if external:
+        customer = (d.get("customer") or "").strip()[:160]
+        if not customer:
+            return jsonify(error="Enter the customer's name."), 400
+        if not d.get("acknowledged"):
+            return jsonify(error="Please confirm that we are allowed to share this data with the customer."), 400
+        message = (d.get("message") or "").strip()[:1000] or None
+        passcode = (d.get("passcode") or "").strip()
+        if passcode and not 4 <= len(passcode) <= 40:
+            return jsonify(error="A passcode needs 4 to 40 characters."), 400
+    else:
+        valid_ids = {u.id for u in User.query.filter_by(is_active_user=True).all()} - {current_user.id}
+        recipients = sorted({int(i) for i in (d.get("recipients") or []) if str(i).isdigit() and int(i) in valid_ids})
+        link_access = bool(d.get("link_access"))
+        if not recipients and not link_access:
+            return jsonify(error="Choose who to share with: pick people, or allow anyone with the link."), 400
     days = int(d.get("expires_days") or 7)
     if days not in SHARE_EXPIRY_DAYS:
         return jsonify(error="Choose how long the share should last."), 400
 
     _purge_shares()
-    mine = Share.query.filter_by(owner_id=current_user.id).count()
-    if mine >= SHARE_MAX_ACTIVE:
+    if Share.query.filter_by(owner_id=current_user.id).count() >= SHARE_MAX_ACTIVE:
         return jsonify(error=f"You already have {SHARE_MAX_ACTIVE} active shares. Stop sharing some of them first."), 400
     blob = gzip.compress(json.dumps(rows, ensure_ascii=False, separators=(",", ":")).encode("utf-8"), 6)
     if len(blob) > SHARE_MAX_BYTES:
         return jsonify(error=f"This sheet is too large to share ({len(blob) / 1048576:.1f} MB compressed, the limit is "
-                             f"{SHARE_MAX_BYTES // 1048576} MB). Share a file instead, or share a smaller sheet."), 413
+                             f"{SHARE_MAX_BYTES // 1048576} MB). Send it as a file instead, or share a smaller sheet."), 413
     used = db.session.query(db.func.coalesce(db.func.sum(Share.size_bytes), 0)).scalar() or 0
     if used + len(blob) > SHARE_MAX_TOTAL:
-        return jsonify(error="The server's sharing space is full right now. Ask an admin, or share a file instead."), 507
+        return jsonify(error="The server's sharing space is full right now. Ask an admin, or send a file instead."), 507
 
     sh = Share(id=secrets.token_urlsafe(12), owner_id=current_user.id, name=_clean_name(d.get("name"), "Shared sheet"),
                row_count=len(rows), columns_json=json.dumps(columns, ensure_ascii=False), data=blob, size_bytes=len(blob),
-               expires_at=datetime.utcnow() + timedelta(days=days), allow_export=bool(d.get("allow_export", True)),
-               link_access=link_access, recipients_json=json.dumps(recipients))
+               expires_at=datetime.utcnow() + timedelta(days=days), allow_export=True if external else bool(d.get("allow_export", True)),
+               link_access=link_access, recipients_json=json.dumps(recipients),
+               kind="external" if external else "internal", customer=customer, message=message,
+               passcode_hash=generate_password_hash(passcode) if passcode else None, acknowledged=external, views=0, downloads=0)
     db.session.add(sh)
     db.session.commit()
     return jsonify(_share_meta(sh, _user_names()))
@@ -642,6 +665,119 @@ def stop_share(share_id):
     db.session.delete(sh)
     db.session.commit()
     return jsonify(ok=True)
+
+
+# ---------------------------------------------------------------- customer links (public pages, no account needed)
+
+BOT_AGENTS = re.compile(r"bot|crawler|spider|preview|facebookexternalhit|whatsapp|telegram|slack|skype|linkedin|discord|embedly", re.I)
+
+
+def _public_share(token: str):
+    sh = db.session.get(Share, token)
+    return sh if sh and sh.is_external and sh.is_live() else None
+
+
+def _share_rows(sh: Share) -> list:
+    return json.loads(gzip.decompress(sh.data).decode("utf-8"))
+
+
+def _record_open(sh: Share, kind: str):
+    """Counts a real visit. The sender's own visits and chat-app link previews don't count."""
+    if (current_user.is_authenticated and current_user.id == sh.owner_id) or BOT_AGENTS.search(request.headers.get("User-Agent", "")):
+        return
+    now = datetime.utcnow()
+    if kind == "view":
+        sh.views = (sh.views or 0) + 1
+    else:
+        sh.downloads = (sh.downloads or 0) + 1
+    sh.first_opened_at = sh.first_opened_at or now
+    sh.last_opened_at = now
+    db.session.commit()
+
+
+def _csv_text(columns: list, rows: list) -> str:
+    import csv
+
+    def cell(v):
+        s = "" if v is None else str(v)
+        # stop spreadsheet formula injection; phone-like values such as "+91 98480 12345" are left alone
+        return "'" + s if re.match(r"^[=@\t\r]", s) or re.match(r"^[+-](?![\d\s().-]*$)", s) else s
+    buf = io.StringIO()
+    w = csv.writer(buf, lineterminator="\r\n")
+    w.writerow(columns)
+    for r in rows:
+        w.writerow([cell(r.get(c)) for c in columns])
+    return "\ufeff" + buf.getvalue()  # byte-order mark so Excel reads non-English text correctly
+
+
+@app.after_request
+def private_pages(resp):
+    if request.path.startswith("/s/"):
+        resp.headers["Cache-Control"] = "no-store"
+        resp.headers["X-Robots-Tag"] = "noindex, nofollow"
+        resp.headers["Referrer-Policy"] = "no-referrer"
+        resp.headers["X-Content-Type-Options"] = "nosniff"
+    return resp
+
+
+@app.route("/s/<token>", methods=["GET", "POST"])
+def customer_page(token):
+    sh = _public_share(token)
+    if not sh:
+        return render_template("customer_share.html", state="gone", company=COMPANY_NAME), 404
+    unlocked = token in session.get("unlocked", []) or (current_user.is_authenticated and current_user.id == sh.owner_id)
+    if sh.passcode_hash and not unlocked:
+        error = None
+        if request.method == "POST":
+            key = f"share:{token}:{_client_ip()}"
+            if _locked(key):
+                error = "Too many wrong attempts. Please wait 10 minutes and try again."
+            elif check_password_hash(sh.passcode_hash, (request.form.get("passcode") or "").strip()):
+                _failed.pop(key, None)
+                session["unlocked"] = (session.get("unlocked", []) + [token])[-20:]
+                return redirect(url_for("customer_page", token=token))
+            else:
+                _failed.setdefault(key, []).append(time.time())
+                error = "That passcode isn't right. Please check it and try again."
+        return render_template("customer_share.html", state="locked", sh=sh, error=error, company=COMPANY_NAME)
+    _record_open(sh, "view")
+    rows = _share_rows(sh)
+    return render_template("customer_share.html", state="open", sh=sh, company=COMPANY_NAME,
+                           columns=json.loads(sh.columns_json), preview=rows[:50], total=len(rows))
+
+
+@app.get("/s/<token>/file.<ext>")
+def customer_file(token, ext):
+    sh = _public_share(token)
+    if not sh or ext not in ("xlsx", "csv"):
+        abort(404)
+    if sh.passcode_hash and token not in session.get("unlocked", []) and not (current_user.is_authenticated and current_user.id == sh.owner_id):
+        return redirect(url_for("customer_page", token=token))
+    columns, rows = json.loads(sh.columns_json), _share_rows(sh)
+    _record_open(sh, "download")
+    base = re.sub(r"\s+", " ", re.sub(r"[\\/:*?\"<>|]+", "", sh.name)).strip() or "data"
+    if ext == "csv":
+        return send_file(io.BytesIO(_csv_text(columns, rows).encode("utf-8")), mimetype="text/csv", as_attachment=True, download_name=f"{base}.csv")
+    fd, path = tempfile.mkstemp(suffix=".xlsx")
+    os.close(fd)
+    try:
+        write_workbook(path, columns, rows, {"Prepared for": sh.customer or "", "Prepared by": COMPANY_NAME,
+                                             "Date": datetime.utcnow().strftime("%d %b %Y")})
+        with open(path, "rb") as f:
+            data = f.read()
+    finally:
+        os.remove(path)
+    return send_file(io.BytesIO(data), mimetype="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                     as_attachment=True, download_name=f"{base}.xlsx")
+
+
+@app.get("/api/admin/shares")
+@roles_required("admin")
+def admin_shares():
+    """Everything that is currently shared, so an admin can see what has gone out and stop it. Never includes the data."""
+    _purge_shares()
+    names = _user_names()
+    return jsonify([_share_meta(s, names) for s in Share.query.order_by(Share.created_at.desc()).all()])
 
 
 # ---------------------------------------------------------------- admin
