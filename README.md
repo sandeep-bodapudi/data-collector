@@ -100,6 +100,8 @@ How it works:
 
 For broad coverage ("100+ websites"), **New run → Search the web** has a **Generate many searches at once** panel: list the areas/items you want (one per line) and one pattern using `{area}`, e.g. `engineering colleges in {area} contact email phone` — it expands to one search per area and adds them all in one click. Up to 300 searches can be queued in a single run.
 
+With no search key, one free engine alone often returns well under the number of results you asked for on a specific query, even when it isn't blocked at all — it just doesn't have more to give. The app merges results from every free engine (DuckDuckGo, Yahoo, Brave, Google, Mojeek, Startpage) for each search instead of stopping at the first one that answers, so "Websites per search" is a real target, not just an upper limit on one engine's small reply. A run can still end up with fewer rows than requested when the area genuinely doesn't have that many matching, non-directory sites — that's the real number, not a bug.
+
 Throughput is governed by the same measured search-engine pacing as Places (see the table above), shared by both modes through `_current_gap()` in [scraper/jobs.py](scraper/jobs.py):
 
 | Setup | Pace between searches | Why |

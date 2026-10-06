@@ -338,6 +338,44 @@ ok("web_search reaches for Google CSE before scraping any free engine when both 
    hits and hits[0]["href"] == "https://griet.ac.in/" and not any("duckduckgo" in m for m in msgs))
 del os.environ["GOOGLE_CSE_KEY"], os.environ["GOOGLE_CSE_CX"]
 
+# ---- no key: a free engine returning fewer than max_results tops up from the next engine instead of stopping ----
+# (this was the actual cause of "max results 200" runs coming back with under 10 rows: the old code returned
+# the first engine's hits no matter how few, even when far more were asked for and other engines had more to give.)
+for k in ("BRAVE_API_KEY", "GOOGLE_CSE_KEY", "GOOGLE_CSE_CX"):
+    os.environ.pop(k, None)
+
+class FakeDDGS:
+    calls = []
+    def __enter__(self):
+        return self
+    def __exit__(self, *a):
+        return False
+    def text(self, query, region, max_results, backend):
+        FakeDDGS.calls.append((backend, max_results))
+        return {
+            "duckduckgo": [{"href": "https://griet.ac.in/", "title": "GRIET", "body": ""}],
+            "yahoo": [{"href": "https://griet.ac.in/", "title": "GRIET", "body": ""},     # same site again: deduped
+                      {"href": "https://cbit.ac.in/", "title": "CBIT", "body": ""}],
+            "brave": [],  # a real engine with nothing for this query
+            "google": [{"href": f"https://college{i}.ac.in/", "title": f"College {i}", "body": ""} for i in range(5)],
+        }.get(backend, [])
+search_mod.DDGS = FakeDDGS
+FakeDDGS.calls = []
+hits = search_mod.web_search("engineering colleges in Bachupally", "in-en", 20, print)
+ok("results from every free engine are merged, not just the first one that answered anything",
+   {h["href"] for h in hits} == {"https://griet.ac.in/", "https://cbit.ac.in/"} | {f"https://college{i}.ac.in/" for i in range(5)},
+   str(hits))
+ok("the same URL from a second engine is deduplicated", len(hits) == 7, str(hits))
+ok("every free engine is tried since none alone reached max_results",
+   {b for b, _ in FakeDDGS.calls} == set(search_mod.FREE_ENGINES), str(FakeDDGS.calls))
+
+FakeDDGS.calls = []
+hits = search_mod.web_search("engineering colleges in Bachupally", "in-en", 1, print)
+ok("once max_results is reached, later engines are skipped rather than queried for nothing",
+   len(hits) == 1 and len(FakeDDGS.calls) == 1, str(FakeDDGS.calls))
+import ddgs as ddgs_mod
+search_mod.DDGS = ddgs_mod.DDGS
+
 # ---- the discovery pacing can be tuned per deployment without a code change ------------------------------------
 os.environ["DISCOVER_MAX_PER_RUN"], os.environ["DISCOVER_GAP_SECONDS"], os.environ["DISCOVER_RETRY_WAIT"] = "7", "1.5", "9"
 import importlib

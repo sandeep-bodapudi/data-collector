@@ -477,13 +477,15 @@ async function viewHome() {
 }
 
 /* ================================================================ NEW RUN */
+// "title" isn't offered here: every row already gets a "Name" column (the site's own name, read off the page -
+// see extract.clean_name / _site_name), which is what people actually want instead of a raw <title> tag.
 const FIELD_INFO = {
-  title: ["tag", "Page title / name"], emails: ["mail", "Email addresses"], phones: ["phone", "Phone & mobile numbers"],
+  emails: ["mail", "Email addresses"], phones: ["phone", "Phone & mobile numbers"],
   address: ["pin", "Postal address"], description: ["text", "Short description of the site"],
   social: ["link", "Facebook, Instagram, LinkedIn links"], contact_page: ["contact", "Link to the Contact page"],
   text_snippet: ["text", "First 500 characters of the page"],
 };
-const DEFAULT_FIELDS = ["title", "emails", "phones", "address"];
+const DEFAULT_FIELDS = ["emails", "phones", "address"];
 const PLATFORMS = [["web", "Websites", "globe"], ["linkedin.com", "LinkedIn", "link"], ["facebook.com", "Facebook", "link"], ["instagram.com", "Instagram", "link"], ["twitter.com", "X / Twitter", "link"]];
 const CAT_GROUPS = [
   ["Religious", ["Hindu temples", "Churches", "Mosques", "Gurudwaras", "Buddhist / Jain temples", "All places of worship"]],

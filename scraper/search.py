@@ -79,19 +79,37 @@ def web_search(query: str, region: str, max_results: int, say, engines=None) -> 
         except requests.RequestException as e:
             say(f"  Google search unavailable ({e}); trying free engines")
 
-    failed = []
+    # Any one free engine often returns far fewer than max_results for a specific query (sometimes under 10), even
+    # when it isn't blocked at all - it simply doesn't have more to give for that query. Stopping at the first
+    # engine that returned *anything* (the old behaviour) is why a "200 results" run could come back with 9 rows.
+    # So: keep querying further engines and merge their results (by URL) until max_results is reached or every
+    # engine has been tried.
+    merged, seen_href, failed, used = [], set(), [], []
     with DDGS() as ddgs:
         for engine in (engines or FREE_ENGINES):
+            remaining = max_results - len(merged)
+            if remaining <= 0:
+                break
             try:
-                hits = ddgs.text(query, region=region, max_results=max_results, backend=engine) or []
+                hits = ddgs.text(query, region=region, max_results=remaining, backend=engine) or []
             except Exception as e:  # each engine fails in its own way (blocked, rate limited, no results)
                 failed.append(f"{engine}: no results" if "no results" in str(e).lower() else f"{engine}: {str(e)[:60]}")
                 continue
-            if hits:
-                if failed:
-                    say(f"  used {engine} (no results from: {', '.join(f.split(':')[0] for f in failed)})")
-                return hits
-            failed.append(f"{engine}: no results")
+            new = 0
+            for h in hits:
+                href = (h.get("href") or "").rstrip("/").lower()
+                if href and href not in seen_href:
+                    seen_href.add(href)
+                    merged.append(h)
+                    new += 1
+            if new:
+                used.append(f"{engine} ({new})")
+            else:
+                failed.append(f"{engine}: no results")
+    if merged:
+        if failed:
+            say(f"  used {', '.join(used)} (nothing more from: {', '.join(f.split(':')[0] for f in failed)})")
+        return merged
     say("  all search options refused: " + "; ".join(failed))
     if all(not f.endswith("no results") for f in failed):
         raise SearchBlocked("The search engines refused the request. Try again later, or ask your admin to add a "
