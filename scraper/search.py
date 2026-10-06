@@ -12,12 +12,18 @@
    which engine actually answered.
 """
 import os
+import time
 
 import requests
 from ddgs import DDGS
 
 BRAVE_URL = "https://api.search.brave.com/res/v1/web/search"
 GOOGLE_CSE_URL = "https://www.googleapis.com/customsearch/v1"
+# A short pause between trying successive free engines for the SAME query. Querying one engine right after another
+# with no gap at all, on a cloud server's shared IP, is the same kind of rapid-fire request pattern that makes a
+# single engine start refusing (see scraper/jobs.py's _current_gap/SEARCH_GAP, measured for *between* searches);
+# trying every free engine back-to-back within one search is the same risk, just compressed into a few seconds.
+FREE_ENGINE_GAP = float(os.environ.get("FREE_ENGINE_GAP_SECONDS", "1.5"))
 FREE_ENGINES = ["duckduckgo", "yahoo", "brave", "google", "mojeek", "startpage"]
 
 
@@ -86,10 +92,12 @@ def web_search(query: str, region: str, max_results: int, say, engines=None) -> 
     # engine has been tried.
     merged, seen_href, failed, used = [], set(), [], []
     with DDGS() as ddgs:
-        for engine in (engines or FREE_ENGINES):
+        for i, engine in enumerate(engines or FREE_ENGINES):
             remaining = max_results - len(merged)
             if remaining <= 0:
                 break
+            if i:  # no pause before the very first engine - only between successive ones
+                time.sleep(FREE_ENGINE_GAP)
             try:
                 hits = ddgs.text(query, region=region, max_results=remaining, backend=engine) or []
             except Exception as e:  # each engine fails in its own way (blocked, rate limited, no results)
@@ -110,6 +118,15 @@ def web_search(query: str, region: str, max_results: int, say, engines=None) -> 
         if failed:
             say(f"  used {', '.join(used)} (nothing more from: {', '.join(f.split(':')[0] for f in failed)})")
         return merged
+    # Every free engine came back with nothing. Two very different situations produce the exact same log lines
+    # here: a genuinely obscure query (no engine anywhere has anything for it) and this IP being rate-limited (an
+    # engine returns "no results" when it's actually refusing, same as a real empty answer) - so don't claim
+    # either one confidently; say what was actually observed.
+    if all(f.endswith("no results") for f in failed):
+        say("  no results from any free search engine for this search (this can mean there's genuinely nothing "
+            "to find, or that this server's searches are being rate-limited right now - a free Brave or Google "
+            "search key removes the second possibility entirely; see the README)")
+        return []
     say("  all search options refused: " + "; ".join(failed))
     if all(not f.endswith("no results") for f in failed):
         raise SearchBlocked("The search engines refused the request. Try again later, or ask your admin to add a "

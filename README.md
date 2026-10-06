@@ -104,6 +104,15 @@ For broad coverage ("100+ websites"), **New run → Search the web** has a **Gen
 
 With no search key, one free engine alone often returns well under the number of results you asked for on a specific query, even when it isn't blocked at all — it just doesn't have more to give. The app merges results from every free engine (DuckDuckGo, Yahoo, Brave, Google, Mojeek, Startpage) for each search instead of stopping at the first one that answers, so "Websites per search" is a real target, not just an upper limit on one engine's small reply. A run can still end up with fewer rows than requested when the area genuinely doesn't have that many matching, non-directory sites — that's the real number, not a bug.
 
+**Search queries that are too small an area usually get nothing — and that's expected, not broken.** A generic web search engine doesn't have a database of colleges by micro-neighbourhood: it matches a query like "engineering colleges in Tarnaka" against whatever's actually written on the web, and if nothing on the web happens to describe a college as being "in Tarnaka" specifically, it has nothing to return — even though real colleges exist nearby under a different, more commonly-used area name. The run log now says exactly why each search kept nothing:
+- *"X unrelated skipped"* — the engine answered, but with pages that don't actually mention anything distinctive from the query (a sign it's padding a weak answer rather than admitting it has nothing — see above).
+- *"X already seen skipped"* — the same pages already showed up for an earlier, different-sounding search in this run; several free engines fall back to the same generic, city-wide result set when a query is too narrow for them to tell apart from the last one.
+- *"no results from any free search engine..."* — nobody had anything at all for that exact wording.
+
+What works better than one query per small neighbourhood: search at the city/metro level (`engineering colleges in Hyderabad, India`) and let a higher "Websites per search" surface more of them, or use **Places** mode instead — its map query inherently covers every neighbourhood inside whatever area you give it in one pass, rather than needing a separate, narrow search per suburb.
+
+**A repeated pattern of only one or two free engines answering while the rest say "no results" for every search** is usually this server's shared IP being rate-limited, not a real absence of results (a search for "engineering colleges in Hyderabad, India" getting zero from all six engines would be very unusual otherwise — Hyderabad is enormous). A free `BRAVE_API_KEY` or `GOOGLE_CSE_KEY`/`GOOGLE_CSE_CX` (see above) removes this uncertainty entirely, since those are official APIs with their own quota rather than being guessed at by IP.
+
 Throughput is governed by the same measured search-engine pacing as Places (see the table above), shared by both modes through `_current_gap()` in [scraper/jobs.py](scraper/jobs.py):
 
 | Setup | Pace between searches | Why |

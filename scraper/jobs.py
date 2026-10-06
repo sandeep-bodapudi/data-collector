@@ -178,23 +178,27 @@ def _search(job: Job) -> list[dict]:
             job.problems.append(str(e))
             hits = []
         signal = _signal_words(q)
-        new, off_topic = 0, 0
+        new, off_topic, directory, dup = 0, 0, 0, 0
         for h in hits:
             url = h.get("href", "")
-            key = url.rstrip("/").lower()
-            if spec.get("one_per_site"):
-                key = domain_of(url)
-            if not url or key in seen:
+            if not url:
+                continue
+            key = domain_of(url) if spec.get("one_per_site") else url.rstrip("/").lower()
+            if key in seen:
+                dup += 1  # this exact page/site already showed up for an earlier search in this same run
                 continue
             seen.add(key)
             if "site:" not in q and not discover._is_official_candidate(url):
-                continue  # a directory, social or map page lists other places; it is not one itself
+                directory += 1  # a directory, social or map page lists other places; it is not one itself
+                continue
             if not _on_topic(h, url, signal):
                 off_topic += 1
                 continue
             results.append({"query": q, "title": h.get("title", ""), "url": url, "snippet": h.get("body", "")})
             new += 1
-        job.say(f"  {new} new results" + (f" ({off_topic} unrelated result{'s' if off_topic != 1 else ''} skipped)" if off_topic else ""))
+        skipped = [f"{n} {label}" for n, label in ((off_topic, "unrelated"), (directory, "directory/listing"), (dup, "already seen"))
+                   if n]
+        job.say(f"  {new} new result{'s' if new != 1 else ''}" + (f" ({', '.join(skipped)} skipped)" if skipped else ""))
         if q != expanded_queries[-1]:
             time.sleep(_current_gap())  # measured-safe pacing; shorter automatically once an official search key is set
     return results

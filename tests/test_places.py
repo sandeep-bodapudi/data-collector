@@ -313,6 +313,7 @@ ok("genuinely useful tags are kept, in plain English, technical ones are not",
 
 # ---- the free search engine list is real (the "bing" bug) -----------------------------------------------------
 import scraper.search as search_mod  # noqa: E402
+search_mod.time.sleep = lambda s: None
 ok("'bing' is not in the free engine list (ddgs has no Bing backend; passing that name silently runs every "
    "engine at once instead of just Bing, and the log then claims the wrong engine answered)",
    "bing" not in search_mod.FREE_ENGINES and "bing" not in discover.OTHER_ENGINES)
@@ -520,7 +521,7 @@ j2.spec = {"queries": ["engineering colleges in Bachupally, Hyderabad"], "platfo
 rows = jobs._search(j2)
 ok("end to end: only the real college survives, the unrelated pages the engine padded its answer with are dropped",
    [r["url"] for r in rows] == ["https://griet.ac.in/"], str(rows))
-ok("the run log says how many unrelated results were skipped", any("unrelated result" in m for m in j2.log), j2.log)
+ok("the run log says how many unrelated results were skipped", any("unrelated" in m and "skipped" in m for m in j2.log), j2.log)
 jobs.web_search = real_jobs_web_search
 
 
