@@ -60,10 +60,14 @@ class Job:
         self.log = self.log[-300:]
 
     def stats(self) -> dict:
-        email_col, phone_col = ("Email", "Phone") if self.spec["mode"] == "places" else ("Emails", "Phone Numbers")
+        # Column-name detection rather than a fixed mode -> columns mapping, so this also works for "enrich" mode,
+        # whose columns are whatever the sheet being filled in already had (Places-style singular Email/Phone,
+        # web-search-style plural Emails/Phone Numbers, or none at all).
+        email_col = next((c for c in ("Emails", "Email") if c in self.columns), None)
+        phone_col = next((c for c in ("Phone Numbers", "Phone") if c in self.columns), None)
         return {
-            "with_email": sum(1 for r in self.rows if r.get(email_col)),
-            "with_phone": sum(1 for r in self.rows if r.get(phone_col)),
+            "with_email": sum(1 for r in self.rows if email_col and r.get(email_col)),
+            "with_phone": sum(1 for r in self.rows if phone_col and r.get(phone_col)),
         }
 
     def to_dict(self, preview_rows=25):
@@ -108,6 +112,8 @@ def _run(job: Job):
     try:
         if job.spec["mode"] == "places":
             _run_places(job)
+        elif job.spec["mode"] == "enrich":
+            _run_enrich(job)
         else:
             _run_web(job)
         final = "cancelled" if job.cancelled.is_set() else "done"
@@ -436,6 +442,52 @@ def _run_web(job: Job):
             if _keep(spec, row):
                 job.rows.append(row)
         job.done = job.total
+
+
+def _run_enrich(job: Job):
+    """"Fill missing details" on an existing sheet: look up a website and contacts only for rows that don't already
+    have one, leave every other row exactly as it was, and give back the whole sheet (filled where possible, still
+    blank where nothing was found) rather than a filtered subset. Capped at MAX_DISCOVER rows per run on purpose,
+    same as Places' website lookup - saving the result and running this again on THAT sheet only has the remaining,
+    still-blank rows left to do (an already-filled row is never looked up again), so a big sheet gets done in a few
+    runs instead of one very long one that free search engines are more likely to start refusing partway through."""
+    spec = job.spec
+    rows, columns = spec["rows"], spec["columns"]
+    job.columns = columns
+    website_col = "Website" if "Website" in columns else None
+    email_col = next((c for c in ("Emails", "Email") if c in columns), None)
+    phone_col = next((c for c in ("Phone Numbers", "Phone") if c in columns), None)
+
+    def has_contact(r):
+        return (email_col and r.get(email_col)) or (phone_col and r.get(phone_col))
+
+    todo = [r for r in rows if r.get("Name") and not has_contact(r)]
+    batch = todo[:MAX_DISCOVER]
+    job.say(f"{len(rows)} rows: {len(rows) - len(todo)} already have contacts, {len(todo)} need a lookup"
+            + (f" - doing the first {len(batch)} this run" if len(todo) > len(batch) else "") + ".")
+
+    if batch:
+        work = [{"Name": r["Name"], "Website": (r.get(website_col, "") if website_col else ""),
+                 "Address": r.get("Address", ""), "_orig": r} for r in batch]
+        fetcher = Fetcher(spec)
+        _enrich_listed_rows(job, fetcher, work, spec)
+        for w in work:
+            orig = w["_orig"]
+            if website_col and w.get("Website"):
+                orig[website_col] = w["Website"]
+            if email_col and w.get("Emails"):
+                orig[email_col] = w["Emails"]
+            if phone_col and w.get("Phone Numbers"):
+                orig[phone_col] = w["Phone Numbers"]
+            if "Address" in columns and not orig.get("Address") and w.get("Address"):
+                orig["Address"] = w["Address"]
+
+    job.rows = rows  # every row, not just the ones looked up this run - nothing gets dropped from the sheet
+    filled = sum(1 for r in batch if has_contact(r))
+    job.say(f"Filled in details for {filled} of {len(batch)} rows looked up this run."
+            + (f" {len(todo) - len(batch)} more still need a lookup - save this sheet and run "
+               "‘Fill missing details’ again to continue with the rest." if len(todo) > len(batch) else ""))
+    job.phase, job.total, job.done = "done", len(rows), len(rows)
 
 
 # ---------------------------------------------------------------- places mode

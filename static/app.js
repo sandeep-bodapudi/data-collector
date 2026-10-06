@@ -827,6 +827,7 @@ async function viewRuns() {
 function runSubtitle(r) {
   const s = r.spec || {};
   if (r.mode === "places") return `Places · ${esc(s.category || "")}${s.locations && s.locations.length ? ` · ${esc(s.locations.slice(0, 2).join(", "))}` : ""}`;
+  if (r.mode === "enrich") return `Fill missing details${s.source_sheet ? ` · ${esc(s.source_sheet)}` : ""}`;
   return `Web search${s.queries && s.queries.length ? ` · ${s.queries.length} search${s.queries.length > 1 ? "es" : ""}` : ""}${s.region ? ` · ${esc(CFG.regions[s.region] || "")}` : ""}`;
 }
 
@@ -867,7 +868,7 @@ async function viewRunDetail(id) {
   });
   const INPUT_LABELS = { queries: "Searches", category: "Category", locations: "Locations", region: "Country", fields: "Details", custom_fields: "AI details",
     platforms: "Search on", max_results: "Max results", require: "Keep only rows with", follow_contact: "Check contact pages", one_per_site: "One row per website",
-    enrich: "Check websites", name_filter: "Name contains", file_name: "Sheet name" };
+    enrich: "Check websites", name_filter: "Name contains", file_name: "Sheet name", source_sheet: "From sheet" };
   const spec = run.spec || {};
   $("#tab-input").innerHTML = `<ul class="summary-list">${Object.entries(spec).filter(([k, val]) => INPUT_LABELS[k] && val !== "" && val !== null && !(Array.isArray(val) && !val.length))
     .map(([k, val]) => `<li><span>${INPUT_LABELS[k]}</span><b>${esc(k === "region" ? CFG.regions[val] || val : Array.isArray(val) ? val.join("; ") : typeof val === "boolean" ? (val ? "Yes" : "No") : val)}</b></li>`).join("")}</ul>`;
@@ -1122,6 +1123,16 @@ function mountGrid(data) {
   return () => clearTimeout(deb);
 }
 
+// Whether "Fill missing details" makes sense for this sheet: it needs a Name to look up by, an Email/Phone-ish
+// column to know what's missing, and at least one row that's actually missing one.
+function sheetNeedsFilling(meta, data) {
+  if (!meta.columns.includes("Name")) return false;
+  const emailCol = ["Emails", "Email"].find((c) => meta.columns.includes(c));
+  const phoneCol = ["Phone Numbers", "Phone"].find((c) => meta.columns.includes(c));
+  if (!emailCol && !phoneCol) return false;
+  return data.rows.some((r) => r.Name && !(emailCol && r[emailCol]) && !(phoneCol && r[phoneCol]));
+}
+
 async function viewSheet(id) {
   const tk = routeToken();
   setCrumbs({ label: "Sheets", href: "#/sheets" }, "Sheet");
@@ -1133,14 +1144,30 @@ async function viewSheet(id) {
   const data = await Store.sheets.data(id);
   if (stale(tk)) return;
   if (!data) return viewNotFound();
+  const canFill = !IS_VIEWER && sheetNeedsFilling(meta, data);
   v.innerHTML = `
     <div class="page-head"><div><h1>${esc(meta.name)}</h1><p>${fmtNum(meta.rows)} rows · ${meta.columns.length} columns · ${SOURCE_LABEL[meta.source] || "Run"} · ${esc(fmtDate(meta.created))} · saved on this device</p></div>
       <div class="actions">${IS_VIEWER ? "" : `<button class="btn" id="rename">${icon("edit")}Rename</button><a class="btn" href="#/merge?ids=${id}">${icon("merge")}Dedupe / merge</a><button class="btn" id="share">${icon("share")}Share</button>`}
+        ${canFill ? `<button class="btn" id="fill-missing">${icon("search")}Fill missing details</button>` : ""}
         <span class="menu-wrap"><button class="btn btn-primary" id="export">${icon("download")}Export</button></span></div></div>
     ${GRID_CARD}`;
   $("#export").onclick = (e) => { e.stopPropagation(); openMenu($("#export"), exportMenu(id)); };
   $("#rename")?.addEventListener("click", () => renameSheet(meta, () => route()));
   $("#share")?.addEventListener("click", () => shareDialog(meta));
+  $("#fill-missing")?.addEventListener("click", async () => {
+    const btn = $("#fill-missing");
+    btn.disabled = true; btn.innerHTML = '<span class="spinner"></span>Starting…';
+    try {
+      const r = await api("/api/jobs", { method: "POST", body: { mode: "enrich", columns: data.columns, rows: data.rows, custom_fields: "" } });
+      await Store.runs.put({ id: r.id, name: meta.name, mode: "enrich", spec: { mode: "enrich", columns: data.columns, source_sheet: meta.name },
+        status: "running", started: nowIso(), rows: 0, with_email: 0, with_phone: 0, duration: 0, error: "", sheet_id: null });
+      Tracker.watch(r.id);
+      location.hash = `#/runs/${r.id}`;
+    } catch (e) {
+      toast(e.message, "err");
+      btn.disabled = false; btn.innerHTML = `${icon("search")}Fill missing details`;
+    }
+  });
   return mountGrid(data);
 }
 

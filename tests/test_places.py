@@ -674,5 +674,60 @@ ok("the internal 'Search Location' helper column never leaks into the sheet", "S
 discover.guess_website, discover.find_website = real_guess, real_find
 jobs.Fetcher = real_fetcher
 
+# ---- "Fill missing details" on an existing sheet: only the rows that need it, capped per run, nothing invented ---
+class FakeFetcher4:
+    def get_html(self, url):
+        if "griet" in url:
+            return "<html><title>GRIET</title><body>info@griet.ac.in 040-23146077</body></html>", "ok"
+        return None, "not found"
+discover.guess_website = lambda fetcher, name, area="", aliases=(): ("https://griet.ac.in/" if "GRIET" in name.upper() else None)
+discover.find_website = lambda name, where, say=None, aliases=(): (None, 2)
+
+def run_enrich(rows, columns, fields=("emails", "phones")):
+    jobs.Fetcher = lambda spec: FakeFetcher4()
+    j = jobs.Job({"rows": rows, "columns": columns, "custom_fields": [], "ai": {}, "fields": list(fields)})
+    jobs._run_enrich(j)
+    jobs.Fetcher = real_fetcher
+    return j
+
+sheet_cols = ["Name", "Website", "Emails", "Phone Numbers"]
+sheet_rows = [{"Name": "GRIET", "Website": "", "Emails": "", "Phone Numbers": ""},
+              {"Name": "Already Has Contact", "Website": "", "Emails": "x@y.com", "Phone Numbers": ""},
+              {"Name": "Nothing Found Institute", "Website": "", "Emails": "", "Phone Numbers": ""}]
+j8 = run_enrich(sheet_rows, sheet_cols)
+griet_row = next(r for r in j8.rows if r["Name"] == "GRIET")
+already_row = next(r for r in j8.rows if r["Name"] == "Already Has Contact")
+nothing_row = next(r for r in j8.rows if r["Name"] == "Nothing Found Institute")
+ok("a blank row that resolves gets its website and contacts filled in",
+   griet_row["Website"] == "https://griet.ac.in/" and griet_row["Emails"] == "info@griet.ac.in", griet_row)
+ok("a row that already has a contact is left completely untouched (never looked up again)",
+   already_row == {"Name": "Already Has Contact", "Website": "", "Emails": "x@y.com", "Phone Numbers": ""}, already_row)
+ok("a row nothing resolves for stays blank - nothing invented", nothing_row["Website"] == "" and nothing_row["Emails"] == "", nothing_row)
+ok("all 3 original rows are kept, not just the ones that got filled in", len(j8.rows) == 3)
+ok("the sheet's own columns are preserved exactly", j8.columns == sheet_cols)
+
+# Places-style singular Email/Phone columns work the same way (column-name detection, not a hardcoded mode check).
+places_cols = ["Name", "Phone", "Email", "Website", "Address"]
+places_rows = [{"Name": "GRIET", "Phone": "", "Email": "", "Website": "", "Address": ""}]
+j9 = run_enrich(places_rows, places_cols)
+ok("Places-style 'Email'/'Phone' columns (singular) are filled the same way as web-search's plural ones",
+   j9.rows[0]["Email"] == "info@griet.ac.in" and "23146077" in j9.rows[0]["Phone"], j9.rows[0])
+
+# The MAX_DISCOVER cap applies here too, so a huge sheet is done in several runs, not one very long one.
+os.environ["DISCOVER_MAX_PER_RUN"] = "1"
+jobs_capped = importlib.reload(jobs)
+many_rows = [{"Name": f"College {i}", "Website": "", "Emails": "", "Phone Numbers": ""} for i in range(5)]
+jobs_capped.Fetcher = lambda spec: FakeFetcher4()
+j10 = jobs_capped.Job({"rows": many_rows, "columns": sheet_cols, "custom_fields": [], "ai": {}, "fields": ["emails", "phones"]})
+jobs_capped._run_enrich(j10)
+ok("MAX_DISCOVER caps how many rows are looked up in one run",
+   any("doing the first 1 this run" in m for m in j10.log), j10.log)
+ok("the run log says to come back and continue",
+   any("4 more still need a lookup" in m and "again to continue" in m for m in j10.log), j10.log)
+ok("all 5 original rows are still in the sheet, capped or not", len(j10.rows) == 5)
+del os.environ["DISCOVER_MAX_PER_RUN"]
+importlib.reload(jobs)  # back to defaults
+discover.guess_website, discover.find_website = real_guess, real_find
+
 print(f"\n{len(failures)} failure(s)" if failures else "\nAll tests passed")
 sys.exit(1 if failures else 0)

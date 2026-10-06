@@ -381,6 +381,21 @@ def create_job():
         spec = {"mode": "places", "category": d["category"], "locations": locations[:30],
                 "name_filter": (d.get("name_filter") or "").strip(),
                 "enrich": bool(d.get("enrich")) or bool(custom), "find_websites": bool(d.get("find_websites", True)), **common}
+    elif mode == "enrich":
+        # "Fill missing details" on an existing sheet - the sheet itself lives only in the person's own browser
+        # (see README "Where data is stored"), so its current rows/columns are sent here as the job's starting
+        # point, not read from anywhere on the server.
+        in_columns, in_rows = d.get("columns"), d.get("rows")
+        if not isinstance(in_columns, list) or not in_columns:
+            return jsonify(error="No columns given."), 400
+        columns = [str(c)[:200] for c in in_columns][:300]
+        if "Name" not in columns:
+            return jsonify(error="This sheet has no Name column, so there's nothing to look up by."), 400
+        if not isinstance(in_rows, list) or not in_rows:
+            return jsonify(error="No rows to fill in - the sheet looks empty."), 400
+        rows = [{c: ("" if r.get(c) is None else str(r.get(c))[:2000]) for c in columns}
+                for r in in_rows if isinstance(r, dict)][:2000]
+        spec = {"mode": "enrich", "rows": rows, "columns": columns, **common}
     else:
         # 300 is generous on purpose - for breadth across "100-200 websites" the limit that actually matters is how
         # fast search engines can be queried without being refused (see scraper/search.py), not this count.
