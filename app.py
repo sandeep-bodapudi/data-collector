@@ -359,7 +359,7 @@ def create_job():
     if custom and not ai["key"] and ai["provider"] != "custom":
         return jsonify(error="AI details need your own AI key. Add it in Settings → AI provider."), 400
     try:
-        max_results = max(1, min(int(d.get("max_results") or 30), 500 if mode == "places" else 200))
+        max_results = max(1, min(int(d.get("max_results") or 30), 500))
     except ValueError:
         return jsonify(error="Max results must be a number."), 400
 

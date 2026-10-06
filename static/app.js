@@ -560,7 +560,7 @@ async function viewNewRun(mode) {
       <div class="section-body">
         <div class="grid grid-2">
           <div class="field"><label class="label">Websites per search</label>
-            <div class="range-row"><input type="range" id="max_results" min="5" max="200" step="5" value="30" aria-label="Websites per search"><output id="max_out">30</output></div>
+            <div class="range-row"><input type="range" id="max_results" min="5" max="500" step="5" value="30" aria-label="Websites per search"><output id="max_out">30</output></div>
             <div class="hint">More websites means more rows, but the run takes longer.</div></div>
           <div class="field"><label class="label" for="region">Country</label>
             <select class="input" id="region">${Object.entries(CFG.regions).map(([k, val]) => `<option value="${k}" ${k === "in-en" ? "selected" : ""}>${esc(val)}</option>`).join("")}</select>
