@@ -4,6 +4,7 @@ Nothing is stored on the server. A finished job's rows stay in memory only until
 collected them (it saves them in its own IndexedDB) or RESULT_TTL passes.
 """
 import os
+import re
 import threading
 import time
 import uuid
@@ -124,6 +125,36 @@ def _run(job: Job):
 
 # ---------------------------------------------------------------- web search mode
 
+# Words too generic to tell a real match from an unrelated one - every query already contains most of these,
+# so they can't be used to check whether a *result* actually matches what was asked for.
+_GENERIC_QUERY_WORDS = {
+    "engineering", "college", "colleges", "institute", "institutes", "institution", "institutions", "university",
+    "universities", "school", "schools", "contact", "email", "emails", "phone", "phones", "mobile", "number",
+    "numbers", "list", "lists", "website", "websites", "official", "site", "sites", "course", "courses",
+    "admission", "admissions", "details", "information", "near", "with", "and", "for", "the", "best", "top",
+}
+
+
+def _signal_words(query: str) -> list[str]:
+    """The distinctive words of a search query (mainly place names) - what a genuinely matching result ought to
+    mention somewhere, even if only in the snippet. Strips a trailing "site:..." operator first."""
+    base = re.sub(r"\s+site:\S+$", "", query)
+    return [w for w in re.findall(r"[a-z0-9]+", base.lower()) if len(w) >= 4 and w not in _GENERIC_QUERY_WORDS]
+
+
+def _on_topic(h: dict, url: str, signal: list[str]) -> bool:
+    """A free search engine with nothing good to offer sometimes answers with loosely-related, generic pages
+    instead of admitting it found nothing - e.g. asking for "engineering colleges in Bachupally, Hyderabad" can
+    come back with Britannica's definition of engineering, or a US university's "What Do Engineers Do?" page.
+    Neither mentions the place at all, which a real match almost always does (the search engine itself tends to
+    bold/quote the place name in the snippet when a page is genuinely about it). So: if the query named anything
+    distinctive, require it to show up somewhere in the result; if it didn't, there's nothing to check."""
+    if not signal:
+        return True
+    text = f"{h.get('title', '')} {h.get('body', '')} {url}".lower()
+    return any(s in text for s in signal)
+
+
 def _search(job: Job) -> list[dict]:
     spec = job.spec
     platforms = spec.get("platforms", ["web"])
@@ -134,7 +165,7 @@ def _search(job: Job) -> list[dict]:
         for p in platforms:
             if p != "web":
                 expanded_queries.append(f"{q} site:{p}")
-                
+
     results, seen = [], set()
     for q in expanded_queries:
         if job.cancelled.is_set():
@@ -146,7 +177,8 @@ def _search(job: Job) -> list[dict]:
         except SearchBlocked as e:
             job.problems.append(str(e))
             hits = []
-        new = 0
+        signal = _signal_words(q)
+        new, off_topic = 0, 0
         for h in hits:
             url = h.get("href", "")
             key = url.rstrip("/").lower()
@@ -157,9 +189,12 @@ def _search(job: Job) -> list[dict]:
             seen.add(key)
             if "site:" not in q and not discover._is_official_candidate(url):
                 continue  # a directory, social or map page lists other places; it is not one itself
+            if not _on_topic(h, url, signal):
+                off_topic += 1
+                continue
             results.append({"query": q, "title": h.get("title", ""), "url": url, "snippet": h.get("body", "")})
             new += 1
-        job.say(f"  {new} new results")
+        job.say(f"  {new} new results" + (f" ({off_topic} unrelated result{'s' if off_topic != 1 else ''} skipped)" if off_topic else ""))
         if q != expanded_queries[-1]:
             time.sleep(_current_gap())  # measured-safe pacing; shorter automatically once an official search key is set
     return results

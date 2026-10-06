@@ -456,6 +456,48 @@ ok("engineering list keeps colleges without 'engineering' in the name and drops 
 ok("map short names become aliases for the website lookup", got[1]["_aliases"] == ["JCE"])
 ok("the sheet has only real data columns", places.OUTPUT_COLUMNS == ["Name", "Phone", "Email", "Website", "Address", "Google Maps Link"])
 
+# ---- "Search the web" drops off-topic results a struggling free engine pads its answer with -------------------
+# Real failure: asking for "engineering colleges in Bachupally, Hyderabad" got back Britannica's definition of
+# "engineering", Oregon State University, National University (US) and similar - none of them about a real
+# college in the area that was actually asked for, let alone India.
+sig = jobs._signal_words("engineering colleges in Bachupally, Hyderabad")
+ok("generic words from the query (engineering, colleges, in) are not signal words", sig == ["bachupally", "hyderabad"], sig)
+ok("a 'site:' operator is not mistaken for a signal word", jobs._signal_words("IT companies in Hyderabad site:linkedin.com") == ["companies", "hyderabad"])
+
+off_topic_hits = [
+    {"title": "Engineering", "body": "", "href": "https://www.britannica.com/technology/engineering"},
+    {"title": "Engineering.com", "body": "", "href": "https://www.engineering.com/"},
+    {"title": "What Do Engineers Do?", "body": "", "href": "https://www.snhu.edu/about-us/newsroom/stem/what-do-engineers-do"},
+    {"title": "Oregon State University College of Engineering", "body": "askengineering@oregonstate.edu",
+     "href": "https://engineering.oregonstate.edu/"},
+    {"title": "The Editorial Advisory Board", "body": "", "href": "https://www.nu.edu/"},
+]
+ok("none of the real unrelated results the engine actually returned pass the relevance check",
+   not any(jobs._on_topic(h, "https://example.edu/", sig) for h in off_topic_hits))
+ok("a real match (place name in the snippet) passes",
+   jobs._on_topic({"title": "GRIET - Gokaraju Rangaraju Institute of Engineering and Technology",
+                   "body": "Located in Bachupally, Hyderabad"}, "https://griet.ac.in/", sig))
+ok("a query with nothing distinctive in it (no signal words) filters nothing",
+   jobs._signal_words("list of engineering colleges") == []
+   and jobs._on_topic({"title": "anything at all", "body": ""}, "https://example.com/", jobs._signal_words("list of engineering colleges")))
+
+class FakeJob2:
+    def __init__(self):
+        self.cancelled = type("E", (), {"is_set": staticmethod(lambda: False)})
+        self.log, self.phase, self.activity, self.problems = [], "", "", []
+    def say(self, m): self.log.append(m)
+real_jobs_web_search = jobs.web_search
+jobs.web_search = lambda q, region, n, say: (off_topic_hits + [
+    {"href": "https://griet.ac.in/", "title": "GRIET, Bachupally, Hyderabad", "body": "Gokaraju Rangaraju Institute"}])
+j2 = FakeJob2()
+j2.spec = {"queries": ["engineering colleges in Bachupally, Hyderabad"], "platforms": ["web"], "max_results": 50,
+           "one_per_site": False, "region": "in-en"}
+rows = jobs._search(j2)
+ok("end to end: only the real college survives, the unrelated pages the engine padded its answer with are dropped",
+   [r["url"] for r in rows] == ["https://griet.ac.in/"], str(rows))
+ok("the run log says how many unrelated results were skipped", any("unrelated result" in m for m in j2.log), j2.log)
+jobs.web_search = real_jobs_web_search
+
 
 print(f"\n{len(failures)} failure(s)" if failures else "\nAll tests passed")
 sys.exit(1 if failures else 0)
