@@ -346,9 +346,12 @@ document.addEventListener("click", (e) => {  // tap outside the mobile menu to c
 });
 
 function setCrumbs(...parts) {
-  $("#crumbs").innerHTML = parts.map((p, i) => i === parts.length - 1 ? `<b>${esc(p.label || p)}</b>`
-    : `<a href="${p.href}">${esc(p.label)}</a><span>/</span>`).join("");
-  document.title = `${parts[parts.length - 1].label || parts[parts.length - 1]} · OneBridge Data Collector`;
+  // A part can be a plain string (a leaf title) or {label, href}; a saved run/sheet with a missing name (e.g. an
+  // older run saved before a bug fix) falls back to "Untitled" here instead of crashing the whole page on it.
+  const label = (p) => (p && p.label) || p || "Untitled";
+  $("#crumbs").innerHTML = parts.map((p, i) => i === parts.length - 1 ? `<b>${esc(label(p))}</b>`
+    : `<a href="${p.href}">${esc(label(p))}</a><span>/</span>`).join("");
+  document.title = `${label(parts[parts.length - 1])} · OneBridge Data Collector`;
 }
 
 async function refreshNavCounts() {
@@ -465,7 +468,7 @@ async function viewHome() {
   lists.innerHTML = `<div class="grid grid-2">
     <div class="card"><div class="card-head"><h3>Recent runs</h3><a href="#/runs" class="small">View all</a></div>
       <div class="table-wrap">${runs.length ? `<table class="tbl compact"><tbody>${runs.slice(0, 6).map((r) => `
-        <tr class="clickable" data-href="#/runs/${r.id}"><td><div class="name-cell"><div><b>${esc(r.name)}</b><small>${r.mode === "places" ? "Places" : "Web search"} · ${timeAgo(r.started)}</small></div></div></td>
+        <tr class="clickable" data-href="#/runs/${r.id}"><td><div class="name-cell"><div><b>${esc(r.name || "Untitled")}</b><small>${r.mode === "places" ? "Places" : "Web search"} · ${timeAgo(r.started)}</small></div></div></td>
         <td>${badge(r.status)}</td><td class="num">${fmtNum(r.rows)} rows</td></tr>`).join("")}</tbody></table>`
         : emptyState("runs", "No runs yet", "Start a run to collect data.")}</div></div>
     <div class="card"><div class="card-head"><h3>Recent sheets</h3><a href="#/sheets" class="small">View all</a></div>
@@ -738,7 +741,8 @@ async function viewNewRun(mode) {
       const lines = (t) => String(t || "").split("\n").map((x) => x.trim()).filter(Boolean);
       const spec = { ...body, queries: lines(body.queries), locations: lines(body.locations),
         custom_fields: String(body.custom_fields || "").split(",").map((x) => x.trim()).filter(Boolean) };
-      const name = body.file_name || (mode === "places" ? `${body.category} in ${spec.locations.slice(0, 2).join(", ")}` : spec.queries[0]);
+      const name = body.file_name || (mode === "places" ? `${body.category} in ${spec.locations.slice(0, 2).join(", ")}`
+        : spec.queries[0] || CFG.known_seeds[body.seed] || "Web search");
       await Store.runs.put({ id: r.id, name, mode, spec, status: "running", started: nowIso(), rows: 0, with_email: 0, with_phone: 0,
         duration: 0, error: "", sheet_id: null });
       Tracker.watch(r.id);
@@ -781,12 +785,12 @@ async function viewRuns() {
   const load = async () => { const r = await Store.runs.list(); if (stale(tk)) return; runs = r.map(effectiveRun); render(); };
   const render = () => {
     const list = runs.filter((r) => (state.status === "all" || r.status === state.status || (state.status === "running" && r.status === "queued"))
-      && (!state.q || r.name.toLowerCase().includes(state.q)));
+      && (!state.q || (r.name || "").toLowerCase().includes(state.q)));
     $("#list").innerHTML = !runs.length ? emptyState("runs", "No runs yet", "Start a run to collect data from the web.", IS_VIEWER ? "" : `<a class="btn btn-primary" href="#/new/web">${icon("plus")}New run</a>`)
       : !list.length ? emptyState("search", "No matching runs", "Try a different search or filter.")
       : `<table class="tbl"><thead><tr><th>Run</th><th>Status</th><th>Started</th><th class="num">Duration</th><th class="num">Rows</th><th></th></tr></thead><tbody>
         ${list.map((r) => `<tr class="clickable" data-id="${r.id}">
-          <td><div class="name-cell"><div class="kpi-ico">${icon(r.mode === "places" ? "pin" : "globe")}</div><div><b>${esc(r.name)}</b><small>${runSubtitle(r)}</small></div></div></td>
+          <td><div class="name-cell"><div class="kpi-ico">${icon(r.mode === "places" ? "pin" : "globe")}</div><div><b>${esc(r.name || "Untitled")}</b><small>${runSubtitle(r)}</small></div></div></td>
           <td>${badge(r.status)}</td>
           <td class="nowrap" title="${esc(fmtDate(r.started))}">${timeAgo(r.started)}</td>
           <td class="num">${fmtDuration(r.duration)}</td><td class="num">${fmtNum(r.rows)}</td>
@@ -837,7 +841,7 @@ async function viewRunDetail(id) {
   setCrumbs({ label: "Runs", href: "#/runs" }, run.name);
   const isPlaces = run.mode === "places";
   v.innerHTML = `
-    <div class="page-head"><div><div class="row-flex"><h1>${esc(run.name)}</h1><span id="badge"></span></div>
+    <div class="page-head"><div><div class="row-flex"><h1>${esc(run.name || "Untitled")}</h1><span id="badge"></span></div>
       <p>${runSubtitle(run)} · started ${esc(fmtDate(run.started))}</p></div>
       <div class="actions" id="run-actions"></div></div>
     <div class="card"><div class="card-body">
