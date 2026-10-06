@@ -3,6 +3,8 @@ import time
 
 import requests
 
+from .extract import normalize_phone
+
 
 NOMINATIM = "https://nominatim.openstreetmap.org/search"
 PHOTON = "https://photon.komoot.io/api/"
@@ -187,6 +189,27 @@ def _addr(tags: dict) -> str:
     return ", ".join(p for p in parts if p)
 
 
+# Map data carries dozens of internal/technical tags per place (building=yes, type=multipolygon, wikidata=Q123,
+# created_by=Merkaartor...). None of that means anything to someone reading the sheet. Only these are worth keeping,
+# and only under a plain-English label - everything else is dropped rather than dumped in raw "key=value" form.
+DETAIL_TAGS = {
+    "operator": "Run by", "operator:type": "Type of operator", "short_name": "Short name", "old_name": "Formerly known as",
+    "alt_name": "Also known as", "description": "Description", "note": "Note", "brand": "Chain/brand",
+    "affiliation": "Affiliated with", "denomination": "Denomination", "religion": "Religion", "cuisine": "Cuisine",
+    "healthcare": "Healthcare type", "healthcare:speciality": "Specialities", "beds": "Beds", "capacity": "Capacity",
+    "isced:level": "Education level", "wikipedia": "Wikipedia",
+}
+
+
+def _other_details(tags: dict) -> str:
+    bits = []
+    for key, label in DETAIL_TAGS.items():
+        v = tags.get(key)
+        if v:
+            bits.append(f"{label}: {v.split(':', 1)[-1] if key == 'wikipedia' else v}")
+    return "; ".join(bits)[:500]
+
+
 def search_places(category: str, location: str, name_filter: str = "", limit: int = 500, notify=None, info=None) -> list[dict]:
     geo = geocode(location)
     if info:
@@ -206,10 +229,6 @@ def search_places(category: str, location: str, name_filter: str = "", limit: in
         if key in seen:
             continue
         seen.add(key)
-        used = {"name", "phone", "contact:phone", "email", "contact:email", "website", "contact:website",
-                "opening_hours", "addr:city", "addr:state", "addr:postcode", "addr:full", "addr:housenumber",
-                "addr:street", "addr:suburb", "addr:place"}
-        other = "; ".join(f"{k}={v}" for k, v in tags.items() if k not in used and not k.startswith("name:"))
         rows.append({
             "Name": tags.get("name", ""),
             "Category": category,
@@ -217,14 +236,14 @@ def search_places(category: str, location: str, name_filter: str = "", limit: in
             "City": tags.get("addr:city", ""),
             "State": tags.get("addr:state", ""),
             "Postcode": tags.get("addr:postcode", ""),
-            "Phone": tags.get("phone") or tags.get("contact:phone", ""),
+            "Phone": normalize_phone(tags.get("phone") or tags.get("contact:phone", "")) if tags.get("phone") or tags.get("contact:phone") else "",
             "Email": tags.get("email") or tags.get("contact:email", ""),
             "Website": tags.get("website") or tags.get("contact:website", ""),
             "Opening Hours": tags.get("opening_hours", ""),
             "Latitude": lat,
             "Longitude": lon,
             "Google Maps Link": f"https://www.google.com/maps?q={lat},{lon}" if lat else "",
-            "Other Details": other[:500],
+            "Other Details": _other_details(tags),
         })
     if not rows and info:
         info("  Nothing in the map data for this category here. Try the area name on its own, a bigger nearby area, "

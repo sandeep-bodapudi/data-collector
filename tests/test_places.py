@@ -1,5 +1,6 @@
 """Place search tests. Run:  python tests/test_places.py   (no network needed; exit code 1 if anything fails)."""
 import os
+import re
 import sys
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -117,7 +118,8 @@ merged_rows, n = discover.merge_duplicates(data)
 ok("six listings of three institutions become three", len(merged_rows) == 3 and n == 3, str([r["Name"] for r in merged_rows]))
 vnr = next(r for r in merged_rows if "VNR" in r["Name"].upper())
 ok("the merged row keeps the longest name and the website only the duplicate had", vnr["Name"].startswith("VNR Vignana") and vnr["Website"] == "https://vnrvjiet.ac.in/")
-ok("the other name is noted", "also mapped as: vnr vjiet college" in vnr["Other Details"])
+ok("the other name is noted", "Also mapped as: vnr vjiet college" in vnr["Other Details"])
+ok("no trailing separator when there's nothing else to add", not vnr["Other Details"].rstrip().endswith(";"))
 branches = [row("Sri Chaitanya College", 17.52, 78.36, "https://sri.example.com/"), row("Sri Chaitanya College", 17.60, 78.45, "https://sri.example.com/")]
 ok("branches of a chain far apart stay separate", len(discover.merge_duplicates(branches)[0]) == 2)
 near_other = [row("GRIET College", 17.5202, 78.3660), row("VNR VJIET College", 17.5203, 78.3661)]
@@ -208,6 +210,110 @@ ok("compressed garbage is reported, not treated as an empty page", f.get_html("h
 f.session.get = lambda *a, **k: Resp(b"<html><title>Hi</title><body>info@x.com</body></html>")
 html, note = f.get_html("https://x.example/")
 ok("a normal page still reads fine", note == "ok" and "info@x.com" in html)
+
+# ---- phone number formatting (for a customer-facing, scannable column) ---------------------------------------
+from scraper.extract import normalize_phone  # noqa: E402
+
+PHONE_CASES = [
+    ("9848012345", "+91 98480 12345"),            # bare mobile
+    ("+91 98480 12345", "+91 98480 12345"),        # already formatted - unchanged
+    ("+919848012345", "+91 98480 12345"),          # no spaces
+    ("09848012345", "+91 98480 12345"),            # leading trunk 0
+    ("98480-12345", "+91 98480 12345"),            # dashed
+    ("040-23456789", "040-23456789"),              # landline with STD code: left as scraped, not guessed at
+    ("+91-40-23456789", "+91-40-23456789"),        # landline with country code: left as scraped
+    ("1800 222 333", "1800-222-333"),              # toll-free, 7 digits after 1800
+    ("1800222333", "1800-222-333"),
+    ("18002093456", "1800-209-3456"),              # toll-free, 8 digits after 1800 (wider block)
+    ("+1 415 555 0132", "+1 415 555 0132"),        # foreign number: left as scraped
+]
+for raw, expect in PHONE_CASES:
+    ok(f"phone format: {raw!r} -> {expect!r}", normalize_phone(raw) == expect, normalize_phone(raw))
+ok("two spellings of the same mobile normalize identically",
+   normalize_phone("9848012345") == normalize_phone("+91 98480 12345") == normalize_phone("98480-12345"))
+ok("normalizing never loses digits for an unrecognised shape",
+   re.sub(r"\D", "", normalize_phone("+1 415 555 0132")) == "14155550132")
+
+# a page with both spellings of one mobile ends up with just one phone number, in the clean format
+import scraper.extract as extract_mod
+page_phones = [extract_mod._clean_phone("9848012345"), extract_mod._clean_phone("+91 98480 12345")]
+ok("the extractor's own clean+dedupe path collapses both spellings to one clean number",
+   extract_mod.dedupe_phones(page_phones) == ["+91 98480 12345"])
+
+# ---- "Other Details": human-readable facts only, no raw database tags -----------------------------------------
+junk_tags = {"name": "GRIET College", "amenity": "college", "building": "yes", "type": "multipolygon",
+            "wikidata": "Q7907349", "created_by": "Merkaartor 0.12", "historic": "yes", "education": "college"}
+ok("purely technical map tags produce an empty Other Details", places._other_details(junk_tags) == "")
+useful_tags = {**junk_tags, "operator": "Gokaraju Rangaraju Educational Society", "short_name": "GRIET",
+              "wikipedia": "en:GRIET"}
+detail = places._other_details(useful_tags)
+ok("genuinely useful tags are kept, in plain English, technical ones are not",
+   "Run by: Gokaraju Rangaraju Educational Society" in detail and "Short name: GRIET" in detail
+   and "Wikipedia: GRIET" in detail and "building" not in detail and "multipolygon" not in detail
+   and "Q7907349" not in detail and "Merkaartor" not in detail, detail)
+
+# ---- the free search engine list is real (the "bing" bug) -----------------------------------------------------
+import scraper.search as search_mod  # noqa: E402
+ok("'bing' is not in the free engine list (ddgs has no Bing backend; passing that name silently runs every "
+   "engine at once instead of just Bing, and the log then claims the wrong engine answered)",
+   "bing" not in search_mod.FREE_ENGINES and "bing" not in discover.OTHER_ENGINES)
+try:
+    from ddgs.engines import ENGINES
+    real_backends = {e.name if hasattr(e, "name") else type(e).__name__.lower() for e in __import__("ddgs").DDGS()._get_engines("text", "auto")}
+    unknown = [e for e in search_mod.FREE_ENGINES if not any(e in b for b in real_backends)]
+    ok(f"every engine in the free list is one ddgs actually has ({sorted(real_backends)})", not unknown, str(unknown))
+except Exception as e:
+    print(f"SKIP  engine-list cross-check against the installed ddgs version ({type(e).__name__})")
+
+# ---- Google Programmable Search (free 100/day tier) as a second official option before the free-for-all --------
+import requests as requests_mod  # noqa: E402
+
+class FakeResp:
+    def __init__(self, status, data): self.status_code, self._data = status, data
+    def raise_for_status(self):
+        if self.status_code >= 400:
+            raise requests_mod.HTTPError(f"{self.status_code}")
+    def json(self): return self._data
+
+calls = []
+def fake_get(url, params=None, timeout=None):
+    calls.append((url, params))
+    return FakeResp(200, {"items": [{"title": "GRIET", "link": "https://griet.ac.in/", "snippet": "..."}]})
+requests_mod.get = fake_get
+hits = search_mod._google_cse("GRIET college official website", "in-en", 8, "FAKEKEY", "FAKECX")
+ok("Google CSE is called with the key, engine id and query", calls[0][1]["key"] == "FAKEKEY" and calls[0][1]["cx"] == "FAKECX"
+   and calls[0][1]["q"] == "GRIET college official website")
+ok("Google CSE results are normalised to the same shape as every other engine",
+   hits == [{"title": "GRIET", "href": "https://griet.ac.in/", "body": "..."}])
+
+def quota_used(url, params=None, timeout=None):
+    return FakeResp(429, {})
+requests_mod.get = quota_used
+try:
+    search_mod._google_cse("x", "in-en", 8, "K", "C")
+    ok("a used-up daily quota raises instead of silently returning nothing", False)
+except requests_mod.HTTPError:
+    ok("a used-up daily quota raises instead of silently returning nothing", True)
+
+os.environ["GOOGLE_CSE_KEY"], os.environ["GOOGLE_CSE_CX"] = "FAKEKEY", "FAKECX"
+os.environ.pop("BRAVE_API_KEY", None)
+requests_mod.get = fake_get
+msgs = []
+hits = search_mod.web_search("GRIET college official website", "in-en", 8, msgs.append)
+ok("web_search reaches for Google CSE before scraping any free engine when both keys are set",
+   hits and hits[0]["href"] == "https://griet.ac.in/" and not any("duckduckgo" in m for m in msgs))
+del os.environ["GOOGLE_CSE_KEY"], os.environ["GOOGLE_CSE_CX"]
+
+# ---- the discovery pacing can be tuned per deployment without a code change ------------------------------------
+os.environ["DISCOVER_MAX_PER_RUN"], os.environ["DISCOVER_GAP_SECONDS"], os.environ["DISCOVER_RETRY_WAIT"] = "7", "1.5", "9"
+import importlib
+jobs2 = importlib.reload(jobs)
+ok("MAX_DISCOVER reads from DISCOVER_MAX_PER_RUN", jobs2.MAX_DISCOVER == 7)
+ok("SEARCH_GAP reads from DISCOVER_GAP_SECONDS", jobs2.SEARCH_GAP == 1.5)
+ok("THROTTLE_WAIT reads from DISCOVER_RETRY_WAIT", jobs2.THROTTLE_WAIT == 9)
+for k in ("DISCOVER_MAX_PER_RUN", "DISCOVER_GAP_SECONDS", "DISCOVER_RETRY_WAIT"):
+    del os.environ[k]
+importlib.reload(jobs)  # back to defaults for anything that runs after this file
 
 print(f"\n{len(failures)} failure(s)" if failures else "\nAll tests passed")
 sys.exit(1 if failures else 0)

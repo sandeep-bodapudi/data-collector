@@ -78,6 +78,26 @@ def _clean_email(e: str) -> str | None:
     return e
 
 
+def normalize_phone(raw: str) -> str:
+    """One consistent format per kind of number, so the same number scraped two different ways looks identical
+    and a customer can scan a column of hundreds without re-parsing each one by eye.
+
+    - Indian mobile (10 digits, starts 6-9, with or without +91/91/0): "+91 98480 12345"
+    - Indian toll-free (1800/1860...): digits only, grouped "1800-XXX-XXXX"
+    - Anything else (landlines with an STD code, foreign numbers, extensions): left as scraped, just with
+      whitespace collapsed, because splitting an STD code from the subscriber number needs a lookup table of
+      codes to do safely, and guessing wrong is worse than leaving the original formatting.
+    """
+    raw = re.sub(r"\s+", " ", raw.strip())
+    digits = re.sub(r"\D", "", raw)
+    core = digits[2:] if digits.startswith("91") and len(digits) == 12 else digits[1:] if digits.startswith("0") and len(digits) == 11 else digits
+    if len(core) == 10 and core[0] in "6789":
+        return f"+91 {core[:5]} {core[5:]}"
+    if re.match(r"^1(800|860)\d{6,7}$", core):
+        return f"{core[:4]}-{core[4:7]}-{core[7:]}"
+    return raw
+
+
 def _clean_phone(raw: str) -> str | None:
     if not raw:
         return None
@@ -91,7 +111,7 @@ def _clean_phone(raw: str) -> str | None:
     # Reject pure date-like patterns (e.g. 01012024)
     if re.fullmatch(r"0[1-9]0[1-9]\d{4}", digits):
         return None
-    return re.sub(r"\s+", " ", raw.strip())
+    return normalize_phone(raw)
 
 
 def _uniq(items):

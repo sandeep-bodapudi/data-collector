@@ -3,6 +3,7 @@
 Nothing is stored on the server. A finished job's rows stay in memory only until the person's browser has
 collected them (it saves them in its own IndexedDB) or RESULT_TTL passes.
 """
+import os
 import threading
 import time
 import uuid
@@ -282,9 +283,14 @@ def _enrich_place(job: Job, fetcher: Fetcher, row: dict) -> dict:
     return row
 
 
-MAX_DISCOVER = 80          # places to look up per run: every lookup is a web search, and search engines limit heavy use
-SEARCH_GAP = 5.0           # seconds between lookups. Faster than this and the search engines start returning nothing.
-THROTTLE_WAIT = 25.0       # how long to wait when a lookup comes back empty before trying once more
+# Tunable without a code change (e.g. on Render: Environment tab). Defaults are measured against the free DuckDuckGo
+# /Yahoo/Brave/Google/Mojeek/Startpage scraping fallback with no paid key: pushing SEARCH_GAP below ~5s reliably made
+# every engine start refusing after just a handful of lookups in testing (not a guess - see docs/PRD-status.md).
+# A BRAVE_API_KEY or GOOGLE_CSE_KEY/GOOGLE_CSE_CX (see .env.example) removes this limit almost entirely, since those
+# are official APIs with their own generous per-day quota instead of being rate-limited by IP.
+MAX_DISCOVER = int(os.environ.get("DISCOVER_MAX_PER_RUN", "80"))    # places looked up per run
+SEARCH_GAP = float(os.environ.get("DISCOVER_GAP_SECONDS", "5.0"))   # seconds between lookups
+THROTTLE_WAIT = float(os.environ.get("DISCOVER_RETRY_WAIT", "25.0"))  # pause before the one retry on an empty result
 
 
 def _discover_websites(job: Job, rows: list[dict]):

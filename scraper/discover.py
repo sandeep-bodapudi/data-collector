@@ -83,7 +83,7 @@ def pick_official(name: str, hits: list[dict]) -> str | None:
 
 QUERY_GAP = 5.0  # seconds between the tries for one place (search engines limit quick repeats)
 # For the last try: engines that answered when the usual first choices returned lists without the official site.
-OTHER_ENGINES = ("yahoo", "startpage", "mojeek", "google", "bing")
+OTHER_ENGINES = ("startpage", "mojeek", "google", "duckduckgo")
 
 
 def find_website(name: str, where: str, say=lambda msg: None, aliases=()) -> tuple[str | None, int]:
@@ -186,7 +186,8 @@ def merge_duplicates(rows: list[dict]) -> tuple[list[dict], int]:
             continue
         merged += 1
         if row.get("Name", "").lower() != twin.get("Name", "").lower():
-            twin["Other Details"] = (f"also mapped as: {row['Name']}; " + twin.get("Other Details", ""))[:500]
+            rest = twin.get("Other Details", "")
+            twin["Other Details"] = (f"Also mapped as: {row['Name']}" + (f"; {rest}" if rest else ""))[:500]
             twin.setdefault("_aliases", []).append(row["Name"])  # used to look the website up under every name it has
         for col in ("Website", "Website Source", "Phone", "Email", "Address", "Postcode", "Opening Hours"):  # keep what only the duplicate had
             if not twin.get(col) and row.get(col):
