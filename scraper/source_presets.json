@@ -40,5 +40,33 @@
       "page_param": "page",
       "profile": true
     }
+  },
+  {
+    "id": "hospitalsnearme-telangana",
+    "name": "Hospitals - Telangana (hospitalsnearme.in)",
+    "category": "Hospitals",
+    "description": "All 11 Telangana districts' hospitals, with each hospital's own page for its telephone number.",
+    "config": {
+      "mode": "css",
+      "list_urls": [
+        "https://www.hospitalsnearme.in/telangana-tg/adilabad/",
+        "https://www.hospitalsnearme.in/telangana-tg/hyderabad/",
+        "https://www.hospitalsnearme.in/telangana-tg/karimnagar/",
+        "https://www.hospitalsnearme.in/telangana-tg/khammam/",
+        "https://www.hospitalsnearme.in/telangana-tg/mahbubnagar/",
+        "https://www.hospitalsnearme.in/telangana-tg/medak/",
+        "https://www.hospitalsnearme.in/telangana-tg/nalgonda/",
+        "https://www.hospitalsnearme.in/telangana-tg/nizamabad/",
+        "https://www.hospitalsnearme.in/telangana-tg/ranga-reddy/",
+        "https://www.hospitalsnearme.in/telangana-tg/secunderabad/",
+        "https://www.hospitalsnearme.in/telangana-tg/warangal/"
+      ],
+      "pages": 1,
+      "item_selector": "tr:has(a)",
+      "name_selector": "a",
+      "link_selector": "a",
+      "address_selector": "td:nth-of-type(2)",
+      "profile": true
+    }
   }
 ]

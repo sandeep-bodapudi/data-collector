@@ -364,6 +364,36 @@ ok("web_search reaches for Google CSE before scraping any free engine when both 
    hits and hits[0]["href"] == "https://griet.ac.in/" and not any("duckduckgo" in m for m in msgs))
 del os.environ["GOOGLE_CSE_KEY"], os.environ["GOOGLE_CSE_CX"]
 
+# ---- Brave's own monthly quota runs out: a clear one-time message, then the rest of the run continues free -----
+# _brave itself is mocked here (not requests.get) because web_search falls through to the real free-engine
+# cascade once Brave is out of the picture, and that cascade isn't mocked until further down this file.
+real_brave_fn = search_mod._brave
+brave_calls = []
+def brave_429(query, region, max_results, key):
+    brave_calls.append(1)
+    raise search_mod._BraveQuotaExhausted()
+search_mod._brave = brave_429
+search_mod.DDGS = lambda *a, **kw: type("E", (), {"__enter__": lambda s: s, "__exit__": lambda *a: False,
+                                                   "text": lambda *a, **kw: []})()
+search_mod._thread_keys.brave = "exhausted-key"
+msgs = []
+hits = search_mod.web_search("GRIET college official website", "in-en", 8, msgs.append, [])
+ok("hitting Brave's quota does not fail the search - it just has nothing from Brave", hits == [], msgs)
+ok("the run is told plainly, in words a person can act on, with no exact promise about the reset day",
+   any("Brave" in m and "used up" in m and "without it" in m and "longer than usual" in m for m in msgs), msgs)
+ok("Brave is now known to be exhausted for this key", search_mod.brave_exhausted("exhausted-key"))
+ok("a key that was never used is not affected", not search_mod.brave_exhausted("some-other-key"))
+ok("a search with that key no longer treats it as usable (pacing and worker counts fall back to the free-engine defaults)",
+   not search_mod.brave_key_set())
+calls_before_second_query = len(brave_calls)
+msgs2 = []
+search_mod.web_search("another query entirely", "in-en", 8, msgs2.append, [])
+ok("the message is said once, not for every query after the first", not any("used up" in m for m in msgs2), msgs2)
+ok("Brave is never asked again for this key once it's known to be exhausted", len(brave_calls) == calls_before_second_query)
+search_mod._thread_keys.brave = None
+search_mod._brave = real_brave_fn
+requests_mod.get = fake_get
+
 # ---- no key: a free engine returning fewer than max_results tops up from the next engine instead of stopping ----
 # (this was the actual cause of "max results 200" runs coming back with under 10 rows: the old code returned
 # the first engine's hits no matter how few, even when far more were asked for and other engines had more to give.)
@@ -662,6 +692,25 @@ ok("the colleges preset covers all 10 real districts", len(COLLEGES_CFG["list_ur
 ok("every preset list URL is colleges9.in's own Engineering-Colleges page for a district",
    all(u.startswith("https://www.colleges9.in/Telangana/") and u.endswith("/Engineering-Colleges/")
        for u in COLLEGES_CFG["list_urls"]))
+
+HOSPITALS_PRESET = next(p for p in sources_mod.PRESETS if p["id"] == "hospitalsnearme-telangana")
+HOSPITALS_CFG = sources_mod.validate(HOSPITALS_PRESET["config"])
+ok("the hospitals preset covers all 11 real Telangana districts (hospitalsnearme.in lists Secunderabad separately)",
+   len(HOSPITALS_CFG["list_urls"]) == 11)
+ok("every hospitals preset URL is hospitalsnearme.in's own Telangana district page",
+   all(u.startswith("https://www.hospitalsnearme.in/telangana-tg/") for u in HOSPITALS_CFG["list_urls"]))
+HOSPITAL_LIST_PAGE = ('<table><caption>c</caption><tr><th>Hospital Name</th><th>Street Address</th></tr>'
+                      '<tr><td><a href="https://www.hospitalsnearme.in/telangana-tg/aditya-hospital-hyderabad/">Aditya Hospital</a></td>'
+                      '<td># 4 - 1 - 16, Boggulakunta, Tilak Road, Abids</td></tr></table>')
+hosp_rows = sources_mod.extract_items(HOSPITAL_LIST_PAGE, HOSPITALS_CFG["list_urls"][1], HOSPITALS_CFG)
+ok("the hospital list table (name + street address, no dedicated parser needed) reads with plain CSS selectors",
+   hosp_rows == [{"name": "Aditya Hospital", "address": "# 4 - 1 - 16, Boggulakunta, Tilak Road, Abids",
+                  "href": "https://www.hospitalsnearme.in/telangana-tg/aditya-hospital-hyderabad/"}], hosp_rows)
+HOSPITAL_PROFILE_PAGE = ('<html><body>The telephone number of this medical institution is +914039111333 . '
+                         'The fax number of this health centre is +914024754117 .</body></html>')
+hosp_profile = sources_mod.extract_profile_generic(HOSPITAL_PROFILE_PAGE, hosp_rows[0]["href"])
+ok("the hospital's own page gives its telephone number via the generic label reader (no hospitalsnearme-specific code)",
+   "+914039111333" in hosp_profile["phones"], hosp_profile)
 
 COLLEGE_HOME_PAGE = ('<html><title>AAR Mahaveer Engineering College</title>'
                       '<body>Contact us: info@aarmahaveer.ac.in, 040-23146077. Hyderabad.</body></html>')

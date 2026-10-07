@@ -354,7 +354,8 @@ ok("a broken CSS selector is refused with a message, not saved",
 ok("pages above the limit are refused",
    c.post("/api/sources", json={"name": "x", "config": {"mode": "jsonld", "list_urls": ["https://a.test/"], "pages": 999}}).status_code == 400)
 pres = c.get("/api/sources/presets").get_json()["presets"]
-ok("the presets ship as data: colleges and schools are both there", {p["id"] for p in pres} >= {"colleges9-telangana-engineering", "edzy-schools-hyderabad"})
+ok("the presets ship as data: colleges, schools and hospitals are all there",
+   {p["id"] for p in pres} >= {"colleges9-telangana-engineering", "edzy-schools-hyderabad", "hospitalsnearme-telangana"})
 ok("a preset is copied into the person's own sources", c.post("/api/sources/presets/edzy-schools-hyderabad").status_code == 200)
 ok("deleting a source removes it", c.delete(f"/api/sources/{sid}").status_code == 200
    and not any(x["id"] == sid for x in c.get("/api/sources").get_json()["sources"]))

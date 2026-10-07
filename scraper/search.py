@@ -16,6 +16,7 @@ import os
 import threading
 import time
 from contextlib import contextmanager
+from datetime import date
 
 import requests
 from ddgs import DDGS
@@ -40,6 +41,43 @@ class SearchBlocked(Exception):
     """Every search option refused the request (common from cloud servers without a paid key)."""
 
 
+class _BraveQuotaExhausted(Exception):
+    """Brave answered 429: this key's quota (per-second or the free plan's 2,000/month) is used up."""
+
+
+# Once a key is found to be exhausted, every later call in this process skips Brave for it instead of hitting the
+# same 429 again - checked and set once per key, not re-tried every query. A process restart clears this (the real
+# quota doesn't reset that way, but it's cheap to find out again rather than remember it past a restart).
+_exhausted_keys: set[str] = set()
+_exhausted_lock = threading.Lock()
+
+
+def _key_id(key: str) -> str:
+    return hashlib.sha256(key.encode()).hexdigest()
+
+
+def brave_exhausted(key: str) -> bool:
+    return _key_id(key) in _exhausted_keys
+
+
+def _mark_exhausted(key: str) -> bool:
+    """True only for the call that first discovers this key is exhausted, so the caller logs it once, not per query."""
+    kid = _key_id(key)
+    with _exhausted_lock:
+        if kid in _exhausted_keys:
+            return False
+        _exhausted_keys.add(kid)
+        return True
+
+
+def _next_reset_guess() -> str:
+    """Brave's free plan resets monthly; the exact day isn't published, so this names the 1st of next month as our
+    best guess, not a promise - said that way in the message this builds into."""
+    today = date.today()
+    year, month = (today.year, today.month + 1) if today.month < 12 else (today.year + 1, 1)
+    return date(year, month, 1).strftime("%B %-d" if os.name != "nt" else "%B 1")
+
+
 # Each user brings their own Brave key (Settings -> Search connector). A job runs its searches on several worker
 # threads, and threads don't share each other's state, so the key is set on every thread that searches for it.
 _thread_keys = threading.local()
@@ -61,7 +99,8 @@ def _brave_key() -> str:
 
 
 def brave_key_set() -> bool:
-    return bool(_brave_key())
+    key = _brave_key()
+    return bool(key) and not brave_exhausted(key)
 
 
 # Brave's free tier allows about one request per second per key. Requests on the same key are spaced out so a
@@ -88,6 +127,8 @@ def _brave(query: str, region: str, max_results: int, key: str) -> list[dict]:
         _brave_wait(key)
         r = requests.get(BRAVE_URL, headers={"X-Subscription-Token": key, "Accept": "application/json"},
                          params={"q": query, "count": 20, "offset": offset, "country": country}, timeout=30)
+        if r.status_code == 429:
+            raise _BraveQuotaExhausted()
         r.raise_for_status()
         items = r.json().get("web", {}).get("results", [])
         out += [{"title": i.get("title", ""), "href": i.get("url", ""), "body": i.get("description", "")} for i in items]
@@ -117,12 +158,17 @@ def _google_cse(query: str, region: str, max_results: int, api_key: str, cx: str
 def web_search(query: str, region: str, max_results: int, say, engines=None) -> list[dict]:
     """`engines` (optional) chooses which free engines to try, in order. The default order is FREE_ENGINES."""
     key = _brave_key()
-    if key:
+    if key and not brave_exhausted(key):
         try:
             hits = _brave(query, region, max_results, key)
             if hits:
                 return hits
             say("  Brave API returned no results; trying other options")
+        except _BraveQuotaExhausted:
+            if _mark_exhausted(key):  # only the call that first discovers this says so - not every query after it
+                say(f"  Brave's free search limit for this account has been used up for now. It should refresh "
+                    f"around {_next_reset_guess()} (Brave doesn't publish the exact day). Continuing without it for "
+                    f"the rest of this run, which will take longer than usual - nothing has failed.")
         except requests.RequestException as e:
             say(f"  Brave API failed ({e}); trying other options")
 

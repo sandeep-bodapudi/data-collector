@@ -23,12 +23,12 @@ from bs4 import BeautifulSoup
 from .fetch import domain_of
 
 MAX_PAGES = 30
-MAX_LIST_URLS = 10
+MAX_LIST_URLS = 15  # a region's real district/branch count isn't always a round 10 (Telangana hospitals: 11)
 MAX_SOURCES_PER_USER = 50
 PHONE_RE = re.compile(r"(?<![\w/])(\+?\d[\d\s-]{7,}\d)(?![\w/])")
 EMAIL_RE = re.compile(r"[\w.+-]+@[\w-]+(?:\.[\w-]+)+")
 SITE_RE = re.compile(r"\b(?:Website|Web ?site|Web|Site)\s*:?\s*((?:https?://)?(?:www\.)?[\w-]+(?:\.[\w-]+)+(?:/\S*)?)", re.I)
-PHONE_LABEL_RE = re.compile(r"\b(?:Phone|Telephone|Tel|Mobile|Contact(?: No)?)\b[^\d+]{0,20}?((?:\+?\d[\d\s,/()-]{6,}))", re.I)
+PHONE_LABEL_RE = re.compile(r"\b(?:Phone|Telephone|Tel|Mobile|Contact(?: No)?)\b[^\d+]{0,45}?((?:\+?\d[\d\s,/()-]{6,}))", re.I)
 JUNK_EMAIL_DOMAINS = ("example.", "sentry", "wixpress", "domain.", "email.com", "yourdomain")
 
 
