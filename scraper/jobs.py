@@ -461,10 +461,9 @@ def _run_web(job: Job):
     job.columns = (["Name"] + [extract.STANDARD_FIELDS[k] for k in spec["fields"] if k != "title"]
                    + ["Website"] + spec["custom_fields"])
     hits, listing_hits = _search(job)
-    source = spec.get("source")
-    if source:
-        job.say(f"Also pulling {spec.get('source_name') or 'your directory source'}…")
-        listing_hits += [{"url": u, "recipe": source} for u in sources.list_urls(source)]
+    for src in spec.get("sources") or []:
+        job.say(f"Also pulling {src['name']}…")
+        listing_hits += [{"url": u, "recipe": src["config"]} for u in sources.list_urls(src["config"])]
     job.total = len(hits) + len(listing_hits)
     job.phase, job.activity = "visit", f"Reading {len(hits)} websites and picking out the details…"
     job.say(f"Visiting {len(hits)} pages…")

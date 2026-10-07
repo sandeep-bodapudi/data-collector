@@ -400,21 +400,29 @@ def create_job():
         # 300 is generous on purpose - for breadth across "100-200 websites" the limit that actually matters is how
         # fast search engines can be queried without being refused (see scraper/search.py), not this count.
         queries = list(dict.fromkeys(q.strip() for q in (d.get("queries") or "").splitlines() if q.strip()))[:300]
-        source_row = None
-        try:
-            source_row = DirectorySource.query.filter_by(id=int(d.get("seed") or 0), owner_id=current_user.id).first()
-        except (TypeError, ValueError):
-            source_row = None
-        if not queries and not source_row:
-            return jsonify(error="Add at least one search, or pick one of your directory sources."), 400
+        # Several of a person's directory sources can be combined into one run - the same college, say, might be
+        # missing from one directory and present in another, and listing expansion already dedupes by name across
+        # every list it reads, so combining sources only ever adds coverage, never doubles a name up.
+        raw_ids = d.get("sources") or []
+        if not isinstance(raw_ids, list):
+            raw_ids = [raw_ids]
+        source_rows = []
+        for sid in raw_ids[:10]:
+            try:
+                row = DirectorySource.query.filter_by(id=int(sid), owner_id=current_user.id).first()
+            except (TypeError, ValueError):
+                row = None
+            if row:
+                source_rows.append(row)
+        if not queries and not source_rows:
+            return jsonify(error="Add at least one search, or pick one or more of your directory sources."), 400
         fields = [f for f in d.get("fields", []) if f in extract.STANDARD_FIELDS]
         if not fields and not custom:
             return jsonify(error="Pick at least one detail to collect."), 400
         platforms = [p for p in (d.get("platforms") or ["web"])
                      if p in ("web", "linkedin.com", "facebook.com", "instagram.com", "twitter.com")] or ["web"]
-        spec = {"mode": "web", "queries": queries, "seed": str(source_row.id) if source_row else "",
-                "source": source_row.config() if source_row else None,
-                "source_name": source_row.name if source_row else "",
+        spec = {"mode": "web", "queries": queries,
+                "sources": [{"name": r.name, "config": r.config()} for r in source_rows],
                 "region": d.get("region") if d.get("region") in REGIONS else "wt-wt",
                 "fields": fields, "platforms": platforms,
                 "follow_contact": bool(d.get("follow_contact", True)), "one_per_site": bool(d.get("one_per_site")),

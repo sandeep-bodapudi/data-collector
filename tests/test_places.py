@@ -712,6 +712,34 @@ hosp_profile = sources_mod.extract_profile_generic(HOSPITAL_PROFILE_PAGE, hosp_r
 ok("the hospital's own page gives its telephone number via the generic label reader (no hospitalsnearme-specific code)",
    "+914039111333" in hosp_profile["phones"], hosp_profile)
 
+# ---- several directory sources combined into one run: coverage adds up, duplicates don't -----------------------
+SITE_B_LIST = ('<script type="application/ld+json">{"@type":"ItemList","itemListElement":['
+               '{"item":{"name":"AAR MAHAVEER ENGINEERING COLLEGE","url":"https://site-b.test/aar"}},'
+               '{"item":{"name":"NEW COLLEGE FROM SITE B","url":"https://site-b.test/new"}}]}</script>')
+SITE_B_CFG = sources_mod.validate({"mode": "jsonld", "list_urls": ["https://site-b.test/list"], "pages": 1})
+class FakeFetcherMulti:
+    def get_html(self, url):
+        if "colleges9.in" in url:
+            return COLLEGES9_FIXTURE, "ok"
+        if url == "https://site-b.test/list":
+            return SITE_B_LIST, "ok"
+        return None, "not used"
+jobs.Fetcher = lambda spec: FakeFetcherMulti()
+real_guess_m, real_find_m = discover.guess_website, discover.find_website
+discover.guess_website = lambda fetcher, name, area="", aliases=(): None
+discover.find_website = lambda name, where, say=None, aliases=(), gap=None: (None, 2)
+j_multi = jobs.Job({"queries": [], "sources": [{"name": "colleges9", "config": COLLEGES_CFG}, {"name": "site B", "config": SITE_B_CFG}],
+                     "platforms": ["web"], "max_results": 50, "one_per_site": False, "region": "in-en",
+                     "fields": ["address"], "custom_fields": [], "require": "", "follow_contact": False, "ai": {}})
+jobs._run_web(j_multi)
+names_multi = sorted(r["Name"] for r in j_multi.rows)
+ok("combining two directory sources adds the new name the second one has that the first one doesn't",
+   "NEW COLLEGE FROM SITE B" in names_multi, names_multi)
+ok("the first source's own colleges are still all there too", "BVRIT COLLEGE OF ENGINEERING FOR WOMEN" in names_multi, names_multi)
+ok("a college both sources list is combined into one row, not duplicated",
+   sum(1 for n in names_multi if n.lower() == "aar mahaveer engineering college") == 1, names_multi)
+discover.guess_website, discover.find_website = real_guess_m, real_find_m
+
 COLLEGE_HOME_PAGE = ('<html><title>AAR Mahaveer Engineering College</title>'
                       '<body>Contact us: info@aarmahaveer.ac.in, 040-23146077. Hyderabad.</body></html>')
 class FakeFetcher3:
@@ -728,7 +756,7 @@ real_guess, real_find = discover.guess_website, discover.find_website
 # (see "nothing is guessed when no address resolves" above). Only the paced web-search fallback is exercised here.
 discover.guess_website = lambda fetcher, name, area="", aliases=(): None
 discover.find_website = lambda name, where, say=None, aliases=(), gap=None: (("https://aarmahaveer.ac.in/", 5) if "AAR" in name.upper() else (None, 3))
-j7 = jobs.Job({"queries": [], "seed": "1", "source": COLLEGES_CFG, "source_name": "colleges", "platforms": ["web"], "max_results": 50,
+j7 = jobs.Job({"queries": [], "sources": [{"name": "colleges", "config": COLLEGES_CFG}], "platforms": ["web"], "max_results": 50,
                "one_per_site": False, "region": "in-en", "fields": ["address", "emails", "phones"], "custom_fields": [],
                "require": "", "follow_contact": False, "ai": {}})
 jobs._run_web(j7)

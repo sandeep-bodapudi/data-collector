@@ -550,12 +550,11 @@ async function viewNewRun(mode) {
           <div class="hint">${CFG.restricted ? "Logged-in collection for LinkedIn/Facebook is enabled by your admin and uses the cookies in your Settings."
             : "For social sites we collect only what appears in public search results (name, link, snippet). Their pages are not opened."}</div>
         </div>
-        <div class="field mt-24"><label class="label">Your directory sources <span class="opt">(no search engine needed)</span></label>
+        <div class="field mt-24"><label class="label">Your directory sources <span class="opt">(no search engine needed - pick as many as you like)</span></label>
           ${SOURCES.length ? `<div class="option-grid">${SOURCES.map((x) => `
-            <label class="option"><input type="radio" name="seed" value="${x.id}"><span class="o-ico">${icon("globe")}</span><span><b>${esc(x.name)}</b><small>${esc(x.category || "")}</small></span><span class="box"></span></label>`).join("")}
-            <label class="option"><input type="radio" name="seed" value="" checked><span><b>None</b><small>Just my searches above</small></span><span class="box"></span></label>
+            <label class="option"><input type="checkbox" name="sources" value="${x.id}"><span class="o-ico">${icon("globe")}</span><span><b>${esc(x.name)}</b><small>${esc(x.category || "")}</small></span><span class="box"></span></label>`).join("")}
           </div>
-          <div class="hint">Read directly, page by page - not affected by free search engines refusing requests. Adds to whatever searches you listed above; you can also leave the searches empty and use this alone.</div>`
+          <div class="hint">Read directly, page by page - not affected by free search engines refusing requests. Picking more than one combines them into the same sheet, with duplicate names removed automatically - useful since any one directory can be missing a few entries the others have. Adds to whatever searches you listed above; you can also leave the searches empty and use this alone.</div>`
             : `<div class="hint">You haven't added a directory source yet. Add one in <a href="#/settings">Settings → Directory sources</a>, or start from a preset there.</div>`}
         </div>
       </div>
@@ -645,13 +644,13 @@ async function viewNewRun(mode) {
     if (mode === "web") {
       const fields = $$("input[name=field]:checked", v).map((c) => CFG.fields[c.value]).concat(custom.items);
       const plats = $$("input[name=platform]:checked", v).map((c) => PLATFORMS.find((p) => p[0] === c.value)[1]);
-      const seedEl = $("input[name=seed]:checked", v);
-      const seedOn = !!(seedEl && seedEl.value);
+      const sourceEls = $$("input[name=sources]:checked", v);
+      const seedOn = sourceEls.length > 0;
       rows.push(["Searches", queries.items.length || "—"], ["Search on", plats.join(", ") || "—"],
         ["Websites", queries.items.length ? `up to ${fmtNum(queries.items.length * plats.length * +$("#max_results").value)}` : "—"],
         ["Country", CFG.regions[$("#region").value]], ["Columns", fields.length ? `${fields.length} details` : "—"]);
-      if (seedOn) rows.splice(1, 0, ["Directory source", seedLabels[seedEl.value]]);
-      checks.push([queries.items.length > 0 || seedOn, "At least one search, or a known directory"], [fields.length > 0, "At least one detail"], [plats.length > 0, "A place to search"]);
+      if (seedOn) rows.splice(1, 0, ["Directory source" + (sourceEls.length > 1 ? "s" : ""), sourceEls.map((c) => seedLabels[c.value]).join(", ")]);
+      checks.push([queries.items.length > 0 || seedOn, "At least one search, or a directory source"], [fields.length > 0, "At least one detail"], [plats.length > 0, "A place to search"]);
     } else {
       rows.push(["Category", state.category], ["Locations", locations.items.length ? locations.items.slice(0, 2).join("; ") + (locations.items.length > 2 ? ` +${locations.items.length - 2}` : "") : "—"],
         ["Max per location", fmtNum($("#max_places").value)], ["Website check", $("#enrich").checked || custom.items.length ? "Yes" : "No"]);
@@ -687,7 +686,7 @@ async function viewNewRun(mode) {
     custom = TagInput($("#custom"), { placeholder: aiReady ? "e.g. founder name, services offered" : "Add your AI key in Settings first", disabled: !aiReady, onChange: update });
     $("#max_results").oninput = () => { $("#max_out").textContent = $("#max_results").value; update(); };
     $$("#require button", v).forEach((b) => b.onclick = () => { $$("#require button", v).forEach((x) => x.classList.remove("active")); b.classList.add("active"); state.require = b.dataset.v; });
-    $$("input[name=field], input[name=platform], input[name=seed], #region", v).forEach((c) => c.addEventListener("change", update));
+    $$("input[name=field], input[name=platform], input[name=sources], #region", v).forEach((c) => c.addEventListener("change", update));
     setTimeout(() => queries.input.focus(), 50);
   } else {
     locations = TagInput($("#locations"), { placeholder: "e.g. Bachupally, Hyderabad", onChange: update });
@@ -718,14 +717,14 @@ async function viewNewRun(mode) {
     const body = { mode, file_name: $("#file_name").value, custom_fields: custom.items.join(",") };
     if (mode === "web") {
       queries.flush();
-      const seedEl = $("input[name=seed]:checked", v);
+      const sourceIds = $$("input[name=sources]:checked", v).map((c) => +c.value);
       Object.assign(body, {
         queries: queries.items.join("\n"), max_results: $("#max_results").value, region: $("#region").value,
         require: state.require, follow_contact: $("#follow_contact").checked, one_per_site: $("#one_per_site").checked,
-        seed: seedEl ? seedEl.value : "",
+        sources: sourceIds,
         fields: $$("input[name=field]:checked", v).map((c) => c.value), platforms: $$("input[name=platform]:checked", v).map((c) => c.value),
       });
-      if (!queries.items.length && !body.seed) { toast("Add at least one search in step 1, or pick one of your directory sources.", "err"); return queries.input.focus(); }
+      if (!queries.items.length && !body.sources.length) { toast("Add at least one search in step 1, or pick one or more of your directory sources.", "err"); return queries.input.focus(); }
       if (!body.platforms.length) return toast("Choose at least one place to search.", "err");
       if (!body.fields.length && !custom.items.length) return toast("Pick at least one detail in step 2.", "err");
     } else {
@@ -742,10 +741,11 @@ async function viewNewRun(mode) {
     try {
       const r = await api("/api/jobs", { method: "POST", body });
       const lines = (t) => String(t || "").split("\n").map((x) => x.trim()).filter(Boolean);
-      const spec = { ...body, queries: lines(body.queries), locations: lines(body.locations),
+      const sourceNames = (body.sources || []).map((id) => seedLabels[id]).filter(Boolean);
+      const spec = { ...body, queries: lines(body.queries), locations: lines(body.locations), sourceNames,
         custom_fields: String(body.custom_fields || "").split(",").map((x) => x.trim()).filter(Boolean) };
       const name = body.file_name || (mode === "places" ? `${body.category} in ${spec.locations.slice(0, 2).join(", ")}`
-        : spec.queries[0] || seedLabels[body.seed] || "Web search");
+        : spec.queries[0] || sourceNames.join(", ") || "Web search");
       await Store.runs.put({ id: r.id, name, mode, spec, status: "running", started: nowIso(), rows: 0, with_email: 0, with_phone: 0,
         duration: 0, error: "", sheet_id: null });
       Tracker.watch(r.id);
@@ -871,7 +871,8 @@ async function viewRunDetail(id) {
   });
   const INPUT_LABELS = { queries: "Searches", category: "Category", locations: "Locations", region: "Country", fields: "Details", custom_fields: "AI details",
     platforms: "Search on", max_results: "Max results", require: "Keep only rows with", follow_contact: "Check contact pages", one_per_site: "One row per website",
-    enrich: "Check websites", name_filter: "Name contains", file_name: "Sheet name", source_sheet: "From sheet" };
+    enrich: "Check websites", name_filter: "Name contains", file_name: "Sheet name", source_sheet: "From sheet",
+    sourceNames: "Directory sources" };
   const spec = run.spec || {};
   $("#tab-input").innerHTML = `<ul class="summary-list">${Object.entries(spec).filter(([k, val]) => INPUT_LABELS[k] && val !== "" && val !== null && !(Array.isArray(val) && !val.length))
     .map(([k, val]) => `<li><span>${INPUT_LABELS[k]}</span><b>${esc(k === "region" ? CFG.regions[val] || val : Array.isArray(val) ? val.join("; ") : typeof val === "boolean" ? (val ? "Yes" : "No") : val)}</b></li>`).join("")}</ul>`;
