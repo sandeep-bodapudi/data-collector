@@ -147,6 +147,10 @@ svg { flex: none; }
 .badge.done::before { background: var(--green-dot); }
 .badge.cancelled { background: var(--amber-bg); color: var(--amber); }
 .badge.cancelled::before { background: var(--amber-dot); }
+/* A run that finished with no rows at all and no real error (e.g. a genuinely quiet area) - same amber as
+   "cancelled": not wrong, but not the clean green "done" a run that actually found something gets either. */
+.badge.empty { background: var(--amber-bg); color: var(--amber); }
+.badge.empty::before { background: var(--amber-dot); }
 .badge.error { background: var(--red-bg); color: var(--red); }
 .badge.error::before { background: var(--red-dot); }
 .badge.accent { background: var(--accent-soft); color: var(--accent-text); }

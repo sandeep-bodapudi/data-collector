@@ -25,6 +25,6 @@ services:
       # sheets and run history live in each person's browser. Without it, users are lost on every restart.
       - key: DATABASE_URL
         sync: false
-      # Optional but recommended: a Brave Search API key, so web search works reliably from the cloud.
-      - key: BRAVE_API_KEY
-        sync: false
+      # A Brave key is no longer set here - each person adds their own in Settings -> Search connector, so it
+      # isn't shared across the whole team. GOOGLE_CSE_KEY/GOOGLE_CSE_CX (optional, a second free search option)
+      # are still server-wide if you want them; add them here the same way as DATABASE_URL above if so.

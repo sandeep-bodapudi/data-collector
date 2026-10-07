@@ -9,6 +9,23 @@ const $$ = (sel, root = document) => [...root.querySelectorAll(sel)];
 const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
 const icon = (id, size = 16) => `<svg width="${size}" height="${size}" aria-hidden="true"><use href="#i-${id}"/></svg>`;
 const fmtNum = (n) => Number(n || 0).toLocaleString();
+function fmtDuration(seconds) {
+  seconds = Math.max(1, Math.round(seconds));
+  if (seconds < 60) return `${seconds}s`;
+  const mins = Math.round(seconds / 60);
+  if (mins < 60) return `${mins} min`;
+  const hrs = mins / 60;
+  const hrsText = hrs < 10 ? (Number.isInteger(hrs) ? String(hrs) : hrs.toFixed(1)) : String(Math.round(hrs));
+  return `${hrsText} hour${hrs >= 1.5 ? "s" : ""}`;
+}
+// A rough estimate, shown on New Run so a huge batch doesn't silently turn into an hours-long surprise. Counts
+// only the search pacing itself (see README "Scaling 'Search the web'" for the measured gap this mirrors) - not
+// how long visiting each found website then takes, which runs on several workers in parallel and is usually
+// fast by comparison, and not any website lookup that falls back to a search for a listing-expanded name.
+function estimateWebSeconds(numQueries, numPlatforms, hasBraveKey) {
+  const gapPerQuery = hasBraveKey ? 1.1 : 5;
+  return numQueries * numPlatforms * gapPerQuery;
+}
 const rowsText = (n) => `${fmtNum(n)} row${n === 1 ? "" : "s"}`;
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
@@ -36,6 +53,11 @@ function timeAgo(iso) {
 }
 const STATUS_LABEL = { queued: "Queued", running: "Running", done: "Succeeded", cancelled: "Cancelled", error: "Failed" };
 const badge = (status) => `<span class="badge ${esc(status)}">${STATUS_LABEL[status] || esc(status)}</span>`;
+// A run that finished with no rows and no real error (the search engines answered fine, there just wasn't
+// anything there) is not the same thing as a run that actually found something - a bare green "Succeeded" on
+// both looks identical in the list until you open it. An actual failure (status "error") already shows as
+// "Failed" with its reason, so this only has to tell "found nothing" apart from "found something".
+const runBadge = (r) => (r.status === "done" && !r.rows ? '<span class="badge empty">Succeeded · empty</span>' : badge(r.status));
 const SOURCE_LABEL = { run: "Run", merge: "Merged", import: "Imported", shared: "Shared copy" };
 
 /* ---------------------------------------------------------------- API */
@@ -482,7 +504,7 @@ async function viewHome() {
     <div class="card"><div class="card-head"><h3>Recent runs</h3><a href="#/runs" class="small">View all</a></div>
       <div class="table-wrap">${runs.length ? `<table class="tbl compact"><tbody>${runs.slice(0, 6).map((r) => `
         <tr class="clickable" data-href="#/runs/${r.id}"><td><div class="name-cell"><div><b>${esc(r.name || "Untitled")}</b><small>${r.mode === "places" ? "Places" : "Web search"} · ${timeAgo(r.started)}</small></div></div></td>
-        <td>${badge(r.status)}</td><td class="num">${fmtNum(r.rows)} rows</td></tr>`).join("")}</tbody></table>`
+        <td>${runBadge(r)}</td><td class="num">${fmtNum(r.rows)} rows</td></tr>`).join("")}</tbody></table>`
         : emptyState("runs", "No runs yet", "Start a run to collect data.")}</div></div>
     <div class="card"><div class="card-head"><h3>Recent sheets</h3><a href="#/sheets" class="small">View all</a></div>
       <div class="table-wrap">${sheets.length ? `<table class="tbl compact"><tbody>${sheets.slice(0, 6).map((s) => `
@@ -541,6 +563,7 @@ async function viewNewRun(mode) {
     <div class="form-section">
       <div class="section-title"><div class="step-num">1</div><div><h3>What should we search for?</h3><p>Write it like a Google search. Add as many as you like.</p></div></div>
       <div class="section-body">
+        ${settings.brave_key_mask ? "" : `<div class="callout info">${icon("info")}<div class="grow"><b>Website lookups will be slower and less reliable without a search key.</b> Without one, this falls back to free search engines, which cloud servers often get refused by. <a href="#/settings">Add a free Brave key in Settings</a> - it's optional, the run still works without it, just slower.</div></div>`}
         <div class="tags" id="queries"></div>
         <div class="hint">Press <kbd>Enter</kbd> after each search. Paste a list to add many at once.</div>
         <div class="chips"><small>Try</small>
@@ -694,11 +717,22 @@ async function viewNewRun(mode) {
         ["Websites", queries.items.length ? `up to ${fmtNum(queries.items.length * plats.length * +$("#max_results").value)}` : "—"],
         ["Country", CFG.regions[$("#region").value]], ["Columns", fields.length ? `${fields.length} details` : "—"]);
       if (seedOn) rows.splice(1, 0, ["Directory source" + (sourceEls.length > 1 ? "s" : ""), sourceEls.map((c) => seedLabels[c.value]).join(", ")]);
+      // A rough estimate only - actual time also depends on how many pages need visiting and whether any
+      // website lookups fall back to a search (see estimateWebSeconds below for exactly what this does and
+      // doesn't count).
+      if (queries.items.length) rows.push(["Estimated time", "~" + fmtDuration(estimateWebSeconds(queries.items.length, plats.length, !!settings.brave_key_mask))]);
       checks.push([queries.items.length > 0 || seedOn, "At least one search, or a directory source"], [fields.length > 0, "At least one detail"], [plats.length > 0, "A place to search"]);
       renderSuggestion();
     } else {
       rows.push(["Category", state.category], ["Locations", locations.items.length ? locations.items.slice(0, 2).join("; ") + (locations.items.length > 2 ? ` +${locations.items.length - 2}` : "") : "—"],
         ["Max per location", fmtNum($("#max_places").value)], ["Website check", $("#enrich").checked || custom.items.length ? "Yes" : "No"]);
+      // Also rough: each location is one map query (a few seconds), plus - only if "Check websites" is on -
+      // a lookup per place the map found with no website of its own, which isn't knowable before the run finds
+      // out how many that actually is.
+      if (locations.items.length) {
+        const checkingSites = $("#enrich").checked || custom.items.length > 0;
+        rows.push(["Estimated time", "~" + fmtDuration(locations.items.length * 4) + (checkingSites ? " or more, depending how many places need a website lookup" : "")]);
+      }
       checks.push([!!state.category, "A category"], [locations.items.length > 0, "At least one location"]);
       renderSuggestion();
     }
@@ -840,7 +874,7 @@ async function viewRuns() {
       : `<table class="tbl"><thead><tr><th>Run</th><th>Status</th><th>Started</th><th class="num">Duration</th><th class="num">Rows</th><th></th></tr></thead><tbody>
         ${list.map((r) => `<tr class="clickable" data-id="${r.id}">
           <td><div class="name-cell"><div class="kpi-ico">${icon(r.mode === "places" ? "pin" : "globe")}</div><div><b>${esc(r.name || "Untitled")}</b><small>${runSubtitle(r)}</small></div></div></td>
-          <td>${badge(r.status)}</td>
+          <td>${runBadge(r)}</td>
           <td class="nowrap" title="${esc(fmtDate(r.started))}">${timeAgo(r.started)}</td>
           <td class="num">${fmtDuration(r.duration)}</td><td class="num">${fmtNum(r.rows)}</td>
           <td class="actions"><span class="menu-wrap">${r.sheet_id ? `<a class="btn btn-sm" href="#/sheets/${r.sheet_id}" data-stop>Open sheet</a>` : ""}
