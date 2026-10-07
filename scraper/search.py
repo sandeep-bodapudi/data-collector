@@ -11,8 +11,11 @@
    name silently falls back to trying everything at once, which wastes requests and makes the log lie about
    which engine actually answered.
 """
+import hashlib
 import os
+import threading
 import time
+from contextlib import contextmanager
 
 import requests
 from ddgs import DDGS
@@ -37,10 +40,52 @@ class SearchBlocked(Exception):
     """Every search option refused the request (common from cloud servers without a paid key)."""
 
 
+# Each user brings their own Brave key (Settings -> Search connector). A job runs its searches on several worker
+# threads, and threads don't share each other's state, so the key is set on every thread that searches for it.
+_thread_keys = threading.local()
+
+
+@contextmanager
+def search_keys(brave: str = ""):
+    """Use this user's Brave key for every search made inside the block, on this thread."""
+    previous = getattr(_thread_keys, "brave", None)
+    _thread_keys.brave = brave or ""
+    try:
+        yield
+    finally:
+        _thread_keys.brave = previous
+
+
+def _brave_key() -> str:
+    return getattr(_thread_keys, "brave", None) or ""
+
+
+def brave_key_set() -> bool:
+    return bool(_brave_key())
+
+
+# Brave's free tier allows about one request per second per key. Requests on the same key are spaced out so a
+# parallel job can't trip that limit; different users' keys have their own limit, so they don't wait on each other.
+BRAVE_MIN_INTERVAL = float(os.environ.get("BRAVE_MIN_INTERVAL_SECONDS", "1.1"))
+_brave_lock = threading.Lock()
+_brave_next_slot: dict[str, float] = {}
+
+
+def _brave_wait(key: str) -> None:
+    slot_id = hashlib.sha256(key.encode()).hexdigest()  # never keep the raw key as a dict key
+    with _brave_lock:
+        now = time.monotonic()
+        start = max(now, _brave_next_slot.get(slot_id, 0.0))
+        _brave_next_slot[slot_id] = start + BRAVE_MIN_INTERVAL
+    if start > now:
+        time.sleep(start - now)
+
+
 def _brave(query: str, region: str, max_results: int, key: str) -> list[dict]:
     country = "ALL" if region == "wt-wt" else region.split("-")[0].upper()
     out = []
     for offset in range(0, 10):  # Brave allows up to 10 pages of 20 results
+        _brave_wait(key)
         r = requests.get(BRAVE_URL, headers={"X-Subscription-Token": key, "Accept": "application/json"},
                          params={"q": query, "count": 20, "offset": offset, "country": country}, timeout=30)
         r.raise_for_status()
@@ -71,7 +116,7 @@ def _google_cse(query: str, region: str, max_results: int, api_key: str, cx: str
 
 def web_search(query: str, region: str, max_results: int, say, engines=None) -> list[dict]:
     """`engines` (optional) chooses which free engines to try, in order. The default order is FREE_ENGINES."""
-    key = os.environ.get("BRAVE_API_KEY")
+    key = _brave_key()
     if key:
         try:
             hits = _brave(query, region, max_results, key)

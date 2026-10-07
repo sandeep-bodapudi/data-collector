@@ -7,7 +7,7 @@ from openpyxl.utils import get_column_letter
 
 HEADER_FILL = PatternFill("solid", fgColor="1F4E78")
 # Settings that must never appear in an exported file.
-SECRET_KEYS = {"ai_api_key", "ai_key", "li_at_cookie", "fb_cookie", "ai", "allow_restricted"}
+SECRET_KEYS = {"ai_api_key", "ai_key", "brave_key", "li_at_cookie", "fb_cookie", "ai", "allow_restricted"}
 HEADER_FONT = Font(bold=True, color="FFFFFF")
 LINK_FONT = Font(color="0563C1", underline="single")
 

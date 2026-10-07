@@ -67,6 +67,14 @@ ok("saved key is masked in the API", s["ai_key_mask"].endswith("ABCD") and "sk-t
 with app.app_context():
     raw = VaultCredential.query.filter_by(name="ai_api_key").first().encrypted_value
 ok("saved key is encrypted in the database", "sk-test" not in raw)
+c.post("/api/settings", json={"brave_api_key": "BSA-test-key-0123456789"})
+bs = c.get("/api/settings").get_json()
+ok("a Brave key is saved to this user's account and shown only masked",
+   bs["brave_key_mask"].endswith("6789") and "BSA-test" not in json.dumps(bs))
+ok("testing the key with no key saved says so, without calling Brave",
+   app.test_client().post("/api/settings/brave/test").status_code == 401)
+c.post("/api/settings", json={"brave_api_key": ""})
+ok("clearing the key removes it", c.get("/api/settings").get_json()["brave_key_mask"] == "")
 ok("cookies are ignored while restricted mode is off", c.post("/api/settings", json={"li_at_cookie": "x"}).status_code == 200
    and c.get("/api/settings").get_json()["li_cookie_mask"] == "")
 

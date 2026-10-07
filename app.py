@@ -48,7 +48,7 @@ _load_env_file()
 _secret_key()
 
 from models import ROLES, AppSetting, Share, User, VaultCredential, db, decrypt, encrypt  # noqa: E402
-from scraper import ai_extract, extract, listings, places, sheets  # noqa: E402
+from scraper import ai_extract, extract, listings, places, search, sheets  # noqa: E402
 from scraper.excel import write_workbook  # noqa: E402
 from scraper.jobs import JOBS, REGIONS, purge_jobs, start_job  # noqa: E402
 
@@ -368,7 +368,7 @@ def create_job():
     common = {
         "custom_fields": custom, "max_results": max_results,
         "file_name": _clean_name(d.get("file_name"), ""),
-        "ai": ai, "allow_restricted": restricted,
+        "ai": ai, "allow_restricted": restricted, "brave_key": vault.get("brave_api_key", ""),
         "li_at_cookie": vault.get("li_at_cookie", "") if restricted else "",
         "fb_cookie": vault.get("fb_cookie", "") if restricted else "",
     }
@@ -499,16 +499,35 @@ def get_settings():
     return jsonify(
         ai_provider=v.get("ai_provider", "anthropic"), ai_model=v.get("ai_model", ""), ai_base_url=v.get("ai_base_url", ""),
         ai_key_mask=_mask(v.get("ai_api_key", "")),
+        brave_key_mask=_mask(v.get("brave_api_key", "")),
         restricted=_restricted_enabled(),
         li_cookie_mask=_mask(v.get("li_at_cookie", "")), fb_cookie_mask=_mask(v.get("fb_cookie", "")),
     )
+
+
+@app.post("/api/settings/brave/test")
+@login_required
+def test_brave_key():
+    key = _vault(current_user.id).get("brave_api_key", "")
+    if not key:
+        return jsonify(ok=False, error="Save your Brave key first.")
+    try:
+        hits = search._brave("official website of a college in Hyderabad", "in-en", 3, key)
+    except Exception as e:  # a bad key or an exhausted quota comes back as a readable message, never the key
+        status = getattr(getattr(e, "response", None), "status_code", None)
+        if status in (401, 403):
+            return jsonify(ok=False, error="Brave refused this key. Check that you copied it fully.")
+        if status == 429:
+            return jsonify(ok=False, error="Brave says the rate or monthly limit is used up. Try again later.")
+        return jsonify(ok=False, error="Could not reach Brave. Check your connection and try again.")
+    return jsonify(ok=True, results=len(hits))
 
 
 @app.post("/api/settings")
 @login_required
 def save_settings():
     d = request.get_json(force=True)
-    allowed = {"ai_provider", "ai_model", "ai_base_url", "ai_api_key"}
+    allowed = {"ai_provider", "ai_model", "ai_base_url", "ai_api_key", "brave_api_key"}
     if _restricted_enabled():
         allowed |= {"li_at_cookie", "fb_cookie"}
     for key, value in d.items():
@@ -517,7 +536,7 @@ def save_settings():
         value = (value or "").strip()
         if key == "ai_provider" and value not in ai_extract.PROVIDERS:
             continue
-        if key in ("ai_api_key", "li_at_cookie", "fb_cookie") and value == "__keep__":
+        if key in ("ai_api_key", "brave_api_key", "li_at_cookie", "fb_cookie") and value == "__keep__":
             continue  # the browser never sees the saved secret; "__keep__" means "leave it unchanged"
         cred = VaultCredential.query.filter_by(owner_id=current_user.id, name=key).first()
         if not value:
@@ -526,8 +545,8 @@ def save_settings():
             continue
         if not cred:
             cred = VaultCredential(owner_id=current_user.id, name=key,
-                                   platform="ai" if key.startswith("ai_") else "social",
-                                   credential_type="api_key" if key == "ai_api_key" else "setting")
+                                   platform="ai" if key.startswith("ai_") else ("search" if key == "brave_api_key" else "social"),
+                                   credential_type="api_key" if key in ("ai_api_key", "brave_api_key") else "setting")
             db.session.add(cred)
         cred.encrypted_value = encrypt(value)
     db.session.commit()

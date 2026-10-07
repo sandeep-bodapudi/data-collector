@@ -11,7 +11,7 @@ import uuid
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 
-from . import ai_extract, discover, extract, listings, places
+from . import ai_extract, discover, extract, listings, places, search
 from .excel import SECRET_KEYS
 from .fetch import WORKERS, Fetcher, domain_of
 from .search import SearchBlocked, web_search
@@ -107,15 +107,26 @@ def start_job(spec: dict, user_id: int) -> Job:
     return job
 
 
+def _keyed(job: Job, fn):
+    """Worker threads don't inherit the job's Brave key, so each one sets it before it searches."""
+    key = getattr(job, "spec", {}).get("brave_key", "")
+
+    def run(*args):
+        with search.search_keys(key):
+            return fn(*args)
+    return run
+
+
 def _run(job: Job):
     job.status = "running"
     try:
-        if job.spec["mode"] == "places":
-            _run_places(job)
-        elif job.spec["mode"] == "enrich":
-            _run_enrich(job)
-        else:
-            _run_web(job)
+        with search.search_keys(job.spec.get("brave_key", "")):
+            if job.spec["mode"] == "places":
+                _run_places(job)
+            elif job.spec["mode"] == "enrich":
+                _run_enrich(job)
+            else:
+                _run_web(job)
         final = "cancelled" if job.cancelled.is_set() else "done"
         if final == "done" and not job.rows and job.problems:
             job.error, final = job.problems[-1], "error"
@@ -326,7 +337,7 @@ def _read_profiles(job: Job, fetcher: Fetcher, rows: list[dict]):
         return listings.extract_profile(html, r["_listing_url"]) if html else None
 
     with ThreadPoolExecutor(WORKERS) as pool:
-        futures = {pool.submit(one, r): r for r in todo}
+        futures = {pool.submit(_keyed(job, one), r): r for r in todo}
         for fut in as_completed(futures):
             if job.cancelled.is_set():
                 pool.shutdown(wait=False, cancel_futures=True)
@@ -366,7 +377,7 @@ def _enrich_listed_rows(job: Job, fetcher: Fetcher, rows: list[dict], spec: dict
     job.phase, job.total, job.done = "visit", len(todo), 0
     job.say(f"Reading contact details from {len(todo)} verified website{'s' if len(todo) != 1 else ''}…")
     with ThreadPoolExecutor(WORKERS) as pool:
-        futures = {pool.submit(_enrich_web_row, job, fetcher, r, spec): r for r in todo}
+        futures = {pool.submit(_keyed(job, _enrich_web_row), job, fetcher, r, spec): r for r in todo}
         for fut in as_completed(futures):
             if job.cancelled.is_set():
                 pool.shutdown(wait=False, cancel_futures=True)
@@ -456,7 +467,7 @@ def _run_web(job: Job):
     fetcher = Fetcher(spec)
     known_names = set()
     with ThreadPoolExecutor(WORKERS) as pool:
-        futures = {pool.submit(_process_page, job, fetcher, h): h for h in hits}
+        futures = {pool.submit(_keyed(job, _process_page), job, fetcher, h): h for h in hits}
         for fut in as_completed(futures):
             if job.cancelled.is_set():
                 pool.shutdown(wait=False, cancel_futures=True)
@@ -603,7 +614,7 @@ KEYED_GAP = float(os.environ.get("DISCOVER_KEYED_GAP_SECONDS", "1.1"))
 
 
 def _current_gap() -> float:
-    if os.environ.get("BRAVE_API_KEY") or (os.environ.get("GOOGLE_CSE_KEY") and os.environ.get("GOOGLE_CSE_CX")):
+    if search.brave_key_set() or (os.environ.get("GOOGLE_CSE_KEY") and os.environ.get("GOOGLE_CSE_CX")):
         return min(SEARCH_GAP, KEYED_GAP)  # never slower than the no-key pacing, only ever faster
     return SEARCH_GAP
 
@@ -635,12 +646,57 @@ def _guess_websites(job: Job, fetcher: Fetcher, rows: list[dict]):
     job.say(f"  found {sum(1 for r in todo if r.get('Website'))} of {len(todo)} that way.")
 
 
+SEARCH_WORKERS = int(os.environ.get("SEARCH_WORKERS", "20"))
+
+
+def _discover_parallel(job: Job, batch: list[dict]):
+    """With the person's own Brave key, each place is searched on its own worker thread (up to SEARCH_WORKERS at once).
+    Brave's per-second limit is enforced per key in scraper/search.py, so the workers queue behind that limit rather
+    than breaking it. Without a key, _discover_websites keeps its one-at-a-time pacing for the free engines."""
+    names: dict[str, dict] = {}
+    for r in batch:
+        names.setdefault(r["Name"].lower().strip(), r)
+    job.phase, job.total, job.done = "visit", len(names), 0
+    job.say(f"Searching for the websites of {len(names)} places, up to {SEARCH_WORKERS} at a time "
+            "(Brave allows about one search per second on a key, so the speed-up is limited by that).")
+
+    def find(r):
+        return discover.find_website(r["Name"], r.get("Search Location", ""), job.say, r.get("_aliases", []), 0)[0]
+
+    found: dict[str, str | None] = {}
+    with ThreadPoolExecutor(SEARCH_WORKERS) as pool:
+        futures = {pool.submit(_keyed(job, find), r): key for key, r in names.items()}
+        for fut in as_completed(futures):
+            if job.cancelled.is_set():
+                pool.shutdown(wait=False, cancel_futures=True)
+                break
+            key = futures[fut]
+            job.done += 1
+            try:
+                found[key] = fut.result()
+            except discover.SearchBlocked:
+                found[key] = None
+                job.say("  Brave refused the searches. Check your Brave key and its monthly quota in Settings.")
+            except Exception as e:  # one failed lookup must not stop the rest
+                found[key] = None
+                job.say(f"  lookup failed for {names[key]['Name']}: {type(e).__name__}")
+    for r in batch:
+        url = found.get(r["Name"].lower().strip())
+        if url:
+            r["Website"], r["Website Source"] = url, "Found by web search"
+            job.say(f"  {r['Name']}: {url}")
+        else:
+            job.say(f"  {r['Name']}: no official website found")
+
+
 def _discover_websites(job: Job, rows: list[dict]):
     """The map rarely lists a website. Search the web for each such place's own site, so its contact details can be read."""
     todo = [r for r in rows if not r.get("Website") and r.get("Name")]
     if not todo:
         return
     batch = todo[:MAX_DISCOVER]
+    if search.brave_key_set():
+        return _discover_parallel(job, batch)
     gap = _current_gap()
     job.phase, job.total, job.done = "visit", len(batch), 0
     job.say(f"Looking for the websites of {len(batch)} places that the map doesn't give one for "
@@ -742,7 +798,7 @@ def _run_places(job: Job):
     job.phase, job.activity = "visit", f"Visiting {len(with_site)} websites to find emails and phone numbers…"
     job.say(f"Visiting {len(with_site)} websites for emails/phones…")
     with ThreadPoolExecutor(WORKERS) as pool:
-        futures = {pool.submit(_enrich_place, job, fetcher, r): r for r in with_site}
+        futures = {pool.submit(_keyed(job, _enrich_place), job, fetcher, r): r for r in with_site}
         for fut in as_completed(futures):
             if job.cancelled.is_set():
                 pool.shutdown(wait=False, cancel_futures=True)

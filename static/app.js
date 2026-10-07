@@ -1687,6 +1687,14 @@ async function viewSettings() {
           <div class="row-flex"><button class="btn btn-primary" id="save-ai">Save</button><button class="btn" id="test-ai">${icon("check")}Test connection</button><span id="test-msg" class="small"></span></div>
         </div>
       </section>
+      <section class="card">
+        <div class="card-head"><div><h3>${icon("search")} Search connector: Brave Search</h3><p>Your own Brave Search key. Website lookups use it, so each person's searches run on their own quota. Stored encrypted, never shared.</p></div><span id="brave-status"></span></div>
+        <div class="card-body">
+          <div class="field" id="brave-field"></div>
+          <div class="row-flex"><button class="btn btn-primary" id="save-brave">Save</button><button class="btn" id="test-brave">${icon("check")}Test key</button><span id="brave-msg" class="small"></span></div>
+          <div class="hint">Get a free key at <a href="https://brave.com/search/api/" target="_blank" rel="noopener noreferrer">brave.com/search/api</a>. The free plan allows about one search per second and a monthly quota, so large runs take longer.</div>
+        </div>
+      </section>
       ${CFG.restricted ? `
       <section class="card">
         <div class="card-head"><div><h3>${icon("key")} Social logins <span class="badge cancelled plain">Restricted</span></h3><p>Enabled by your admin. Use only accounts your company owns and where the platform's terms allow it.</p></div></div>
@@ -1771,6 +1779,36 @@ async function viewSettings() {
     try {
       const r = await api("/api/settings/test", { method: "POST" });
       msg.innerHTML = r.ok ? `<span class="badge done">Connected</span>` : `<span class="badge error">${esc(r.error)}</span>`;
+    } catch (e) { msg.innerHTML = `<span class="badge error">${esc(e.message)}</span>`; }
+    b.disabled = false;
+  };
+  const renderBrave = () => {
+    $("#brave-status").innerHTML = s.brave_key_mask ? '<span class="badge done">Connected</span>' : '<span class="badge plain">Not set up</span>';
+    $("#brave-field").innerHTML = s.brave_key_mask
+      ? `<span class="label">Brave API key</span><div class="saved-key">${icon("key")}<span class="grow">${esc(s.brave_key_mask)}</span><button class="btn btn-sm btn-danger" id="remove-brave">Remove</button></div>`
+      : `<label class="label" for="brave-key">Brave API key</label><input class="input mono" id="brave-key" type="password" autocomplete="off" placeholder="Paste your Brave Search API key">`;
+    $("#remove-brave")?.addEventListener("click", async () => {
+      if (!await confirmDialog("Remove your Brave key?", "Website lookups will fall back to the free search engines until you add a key again.", "Remove")) return;
+      await api("/api/settings", { method: "POST", body: { brave_api_key: "" } });
+      s.brave_key_mask = ""; renderBrave(); toast("Brave key removed", "ok");
+    });
+  };
+  renderBrave();
+  $("#save-brave").onclick = async () => {
+    const key = $("#brave-key")?.value.trim();
+    if (!key && !s.brave_key_mask) return toast("Paste your Brave key first.", "err");
+    try {
+      await api("/api/settings", { method: "POST", body: { brave_api_key: key ? key : "__keep__" } });
+      Object.assign(s, await api("/api/settings"));
+      renderBrave(); toast("Brave key saved", "ok", { label: "Test key", run: () => $("#test-brave").click() });
+    } catch (e) { toast(e.message, "err"); }
+  };
+  $("#test-brave").onclick = async () => {
+    const b = $("#test-brave"), msg = $("#brave-msg");
+    b.disabled = true; msg.innerHTML = '<span class="spinner"></span>';
+    try {
+      const r = await api("/api/settings/brave/test", { method: "POST" });
+      msg.innerHTML = r.ok ? '<span class="badge done">Working</span>' : `<span class="badge error">${esc(r.error)}</span>`;
     } catch (e) { msg.innerHTML = `<span class="badge error">${esc(e.message)}</span>`; }
     b.disabled = false;
   };

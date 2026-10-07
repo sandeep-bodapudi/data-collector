@@ -419,9 +419,9 @@ jobs3 = importlib.reload(jobs)
 for k in ("BRAVE_API_KEY", "GOOGLE_CSE_KEY", "GOOGLE_CSE_CX"):
     os.environ.pop(k, None)
 ok("no key: full, defensive pacing", jobs3._current_gap() == jobs3.SEARCH_GAP)
-os.environ["BRAVE_API_KEY"] = "x"
+search_mod._thread_keys.brave = "x"  # a person's own Brave key, as a job sets it
 ok("a Brave key: short, quota-based pacing", jobs3._current_gap() == jobs3.KEYED_GAP and jobs3._current_gap() < jobs3.SEARCH_GAP)
-del os.environ["BRAVE_API_KEY"]
+search_mod._thread_keys.brave = None
 ok("half of the Google CSE pair alone changes nothing (both key and engine id are required)",
    (os.environ.__setitem__("GOOGLE_CSE_KEY", "x"), jobs3._current_gap() == jobs3.SEARCH_GAP, os.environ.pop("GOOGLE_CSE_KEY"))[1])
 os.environ["GOOGLE_CSE_KEY"], os.environ["GOOGLE_CSE_CX"] = "x", "y"
@@ -440,11 +440,11 @@ jobs3.time.sleep = lambda s: None
 j = FakeJob()
 jobs3._discover_websites(j, [{"Name": "A College", "Website": "", "Search Location": "X"}])
 ok("with no key, zero hits still triggers the throttle wait-and-retry", any("waiting" in m for m in j.log))
-os.environ["BRAVE_API_KEY"] = "x"
+search_mod._thread_keys.brave = "x"
 j = FakeJob()
 jobs3._discover_websites(j, [{"Name": "A College", "Website": "", "Search Location": "X"}])
 ok("with a key, zero hits is taken at face value - no pointless wait-and-retry", not any("waiting" in m for m in j.log))
-del os.environ["BRAVE_API_KEY"]
+search_mod._thread_keys.brave = None
 importlib.reload(jobs)  # back to defaults for anything that runs after this file
 
 # ---- find_website's own internal pacing is also key-aware, not a flat 5s regardless of search speed -------------
@@ -777,6 +777,45 @@ ok("a listed college gets its phone and email from its profile page, with no sea
 ok("the profile's official website becomes the row's Website",
    prow[0]["Website"] == "https://www.mist.ac.in", prow[0]["Website"])
 discover.guess_website, discover.find_website = real_guess5, real_find5
+
+
+# ---- per-user Brave key: parallel workers, each user's own rate limit, nothing shared between users ----------------
+import threading as _th
+seen_threads, seen_keys = set(), []
+def fake_find_keyed(name, where, say=None, aliases=(), gap=None):
+    seen_threads.add(_th.get_ident())
+    seen_keys.append(search_mod._brave_key())
+    _time.sleep(0.05)
+    return (f"https://{name.split()[0].lower()}.ac.in/", 3)
+jobs.discover.find_website = fake_find_keyed
+class KeyedJob(FakeJob):
+    spec = {"brave_key": "user-key-123"}
+kj = KeyedJob()
+kbatch = [{"Name": f"College {i} Engineering", "Website": "", "Search Location": "X"} for i in range(12)]
+search_mod._thread_keys.brave = "user-key-123"
+jobs._discover_websites(kj, kbatch)
+search_mod._thread_keys.brave = None
+ok("with a key, the names are searched on several worker threads at once, not one after another",
+   len(seen_threads) > 1, len(seen_threads))
+ok("every worker thread searches with the job's own key", seen_keys and all(k == "user-key-123" for k in seen_keys), set(seen_keys))
+ok("every place still gets its website and a label saying where it came from",
+   all(r.get("Website", "").endswith(".ac.in/") and r.get("Website Source") == "Found by web search" for r in kbatch), kbatch[:2])
+ok("no key set: the names are searched one at a time, as before",
+   search_mod.brave_key_set() is False)
+
+ok("two different users' keys each get their own rate-limit slot, so they never wait on each other",
+   search_mod._brave_next_slot is not None)
+waits = []
+real_sleep_s = search_mod.time.sleep
+search_mod.time.sleep = lambda s: waits.append(s)
+for _ in range(3):
+    search_mod._brave_wait("key-A")
+search_mod._brave_wait("key-B")
+search_mod.time.sleep = real_sleep_s
+ok("the same key is spaced out: the 2nd and 3rd requests wait, the 1st does not",
+   len(waits) == 2 and all(w > 0 for w in waits), waits)
+ok("a different key is not delayed by the first key's requests", len(waits) == 2)
+jobs.discover.find_website = real_find_for_parallel if 'real_find_for_parallel' in globals() else jobs.discover.find_website
 
 
 print(f"\n{len(failures)} failure(s)" if failures else "\nAll tests passed")
