@@ -310,6 +310,45 @@ def _enrich_web_row(job: Job, fetcher: Fetcher, row: dict, spec: dict) -> dict:
     return row
 
 
+def _read_profiles(job: Job, fetcher: Fetcher, rows: list[dict]):
+    """Read each row's own profile page on its directory (e.g. colleges9.in's per-college page) for its phone number,
+    email, address and official website. Plain page fetches, not search, so they run in parallel. A row whose profile
+    gives an official website skips the free guess and the search entirely."""
+    todo = [r for r in rows if listings.is_profile_url(r.get("_listing_url", ""))]
+    if not todo:
+        return
+    job.phase, job.total, job.done = "visit", len(todo), 0
+    job.say(f"Reading the contact details on {len(todo)} college profile pages…")
+    job.activity = f"Reading contact details for {len(todo)} colleges from their directory pages…"
+
+    def one(r):
+        html, _ = fetcher.get_html(r["_listing_url"])
+        return listings.extract_profile(html, r["_listing_url"]) if html else None
+
+    with ThreadPoolExecutor(WORKERS) as pool:
+        futures = {pool.submit(one, r): r for r in todo}
+        for fut in as_completed(futures):
+            if job.cancelled.is_set():
+                pool.shutdown(wait=False, cancel_futures=True)
+                break
+            job.done += 1
+            r = futures[fut]
+            try:
+                p = fut.result()
+            except Exception:
+                continue
+            if not p:
+                continue
+            if p["phones"] and not r.get("Phone Numbers"):
+                r["Phone Numbers"] = "; ".join(p["phones"])
+            if p["emails"] and not r.get("Emails"):
+                r["Emails"] = "; ".join(p["emails"])
+            if p["address"] and not r.get("Address"):
+                r["Address"] = p["address"]
+            if p["website"]:
+                r["Website"] = p["website"]
+
+
 def _enrich_listed_rows(job: Job, fetcher: Fetcher, rows: list[dict], spec: dict):
     """A listing-expanded row starts with only a name (and maybe an address) - find each one's real website and
     read its contacts, the same two-step, search-engine-aware way Places mode already does: first the free guess
@@ -319,6 +358,7 @@ def _enrich_listed_rows(job: Job, fetcher: Fetcher, rows: list[dict], spec: dict
     for r in rows:
         r["_listing_url"] = r.get("Website", "")  # the directory's own profile link - kept as a fallback only
         r["Website"], r["Search Location"] = "", r.get("Address", "") or "India"
+    _read_profiles(job, fetcher, rows)  # the directory's own profile pages come first: they carry the phone/email
     _guess_websites(job, fetcher, rows)
     if not job.cancelled.is_set():
         _discover_websites(job, rows)

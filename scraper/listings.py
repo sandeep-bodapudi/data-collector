@@ -9,6 +9,7 @@ Each parser returns real rows (Name, Address when available, and the directory's
 listing - not yet verified as the institution's own official site, since that needs a further lookup/enrichment
 pass). A parser breaks if the site redesigns its page; that's an acceptable, visible failure (it'll just stop
 matching and return nothing), not a silent wrong answer."""
+import re
 from urllib.parse import urljoin
 
 from bs4 import BeautifulSoup
@@ -52,6 +53,64 @@ def _parse_colleges9(soup: BeautifulSoup, url: str) -> list[dict]:
 LISTING_PARSERS = {
     "colleges9.in": _parse_colleges9,
 }
+
+
+# ---------------------------------------------------------------- college profile pages (the contact details)
+# Each college on colleges9.in has its own profile page (the link a listing row points at). That page is where the
+# phone number, email and official website are - the category listing page only has the name and address. Labels
+# were read from a real profile page (AAR Mahaveer Engineering College, /colleges/.../EN728/): "Phone No.", "Mobile:",
+# "Email", "Website", "Address Details", "Affliated to:", "Established on:". Matched on those labels, not on layout.
+import re as _re
+
+_PROFILE_PHONE = _re.compile(r"Phone No\.?\s*:?\s*([+\d][\d\s,/()-]{5,}?)\s*(?=Head|Mobile|Email|Website|Hostel|$)")
+_PROFILE_MOBILE = _re.compile(r"Mobile\s*:?\s*([+\d][\d\s,/()-]{5,}?)\s*(?=Email|Website|Hostel|$)")
+_PROFILE_EMAIL = _re.compile(r"\bEmail\s*:?\s*([\w.+-]+@[\w-]+(?:\.[\w-]+)+)")
+_PROFILE_WEBSITE = _re.compile(r"\bWebsite\s*:?\s*((?:https?://)?(?:www\.)?[\w-]+(?:\.[\w-]+)+)")
+_PROFILE_ADDRESS = _re.compile(r"Address Details\s+Address\s*(.+?)\s+District")
+
+
+def _parse_colleges9_profile(text: str) -> dict:
+    out = {"phones": [], "emails": [], "website": "", "address": ""}
+    for pat in (_PROFILE_PHONE, _PROFILE_MOBILE):
+        m = pat.search(text)
+        if m:
+            digits = re.sub(r"[^\d+]", "", m.group(1))
+            if len(re.sub(r"\D", "", digits)) >= 6:
+                out["phones"].append(m.group(1).strip(" ,/"))
+    m = _PROFILE_EMAIL.search(text)
+    if m:
+        out["emails"].append(m.group(1).rstrip("."))
+    m = _PROFILE_WEBSITE.search(text)
+    if m and "colleges9" not in m.group(1):
+        site = m.group(1).rstrip(".")
+        out["website"] = site if site.startswith("http") else "https://" + site
+    m = _PROFILE_ADDRESS.search(text)
+    if m:
+        out["address"] = re.sub(r"\s+", " ", m.group(1)).strip(" ,")
+    return out
+
+
+PROFILE_PARSERS = {"colleges9.in": _parse_colleges9_profile}
+
+
+def is_profile_url(url: str) -> bool:
+    """A link to a college's own profile page on a site we have a contact-details parser for."""
+    return domain_of(url or "") in PROFILE_PARSERS and "/colleges/" in (url or "")
+
+
+def extract_profile(html: str, url: str) -> dict:
+    """Phone numbers, emails, official website and address from a college's profile page; empty fields if the
+    page doesn't have them or the site isn't registered. Never raises - a changed page just yields less."""
+    parser = PROFILE_PARSERS.get(domain_of(url))
+    if not parser:
+        return {"phones": [], "emails": [], "website": "", "address": ""}
+    try:
+        soup = BeautifulSoup(html, "lxml")
+        for tag in soup(["script", "style"]):
+            tag.decompose()
+        return parser(re.sub(r"\s+", " ", soup.get_text(" ")))
+    except Exception:
+        return {"phones": [], "emails": [], "website": "", "address": ""}
 
 
 def extract_listing(html: str, url: str) -> list[dict]:

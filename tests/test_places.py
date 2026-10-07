@@ -747,5 +747,70 @@ del os.environ["DISCOVER_MAX_PER_RUN"]
 importlib.reload(jobs)  # back to defaults
 discover.guess_website, discover.find_website = real_guess, real_find
 
+# ---- college profile pages: the phone, email and official website live there, not on the category listing -------
+PROFILE_HTML = ("<html><body><h3>AAR MAHAVEER ENGINEERING COLLEGE</h3><b>Address Details</b> Address Vyasapuri ,Bandlaguda "
+                ",Kesavagiri 500005, Hyderabad District. District Hyderabad State Telangana <b>Contact Details</b> Phone No. "
+                "4065810046 Head of The Institution: Mobile: Email agireddy@gmail.com Website www.mist.ac.in Hostel Details "
+                "Not Available</body></html>")
+PROFILE_URL = "https://www.colleges9.in/colleges/AAR-MAHAVEER-ENGINEERING-COLLEGE/EN728/"
+ok("a colleges9 profile link is recognised; a category listing link is not",
+   listings.is_profile_url(PROFILE_URL) and not listings.is_profile_url("https://www.colleges9.in/Telangana/Hyderabad/Engineering-Colleges/"))
+prof = listings.extract_profile(PROFILE_HTML, PROFILE_URL)
+ok("the profile page yields phone, email, official website and address",
+   prof["phones"] == ["4065810046"] and prof["emails"] == ["agireddy@gmail.com"]
+   and prof["website"] == "https://www.mist.ac.in" and prof["address"].startswith("Vyasapuri"), prof)
+ok("a non-profile or unregistered page yields nothing and never raises",
+   listings.extract_profile("<html>garbage</html>", PROFILE_URL)["phones"] == [] and
+   listings.extract_profile(PROFILE_HTML, "https://example.com/colleges/x/")["phones"] == [])
+
+class FakeProfileFetcher:
+    def get_html(self, url):
+        return (PROFILE_HTML, "ok") if url == PROFILE_URL else (None, "not used")
+real_guess5, real_find5 = discover.guess_website, discover.find_website
+discover.guess_website = lambda fetcher, name, area="", aliases=(): (_ for _ in ()).throw(AssertionError("no guess needed"))
+discover.find_website = lambda name, where, say=None, aliases=(), gap=None: (_ for _ in ()).throw(AssertionError("no search needed"))
+prow = [{"Name": "AAR MAHAVEER ENGINEERING COLLEGE", "Address": "", "Website": PROFILE_URL, "Phone Numbers": "", "Emails": ""}]
+pjob = jobs.Job({"rows": [], "columns": [], "custom_fields": [], "ai": {}, "fields": []})
+jobs._enrich_listed_rows(pjob, FakeProfileFetcher(), prow, {"custom_fields": [], "ai": {}})
+ok("a listed college gets its phone and email from its profile page, with no search or guess at all",
+   prow[0]["Phone Numbers"] == "4065810046" and prow[0]["Emails"] == "agireddy@gmail.com", prow[0])
+ok("the profile's official website becomes the row's Website",
+   prow[0]["Website"] == "https://www.mist.ac.in", prow[0]["Website"])
+discover.guess_website, discover.find_website = real_guess5, real_find5
+
+
 print(f"\n{len(failures)} failure(s)" if failures else "\nAll tests passed")
+
 sys.exit(1 if failures else 0)
+
+# ---- college profile pages: the phone, email and official website live there, not on the category listing -------
+PROFILE_HTML = ("<html><body><h3>AAR MAHAVEER ENGINEERING COLLEGE</h3><b>Address Details</b> Address Vyasapuri ,Bandlaguda "
+                ",Kesavagiri 500005, Hyderabad District. District Hyderabad State Telangana <b>Contact Details</b> Phone No. "
+                "4065810046 Head of The Institution: Mobile: Email agireddy@gmail.com Website www.mist.ac.in Hostel Details "
+                "Not Available</body></html>")
+PROFILE_URL = "https://www.colleges9.in/colleges/AAR-MAHAVEER-ENGINEERING-COLLEGE/EN728/"
+ok("a colleges9 profile link is recognised; a category listing link is not",
+   listings.is_profile_url(PROFILE_URL) and not listings.is_profile_url("https://www.colleges9.in/Telangana/Hyderabad/Engineering-Colleges/"))
+prof = listings.extract_profile(PROFILE_HTML, PROFILE_URL)
+ok("the profile page yields phone, email, official website and address",
+   prof["phones"] == ["4065810046"] and prof["emails"] == ["agireddy@gmail.com"]
+   and prof["website"] == "https://www.mist.ac.in" and prof["address"].startswith("Vyasapuri"), prof)
+ok("a non-profile or unregistered page yields nothing and never raises",
+   listings.extract_profile("<html>garbage</html>", PROFILE_URL)["phones"] == [] and
+   listings.extract_profile(PROFILE_HTML, "https://example.com/colleges/x/")["phones"] == [])
+
+class FakeProfileFetcher:
+    def get_html(self, url):
+        return (PROFILE_HTML, "ok") if url == PROFILE_URL else (None, "not used")
+real_guess5, real_find5 = discover.guess_website, discover.find_website
+discover.guess_website = lambda fetcher, name, area="", aliases=(): (_ for _ in ()).throw(AssertionError("no guess needed"))
+discover.find_website = lambda name, where, say=None, aliases=(), gap=None: (_ for _ in ()).throw(AssertionError("no search needed"))
+prow = [{"Name": "AAR MAHAVEER ENGINEERING COLLEGE", "Address": "", "Website": PROFILE_URL, "Phone Numbers": "", "Emails": ""}]
+pjob = jobs.Job({"rows": [], "columns": [], "custom_fields": [], "ai": {}, "fields": []})
+jobs._enrich_listed_rows(pjob, FakeProfileFetcher(), prow, {"custom_fields": [], "ai": {}})
+ok("a listed college gets its phone and email from its profile page, with no search or guess at all",
+   prow[0]["Phone Numbers"] == "4065810046" and prow[0]["Emails"] == "agireddy@gmail.com", prow[0])
+ok("the profile's official website becomes the row's Website",
+   prow[0]["Website"] == "https://www.mist.ac.in", prow[0]["Website"])
+discover.guess_website, discover.find_website = real_guess5, real_find5
+
