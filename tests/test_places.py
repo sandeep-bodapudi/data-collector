@@ -30,7 +30,8 @@ suburb = {"class": "place", "type": "suburb", "osm_type": "node", "osm_id": 5, "
 city = {"class": "place", "type": "city", "osm_type": "relation", "osm_id": 7, "lat": "17.38", "lon": "78.48",
         "boundingbox": ["17.2", "17.6", "78.2", "78.7"], "display_name": "Hyderabad, Telangana"}
 ok("a single business is not an area", places._as_area(poi) is None)
-ok("an administrative boundary is an area", places._as_area(mandal) == {"kind": "area", "osm_type": "relation", "osm_id": 9821936})
+ok("an administrative boundary is an area, with its real box kept for the fallback sources",
+   places._as_area(mandal) == {"kind": "area", "osm_type": "relation", "osm_id": 9821936, "bbox": (17.5078, 78.3479, 17.5537, 78.399)})
 a = places._as_area(suburb)
 ok("a suburb that is only a point gets a search radius", a["kind"] == "around" and a["radius"] == 2500)
 ok("a big place uses its bounding box", places._as_area(city)["kind"] == "box")
@@ -112,6 +113,67 @@ places._overpass = lambda q, notify=None: []
 log.clear()
 none = places.search_places("Engineering colleges", "Bachupally, Hyderabad", "", 100, info=log.append)
 ok("zero results come with advice", none == [] and any("Nothing in the map data" in m and "Web search" in m for m in log))
+
+# ---- when Overpass itself won't answer: two other free sources, same row shape, before giving up ---------------
+ok("a bounding box is kept for an exact 'area' match too (needed for the fallbacks below, not for Overpass itself)",
+   places._as_area({"class": "boundary", "osm_type": "relation", "osm_id": "1", "boundingbox": ["1", "3", "2", "4"]})["bbox"] == (1.0, 2.0, 3.0, 4.0))
+ok("a point match gets an approximate box around it, not just a radius",
+   "bbox" in places._as_area({"class": "place", "type": "suburb", "lat": "17.5", "lon": "78.4", "boundingbox": ["17.4", "17.6", "78.3", "78.5"]}))
+ok("inside the box counts, outside doesn't, and no box at all is never used to drop a result",
+   places._in_bbox(17.5, 78.4, (17.0, 78.0, 18.0, 79.0)) and not places._in_bbox(40.0, -74.0, (17.0, 78.0, 18.0, 79.0))
+   and places._in_bbox(40.0, -74.0, None))
+
+real_req_get, real_fb_nom, real_fb_wd = places.requests.get, places._fallback_nominatim, places._fallback_wikidata
+
+class FakeNominatimResp:
+    def __init__(self, items): self._items = items
+    def raise_for_status(self): pass
+    def json(self): return self._items
+places.requests.get = lambda url, params=None, headers=None, timeout=None: FakeNominatimResp(
+    [{"lat": "13.65", "lon": "79.35", "name": "Venkateswara Temple", "display_name": "Venkateswara Temple, Tirupati",
+      "extratags": {"website": "https://tirumala.org"}, "address": {"city": "Tirupati", "state": "Andhra Pradesh"}}])
+places.time.sleep = lambda s: None
+nom_rows = places._fallback_nominatim("Hindu temples", {"bbox": (12.0, 78.0, 14.0, 80.0)}, "Venkateswara", 20)
+ok("the Nominatim fallback asks for places inside the searched box and reads real OSM tags back",
+   nom_rows and nom_rows[0]["tags"]["website"] == "https://tirumala.org" and nom_rows[0]["tags"]["addr:city"] == "Tirupati", nom_rows)
+
+class FakeSparqlResp:
+    def __init__(self, rows): self._rows = rows
+    def raise_for_status(self): pass
+    def json(self): return {"results": {"bindings": self._rows}}
+sparql_rows = [
+    {"itemLabel": {"value": "Tirumala Venkateswara Temple"}, "coord": {"value": "Point(79.35 13.68)"}, "website": {"value": "https://tirumala.org"}},
+    {"itemLabel": {"value": "Venkateswara Temple of North Carolina"}, "coord": {"value": "Point(-78.8 35.8)"}},  # outside the box: must be dropped
+]
+places.requests.get = lambda url, params=None, headers=None, timeout=None: FakeSparqlResp(sparql_rows)
+wd_rows = places._fallback_wikidata("Hindu temples", {"bbox": (12.0, 78.0, 14.0, 80.0)}, "Venkateswara", 20)
+ok("the Wikidata fallback keeps only the match inside the searched area's box", len(wd_rows) == 1 and wd_rows[0]["tags"]["name"] == "Tirumala Venkateswara Temple", wd_rows)
+ok("Wikidata is skipped for a category with no verified class, or with no name to search for (it would make an incomplete search look falsely empty otherwise)",
+   places._fallback_wikidata("Restaurants", {}, "Anything", 20) == [] and places._fallback_wikidata("Hindu temples", {}, "", 20) == [])
+places.requests.get, places._fallback_nominatim, places._fallback_wikidata = real_req_get, real_fb_nom, real_fb_wd
+
+places.geocode = lambda loc: {"kind": "area", "osm_type": "relation", "osm_id": 1, "label": "India", "bbox": None}
+places._overpass = lambda q, notify=None: (_ for _ in ()).throw(places.PlaceError("servers are busy"))
+places._fallback_nominatim = lambda category, geo, name_filter, limit: [{"tags": {"name": "Found By Nominatim"}, "lat": 1.0, "lon": 2.0}]
+places._fallback_wikidata = lambda category, geo, name_filter, limit: (_ for _ in ()).throw(AssertionError("Nominatim already found something - Wikidata must not even be tried"))
+log.clear()
+rows_a = places.search_places("Hindu temples", "India", "Venkateswara", 20, info=log.append)
+ok("Overpass failing falls through to Nominatim automatically, not to a dead end", [r["Name"] for r in rows_a] == ["Found By Nominatim"])
+ok("the run log says plainly that it switched sources, not just 'no results'", any("busy" in m for m in log) and any("Nominatim" in m for m in log))
+
+places._fallback_nominatim = lambda category, geo, name_filter, limit: []
+places._fallback_wikidata = lambda category, geo, name_filter, limit: [{"tags": {"name": "Found By Wikidata"}, "lat": 1.0, "lon": 2.0}]
+rows_b = places.search_places("Hindu temples", "India", "Venkateswara", 20)
+ok("an empty Nominatim fallback moves on to Wikidata, rather than stopping there", [r["Name"] for r in rows_b] == ["Found By Wikidata"])
+
+places._fallback_nominatim = lambda category, geo, name_filter, limit: []
+places._fallback_wikidata = lambda category, geo, name_filter, limit: []
+try:
+    places.search_places("Hindu temples", "India", "Venkateswara", 20)
+    ok("if Overpass and both fallbacks all come up empty, it still fails loudly rather than returning an empty sheet silently", False)
+except places.PlaceError as e:
+    ok("if Overpass and both fallbacks all come up empty, it still fails loudly rather than returning an empty sheet silently", "busy" in str(e))
+places._overpass, places._fallback_nominatim, places._fallback_wikidata = fake_overpass, real_fb_nom, real_fb_wd
 
 # ---- finding a website ------------------------------------------------------------------------------
 H = lambda url, title="": {"href": url, "title": title, "body": ""}

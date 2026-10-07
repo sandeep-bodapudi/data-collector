@@ -98,17 +98,31 @@ def _nominatim(location: str, limit: int = 8) -> list[dict]:
     return r.json()
 
 
+def _bbox_from_point(lat: float, lon: float, radius_m: float) -> tuple[float, float, float, float]:
+    """An approximate (south, west, north, east) box around a point - good enough to bound a fallback search,
+    not for anything that needs real precision. 1 degree of latitude is ~111,320m everywhere; a degree of
+    longitude shrinks toward the poles, so it's scaled by the latitude's cosine."""
+    import math
+    d_lat = radius_m / 111320
+    d_lon = radius_m / (111320 * max(0.1, math.cos(math.radians(lat))))
+    return lat - d_lat, lon - d_lon, lat + d_lat, lon + d_lon
+
+
 def _as_area(c: dict) -> dict | None:
     """Turn a geocoder result into somewhere we can search inside. Returns None for a single business or building:
     searching inside a shop's 10-metre outline finds nothing."""
     cls, typ = c.get("class"), c.get("type")
     s_, n_, w_, e_ = [float(x) for x in c["boundingbox"]]
     if cls == "boundary" and c.get("osm_type") in ("relation", "way"):
-        return {"kind": "area", "osm_type": c["osm_type"], "osm_id": int(c["osm_id"])}
+        # Kept too, even though Overpass itself only needs the osm_id - a fallback search (Nominatim/Wikidata,
+        # used only when Overpass itself doesn't answer) needs some box to stay inside, and this one is exact.
+        return {"kind": "area", "osm_type": c["osm_type"], "osm_id": int(c["osm_id"]), "bbox": (s_, w_, n_, e_)}
     if cls in ("place", "boundary"):
         if (n_ - s_) > BIG_BOX_DEGREES or (e_ - w_) > BIG_BOX_DEGREES:
             return {"kind": "box", "bbox": (s_, w_, n_, e_)}
-        return {"kind": "around", "lat": float(c["lat"]), "lon": float(c["lon"]), "radius": AREA_PLACE_TYPES.get(typ, POINT_RADIUS)}
+        radius = AREA_PLACE_TYPES.get(typ, POINT_RADIUS)
+        return {"kind": "around", "lat": float(c["lat"]), "lon": float(c["lon"]), "radius": radius,
+                "bbox": _bbox_from_point(float(c["lat"]), float(c["lon"]), radius)}
     return None
 
 
@@ -126,7 +140,8 @@ def _geocode_photon(location: str) -> dict | None:
     if extent and (abs(extent[2] - extent[0]) > BIG_BOX_DEGREES or abs(extent[1] - extent[3]) > BIG_BOX_DEGREES):
         w_, n_, e_, s_ = extent
         return {"kind": "box", "bbox": (s_, w_, n_, e_), "label": label}
-    return {"kind": "around", "lat": lat, "lon": lon, "radius": POINT_RADIUS, "label": label, "approx": True}
+    return {"kind": "around", "lat": lat, "lon": lon, "radius": POINT_RADIUS, "label": label, "approx": True,
+            "bbox": _bbox_from_point(lat, lon, POINT_RADIUS)}
 
 
 def geocode(location: str) -> dict:
@@ -163,7 +178,8 @@ def geocode(location: str) -> dict:
         found["fallback"] = False
         return found
     if first_match is not None:
-        return {"kind": "around", "lat": float(first_match["lat"]), "lon": float(first_match["lon"]), "radius": POINT_RADIUS,
+        lat, lon = float(first_match["lat"]), float(first_match["lon"])
+        return {"kind": "around", "lat": lat, "lon": lon, "radius": POINT_RADIUS, "bbox": _bbox_from_point(lat, lon, POINT_RADIUS),
                 "label": first_match.get("display_name", location), "approx": True, "fallback": False}
     raise PlaceError(f"Location not found: {location}. Try the area name with the city or country, e.g. 'Bachupally, Hyderabad, India'.")
 
@@ -189,23 +205,25 @@ def _area_clause(geo: dict) -> tuple[str, str]:
 
 
 def _overpass(query: str, notify=None) -> list[dict]:
+    """One pass over the mirrors, not two - a dead or overloaded mirror answering the same way 15 seconds later is
+    the usual case, not the exception, so a second identical pass mostly just doubles the wait. search_places()
+    has two other free sources to fall back to now (see _fallback_nominatim/_fallback_wikidata below), so giving
+    up on Overpass sooner and trying those is faster than retrying Overpass's own mirrors a second time."""
     last = ""
-    for attempt in range(2):
-        for i, server in enumerate(OVERPASS_SERVERS):
-            if notify and (attempt or i):
-                notify(f"The map service is busy - trying backup server {attempt * len(OVERPASS_SERVERS) + i + 1} of {2 * len(OVERPASS_SERVERS)}…")
-            try:
-                r = requests.post(server, data={"data": query}, headers=HEADERS, timeout=SERVER_TIMEOUT)
-            except requests.RequestException as e:
-                last = type(e).__name__
-                continue
-            if r.status_code == 200:
-                return r.json().get("elements", [])
-            last = f"HTTP {r.status_code}"
-            if r.status_code not in (429, 502, 503, 504):
-                break
-        time.sleep(15)
-    raise PlaceError(f"OpenStreetMap servers are busy ({last}). Please try again in a few minutes.")
+    for i, server in enumerate(OVERPASS_SERVERS):
+        if notify and i:
+            notify(f"The map service is busy - trying backup server {i + 1} of {len(OVERPASS_SERVERS)}…")
+        try:
+            r = requests.post(server, data={"data": query}, headers=HEADERS, timeout=SERVER_TIMEOUT)
+        except requests.RequestException as e:
+            last = type(e).__name__
+            continue
+        if r.status_code == 200:
+            return r.json().get("elements", [])
+        last = f"HTTP {r.status_code}"
+        if r.status_code not in (429, 502, 503, 504):
+            break
+    raise PlaceError(f"OpenStreetMap's Overpass servers are busy or unreachable ({last}).")
 
 
 def _addr(tags: dict) -> str:
@@ -236,6 +254,108 @@ def _other_details(tags: dict) -> str:
     return "; ".join(bits)[:500]
 
 
+# A free-text hint word for Nominatim's plain search (it has no tag-filter syntax like Overpass), and, where a
+# category maps onto a real Wikidata class, that class's QID (verified live against Wikidata's own search API
+# before being written here - never guessed; a category with no verified QID just gets no Wikidata fallback,
+# rather than a guess that might silently match the wrong thing).
+FALLBACK_HINT = {
+    "Hindu temples": ("temple", "Q842402"), "Churches": ("church", "Q16970"), "Mosques": ("mosque", "Q32815"),
+    "Gurudwaras": ("gurudwara", "Q337986"), "Buddhist / Jain temples": ("temple", ("Q5393308", "Q2613100")),
+    "All places of worship": ("place of worship", None), "Hospitals": ("hospital", "Q16917"),
+    "Clinics & doctors": ("clinic", None), "Pharmacies": ("pharmacy", None), "Schools": ("school", None),
+    "Colleges & universities": ("college", None), "Engineering colleges": ("engineering college", "Q1663017"),
+    "Restaurants": ("restaurant", None), "Cafes": ("cafe", None), "Hotels": ("hotel", None), "Banks": ("bank", None),
+    "ATMs": ("atm", None), "Supermarkets & shops": ("supermarket", None), "Offices / companies": ("office", None),
+    "IT companies": ("IT company", None), "Factories / industrial": ("factory", None), "Petrol pumps": ("petrol station", None),
+    "Tourist attractions": ("tourist attraction", None), "Police stations": ("police station", None),
+    "Government offices": ("government office", None),
+}
+
+
+def _in_bbox(lat, lon, bbox) -> bool:
+    if lat is None or lon is None or not bbox:
+        return True  # nothing to check against - keep it rather than silently drop a result
+    s_, w_, n_, e_ = bbox
+    return s_ <= lat <= n_ and w_ <= lon <= e_
+
+
+def _fallback_nominatim(category: str, geo: dict, name_filter: str, limit: int) -> list[dict]:
+    """Same OpenStreetMap data Overpass reads, but through Nominatim's separate search service instead - run by
+    the same project, but independent infrastructure, so it isn't necessarily down at the same time Overpass is.
+    Plain free-text search, not a tag filter, so results are approximate: kept inside the searched area's box,
+    but not guaranteed to actually be the right category - better than nothing when Overpass itself won't answer,
+    not a replacement for it."""
+    hint = FALLBACK_HINT.get(category, (category.lower(), None))[0]
+    q = f"{name_filter} {hint}".strip() if name_filter else hint
+    params = {"q": q, "format": "jsonv2", "extratags": 1, "addressdetails": 1, "limit": min(int(limit), 50)}
+    bbox = geo.get("bbox")
+    if bbox:
+        s_, w_, n_, e_ = bbox
+        params.update({"viewbox": f"{w_},{n_},{e_},{s_}", "bounded": 1})
+    r = requests.get(NOMINATIM, params=params, headers=HEADERS, timeout=30)
+    time.sleep(1.0)  # same free service as geocode() - one request per second
+    r.raise_for_status()
+    out = []
+    for item in r.json():
+        lat, lon = float(item["lat"]), float(item["lon"])
+        tags = dict(item.get("extratags") or {})
+        tags.setdefault("name", item.get("name") or item.get("display_name", "").split(",")[0])
+        addr = item.get("address") or {}
+        for k, v in (("addr:city", addr.get("city") or addr.get("town")), ("addr:state", addr.get("state")),
+                     ("addr:postcode", addr.get("postcode")), ("addr:full", item.get("display_name"))):
+            if v:
+                tags.setdefault(k, v)
+        out.append({"tags": tags, "lat": lat, "lon": lon})
+    return out
+
+
+WIKIDATA_SPARQL = "https://query.wikidata.org/sparql"
+
+
+def _fallback_wikidata(category: str, geo: dict, name_filter: str, limit: int) -> list[dict]:
+    """Wikidata, not OpenStreetMap at all - a genuinely independent data source and service, so it doesn't share
+    whatever took Overpass and Nominatim down. Only tried for a category with a verified class above, and only
+    when a name was actually given to search for: Wikidata has nowhere near every real place OSM has, so used
+    unfiltered it would make a "list everything here" search look emptier than it really is, not more complete.
+    Not geographically bounded by the query itself (Wikidata has no simple way to ask "is this inside this area"
+    the way Overpass/Nominatim do); instead, every match is fetched with its coordinates, if it has any, and
+    filtered against the searched area's box afterwards, in Python."""
+    qids = FALLBACK_HINT.get(category, (None, None))[1]
+    if not qids or not name_filter:
+        return []
+    qids = (qids,) if isinstance(qids, str) else qids
+    safe_name = name_filter.replace('"', "").replace("\\", "")[:100].lower()
+    classes = " ".join(f"wd:{q}" for q in qids)
+    query = f"""SELECT ?itemLabel ?coord ?website WHERE {{
+      VALUES ?class {{ {classes} }}
+      ?item wdt:P31/wdt:P279* ?class .
+      ?item rdfs:label ?itemLabel .
+      FILTER(CONTAINS(LCASE(?itemLabel), "{safe_name}"))
+      FILTER(LANG(?itemLabel) = "en")
+      OPTIONAL {{ ?item wdt:P625 ?coord. }}
+      OPTIONAL {{ ?item wdt:P856 ?website. }}
+    }} LIMIT {min(int(limit), 200)}"""
+    r = requests.get(WIKIDATA_SPARQL, params={"query": query, "format": "json"},
+                      headers={**HEADERS, "Accept": "application/sparql-results+json"}, timeout=30)
+    r.raise_for_status()
+    bbox = geo.get("bbox")
+    out = []
+    for row in r.json()["results"]["bindings"]:
+        name = row.get("itemLabel", {}).get("value", "")
+        coord = row.get("coord", {}).get("value", "")
+        lat = lon = None
+        m = re.match(r"Point\(([\d.\-]+) ([\d.\-]+)\)", coord)
+        if m:
+            lon, lat = float(m.group(1)), float(m.group(2))
+        if not _in_bbox(lat, lon, bbox):
+            continue
+        tags = {"name": name}
+        if row.get("website", {}).get("value"):
+            tags["website"] = row["website"]["value"]
+        out.append({"tags": tags, "lat": lat, "lon": lon})
+    return out
+
+
 def search_places(category: str, location: str, name_filter: str = "", limit: int = 500, notify=None, info=None) -> list[dict]:
     geo = geocode(location)
     if info:
@@ -244,7 +364,28 @@ def search_places(category: str, location: str, name_filter: str = "", limit: in
     name_part = f'[name~"{name_filter.replace(chr(34), "")}",i]' if name_filter else "[name]"
     stmts = "".join(f"nwr{f}{name_part}{area};" for f in CATEGORIES[category])
     query = f"[out:json][timeout:{SERVER_TIMEOUT}];{prefix}({stmts});out center tags {int(limit)};"
-    elements = _overpass(query, notify)
+    try:
+        elements = _overpass(query, notify)
+    except PlaceError as e:
+        if info:
+            info(f"  {e} Trying two other free map sources instead of giving up…")
+        try:
+            elements = _fallback_nominatim(category, geo, name_filter, limit)
+            if elements and info:
+                info(f"  Found {len(elements)} possible match{'es' if len(elements) != 1 else ''} through Nominatim "
+                     "(a plain text search, not an exact category match - please check these before relying on them).")
+        except requests.RequestException:
+            elements = []
+        if not elements:
+            try:
+                elements = _fallback_wikidata(category, geo, name_filter, limit)
+                if elements and info:
+                    info(f"  Found {len(elements)} match{'es' if len(elements) != 1 else ''} on Wikidata instead "
+                         "(a smaller, separate database - complete for famous places, not for most ordinary ones).")
+            except requests.RequestException:
+                elements = []
+        if not elements:
+            raise  # neither fallback found anything either - the original Overpass failure is the real story
 
     rows, seen = [], set()
     for el in elements:
