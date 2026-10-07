@@ -279,6 +279,48 @@ def _in_bbox(lat, lon, bbox) -> bool:
     return s_ <= lat <= n_ and w_ <= lon <= e_
 
 
+def _photon_osm_tag(category: str) -> str | None:
+    """The category's first, primary `[key=value]` Overpass filter translates directly into Photon's own
+    server-side category filter (a second filter chained onto it, such as temples' own `[religion=hindu]`, has
+    no Photon equivalent and is dropped - Photon then matches the broader tag alone, same loss of precision
+    Nominatim's plain text search already has for that part). A regex filter (Engineering colleges' name
+    pattern, or a `~` alternative list) has no Photon tag equivalent at all, so that category gets no tag filter
+    and relies on the free-text hint word alone, same as Nominatim."""
+    m = re.match(r'^\[(\w+)=([\w:]+)]', CATEGORIES[category][0])
+    return f"{m.group(1)}:{m.group(2)}" if m else None
+
+
+def _fallback_photon(category: str, geo: dict, name_filter: str, limit: int) -> list[dict]:
+    """Photon (run by Komoot) reads the same OpenStreetMap data Overpass and Nominatim do, but it's a third,
+    separately-run service - not down just because Overpass or Nominatim is. Unlike Nominatim's plain free-text
+    search, Photon can filter by the category's own primary OSM tag server-side when that category boils down to
+    a plain key=value (see _photon_osm_tag) - a real category match, not just a hopeful text search."""
+    hint = FALLBACK_HINT.get(category, (category.lower(), None))[0]
+    q = f"{name_filter} {hint}".strip() if name_filter else hint
+    params = {"q": q, "limit": min(int(limit), 50)}
+    bbox = geo.get("bbox")
+    if bbox:
+        s_, w_, n_, e_ = bbox
+        params["bbox"] = f"{w_},{s_},{e_},{n_}"
+    tag = _photon_osm_tag(category)
+    if tag:
+        params["osm_tag"] = tag
+    r = requests.get(PHOTON, params=params, headers=HEADERS, timeout=30)
+    r.raise_for_status()
+    out = []
+    for f in r.json().get("features", []):
+        p = f.get("properties", {})
+        coords = f.get("geometry", {}).get("coordinates", [None, None])
+        lon, lat = coords[0], coords[1]
+        tags = {"name": p.get("name", "")}
+        for k, v in (("addr:city", p.get("city")), ("addr:state", p.get("state")), ("addr:postcode", p.get("postcode")),
+                     ("addr:full", ", ".join(x for x in (p.get("street"), p.get("city"), p.get("state")) if x))):
+            if v:
+                tags[k] = v
+        out.append({"tags": tags, "lat": lat, "lon": lon})
+    return out
+
+
 def _fallback_nominatim(category: str, geo: dict, name_filter: str, limit: int) -> list[dict]:
     """Same OpenStreetMap data Overpass reads, but through Nominatim's separate search service instead - run by
     the same project, but independent infrastructure, so it isn't necessarily down at the same time Overpass is.
@@ -368,24 +410,26 @@ def search_places(category: str, location: str, name_filter: str = "", limit: in
         elements = _overpass(query, notify)
     except PlaceError as e:
         if info:
-            info(f"  {e} Trying two other free map sources instead of giving up…")
-        try:
-            elements = _fallback_nominatim(category, geo, name_filter, limit)
-            if elements and info:
-                info(f"  Found {len(elements)} possible match{'es' if len(elements) != 1 else ''} through Nominatim "
-                     "(a plain text search, not an exact category match - please check these before relying on them).")
-        except requests.RequestException:
-            elements = []
-        if not elements:
+            info(f"  {e} Trying other free map sources instead of giving up…")
+        elements = []
+        # Three independent services, tried in the order they're worth trusting: Photon can filter by the real
+        # OSM category tag server-side (not just text), Nominatim can't but still searches real OSM data,
+        # Wikidata is a different database entirely (last, since it only has famous places at all).
+        for fallback, label, caveat in (
+            (_fallback_photon, "Photon", "a separate OpenStreetMap search service - a real category match, not just a text search"),
+            (_fallback_nominatim, "Nominatim", "a plain text search, not an exact category match - please check these before relying on them"),
+            (_fallback_wikidata, "Wikidata", "a smaller, separate database - complete for famous places, not for most ordinary ones"),
+        ):
             try:
-                elements = _fallback_wikidata(category, geo, name_filter, limit)
-                if elements and info:
-                    info(f"  Found {len(elements)} match{'es' if len(elements) != 1 else ''} on Wikidata instead "
-                         "(a smaller, separate database - complete for famous places, not for most ordinary ones).")
+                elements = fallback(category, geo, name_filter, limit)
             except requests.RequestException:
                 elements = []
+            if elements:
+                if info:
+                    info(f"  Found {len(elements)} match{'es' if len(elements) != 1 else ''} through {label} instead ({caveat}).")
+                break
         if not elements:
-            raise  # neither fallback found anything either - the original Overpass failure is the real story
+            raise  # every fallback came up empty too - the original Overpass failure is the real story
 
     rows, seen = [], set()
     for el in elements:

@@ -123,7 +123,30 @@ ok("inside the box counts, outside doesn't, and no box at all is never used to d
    places._in_bbox(17.5, 78.4, (17.0, 78.0, 18.0, 79.0)) and not places._in_bbox(40.0, -74.0, (17.0, 78.0, 18.0, 79.0))
    and places._in_bbox(40.0, -74.0, None))
 
-real_req_get, real_fb_nom, real_fb_wd = places.requests.get, places._fallback_nominatim, places._fallback_wikidata
+real_req_get, real_fb_photon, real_fb_nom, real_fb_wd = (places.requests.get, places._fallback_photon,
+                                                          places._fallback_nominatim, places._fallback_wikidata)
+
+ok("a plain key=value category translates to Photon's own tag filter", places._photon_osm_tag("Hindu temples") == "amenity:place_of_worship")
+ok("a category with a second, chained filter (religion=hindu) still gets its primary tag - the chained part has no Photon equivalent",
+   places._photon_osm_tag("Buddhist / Jain temples") == "amenity:place_of_worship")
+ok("a regex-based category (a name pattern, not a plain key=value) has no Photon tag equivalent - falls back to the hint word alone",
+   places._photon_osm_tag("Engineering colleges") is None)
+
+class FakePhotonResp:
+    def __init__(self, feats): self._feats = feats
+    def raise_for_status(self): pass
+    def json(self): return {"features": self._feats}
+photon_calls = []
+def fake_photon_get(url, params=None, headers=None, timeout=None):
+    photon_calls.append(params)
+    return FakePhotonResp([{"properties": {"name": "Venkateswara Swamy Temple", "city": "Tirupati", "state": "Andhra Pradesh"},
+                            "geometry": {"coordinates": [79.35, 13.65]}}])
+places.requests.get = fake_photon_get
+photon_rows = places._fallback_photon("Hindu temples", {"bbox": (12.0, 78.0, 14.0, 80.0)}, "Venkateswara", 20)
+ok("the Photon fallback sends the real OSM category tag server-side, not just a text search",
+   photon_calls[0]["osm_tag"] == "amenity:place_of_worship", photon_calls[0])
+ok("the Photon fallback reads real coordinates and address fields back",
+   photon_rows and photon_rows[0]["tags"]["name"] == "Venkateswara Swamy Temple" and photon_rows[0]["lat"] == 13.65, photon_rows)
 
 class FakeNominatimResp:
     def __init__(self, items): self._items = items
@@ -150,30 +173,39 @@ wd_rows = places._fallback_wikidata("Hindu temples", {"bbox": (12.0, 78.0, 14.0,
 ok("the Wikidata fallback keeps only the match inside the searched area's box", len(wd_rows) == 1 and wd_rows[0]["tags"]["name"] == "Tirumala Venkateswara Temple", wd_rows)
 ok("Wikidata is skipped for a category with no verified class, or with no name to search for (it would make an incomplete search look falsely empty otherwise)",
    places._fallback_wikidata("Restaurants", {}, "Anything", 20) == [] and places._fallback_wikidata("Hindu temples", {}, "", 20) == [])
-places.requests.get, places._fallback_nominatim, places._fallback_wikidata = real_req_get, real_fb_nom, real_fb_wd
+places.requests.get, places._fallback_photon, places._fallback_nominatim, places._fallback_wikidata = (
+    real_req_get, real_fb_photon, real_fb_nom, real_fb_wd)
 
 places.geocode = lambda loc: {"kind": "area", "osm_type": "relation", "osm_id": 1, "label": "India", "bbox": None}
 places._overpass = lambda q, notify=None: (_ for _ in ()).throw(places.PlaceError("servers are busy"))
-places._fallback_nominatim = lambda category, geo, name_filter, limit: [{"tags": {"name": "Found By Nominatim"}, "lat": 1.0, "lon": 2.0}]
-places._fallback_wikidata = lambda category, geo, name_filter, limit: (_ for _ in ()).throw(AssertionError("Nominatim already found something - Wikidata must not even be tried"))
+places._fallback_photon = lambda category, geo, name_filter, limit: [{"tags": {"name": "Found By Photon"}, "lat": 1.0, "lon": 2.0}]
+places._fallback_nominatim = lambda category, geo, name_filter, limit: (_ for _ in ()).throw(AssertionError("Photon already found something - Nominatim must not even be tried"))
+places._fallback_wikidata = lambda category, geo, name_filter, limit: (_ for _ in ()).throw(AssertionError("Photon already found something - Wikidata must not even be tried"))
 log.clear()
 rows_a = places.search_places("Hindu temples", "India", "Venkateswara", 20, info=log.append)
-ok("Overpass failing falls through to Nominatim automatically, not to a dead end", [r["Name"] for r in rows_a] == ["Found By Nominatim"])
-ok("the run log says plainly that it switched sources, not just 'no results'", any("busy" in m for m in log) and any("Nominatim" in m for m in log))
+ok("Overpass failing falls through to Photon first, not to a dead end", [r["Name"] for r in rows_a] == ["Found By Photon"])
+ok("the run log says plainly that it switched sources, not just 'no results'", any("busy" in m for m in log) and any("Photon" in m for m in log))
+
+places._fallback_photon = lambda category, geo, name_filter, limit: []
+places._fallback_nominatim = lambda category, geo, name_filter, limit: [{"tags": {"name": "Found By Nominatim"}, "lat": 1.0, "lon": 2.0}]
+places._fallback_wikidata = lambda category, geo, name_filter, limit: (_ for _ in ()).throw(AssertionError("Nominatim already found something - Wikidata must not even be tried"))
+rows_b = places.search_places("Hindu temples", "India", "Venkateswara", 20)
+ok("an empty Photon fallback moves on to Nominatim, rather than stopping there", [r["Name"] for r in rows_b] == ["Found By Nominatim"])
 
 places._fallback_nominatim = lambda category, geo, name_filter, limit: []
 places._fallback_wikidata = lambda category, geo, name_filter, limit: [{"tags": {"name": "Found By Wikidata"}, "lat": 1.0, "lon": 2.0}]
-rows_b = places.search_places("Hindu temples", "India", "Venkateswara", 20)
-ok("an empty Nominatim fallback moves on to Wikidata, rather than stopping there", [r["Name"] for r in rows_b] == ["Found By Wikidata"])
+rows_c = places.search_places("Hindu temples", "India", "Venkateswara", 20)
+ok("an empty Nominatim fallback too moves on to Wikidata, rather than stopping there", [r["Name"] for r in rows_c] == ["Found By Wikidata"])
 
+places._fallback_photon = lambda category, geo, name_filter, limit: []
 places._fallback_nominatim = lambda category, geo, name_filter, limit: []
 places._fallback_wikidata = lambda category, geo, name_filter, limit: []
 try:
     places.search_places("Hindu temples", "India", "Venkateswara", 20)
-    ok("if Overpass and both fallbacks all come up empty, it still fails loudly rather than returning an empty sheet silently", False)
+    ok("if Overpass and all three fallbacks come up empty, it still fails loudly rather than returning an empty sheet silently", False)
 except places.PlaceError as e:
-    ok("if Overpass and both fallbacks all come up empty, it still fails loudly rather than returning an empty sheet silently", "busy" in str(e))
-places._overpass, places._fallback_nominatim, places._fallback_wikidata = fake_overpass, real_fb_nom, real_fb_wd
+    ok("if Overpass and all three fallbacks come up empty, it still fails loudly rather than returning an empty sheet silently", "busy" in str(e))
+places._overpass, places._fallback_photon, places._fallback_nominatim, places._fallback_wikidata = fake_overpass, real_fb_photon, real_fb_nom, real_fb_wd
 
 # ---- finding a website ------------------------------------------------------------------------------
 H = lambda url, title="": {"href": url, "title": title, "body": ""}

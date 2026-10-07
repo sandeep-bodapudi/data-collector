@@ -490,6 +490,21 @@ const FIELD_INFO = {
 };
 const DEFAULT_FIELDS = ["emails", "phones", "address"];
 const PLATFORMS = [["web", "Websites", "globe"], ["linkedin.com", "LinkedIn", "link"], ["facebook.com", "Facebook", "link"], ["instagram.com", "Instagram", "link"], ["twitter.com", "X / Twitter", "link"]];
+// Plain Emails/Phone/Address/Website are generic - they fit any business, but miss what actually matters for a
+// temple, a hospital, a hotel... These are suggested AI details (see the "Other details with AI" box below),
+// matched against the typed searches and any ticked directory source's category, not forced on anyone: they
+// still cost an AI key to actually run, same as any other custom detail.
+const FIELD_SUGGESTIONS = [
+  { label: "Temples", keywords: ["temple", "mandir", "devasthanam", "swamy temple"], fields: ["Deity", "Darshan timings", "Major festivals", "Managed by (trust/devasthanam)"] },
+  { label: "Hospitals", keywords: ["hospital", "clinic", "nursing home", "medical cent"], fields: ["Specialities", "Emergency services available", "Visiting hours", "Number of beds"] },
+  { label: "Schools", keywords: ["school"], fields: ["Board (CBSE/ICSE/State)", "Grades offered", "Admission process", "Medium of instruction"] },
+  { label: "Colleges", keywords: ["college", "university", "engineering college", "polytechnic"], fields: ["Courses offered", "Affiliated university", "Established year", "Accreditation"] },
+  { label: "Restaurants", keywords: ["restaurant", "cafe", "dhaba", "eatery", "bakery"], fields: ["Cuisine", "Price range", "Opening hours", "Home delivery available"] },
+  { label: "Hotels", keywords: ["hotel", "resort", "lodge", "guest house", "homestay"], fields: ["Star rating", "Room types", "Check-in / check-out time", "Amenities"] },
+  { label: "Real estate", keywords: ["real estate", "property", "builders", "apartments for sale", "plots for sale"], fields: ["Property types", "Price range", "RERA number"] },
+  { label: "Gyms & fitness", keywords: ["gym", "fitness cent", "yoga studio", "crossfit"], fields: ["Membership plans", "Trainers available", "Timings"] },
+  { label: "Salons & spas", keywords: ["salon", " spa", "parlour", "parlor"], fields: ["Services offered", "Price range", "Timings"] },
+];
 const CAT_GROUPS = [
   ["Religious", ["Hindu temples", "Churches", "Mosques", "Gurudwaras", "Buddhist / Jain temples", "All places of worship"]],
   ["Health", ["Hospitals", "Clinics & doctors", "Pharmacies"]],
@@ -513,12 +528,13 @@ async function viewNewRun(mode) {
   const aiReady = !!settings.ai_key_mask || (settings.ai_provider === "custom" && settings.ai_base_url);
   const providerLabel = (CFG.providers[settings.ai_provider] || {}).label || "your AI provider";
 
-  const aiBlock = (id) => `
+  const aiBlock = (id, suggest) => `
     <div class="field" style="margin-top:20px">
       <label class="label">${icon("sparkle")} Other details with AI <span class="opt">(optional)</span></label>
       <div class="tags" id="${id}"></div>
       <div class="hint">${aiReady ? `Type any detail in your own words, such as <i>opening hours</i> or <i>services offered</i>. Uses your ${esc(providerLabel)} key.`
         : `Add your own AI key in <a href="#/settings">Settings</a> to fill any custom detail.`}</div>
+      ${suggest ? `<div class="hint" id="field-suggest" hidden></div>` : ""}
     </div>`;
 
   const webForm = `
@@ -565,7 +581,7 @@ async function viewNewRun(mode) {
         <div class="option-grid">${Object.keys(FIELD_INFO).filter((k) => k in CFG.fields).map((k) => `
           <label class="option"><input type="checkbox" name="field" value="${k}" ${DEFAULT_FIELDS.includes(k) ? "checked" : ""}><span class="o-ico">${icon(FIELD_INFO[k][0])}</span><span><b>${esc(CFG.fields[k])}</b><small>${esc(FIELD_INFO[k][1])}</small></span><span class="box"></span></label>`).join("")}
         </div>
-        ${aiBlock("custom")}
+        ${aiBlock("custom", true)}
       </div>
     </div>
     <div class="form-section">
@@ -638,7 +654,29 @@ async function viewNewRun(mode) {
   $$("[data-mode]", v).forEach((b) => b.onclick = () => { location.hash = `#/new/${b.dataset.mode}`; });
 
   const state = { require: "", category: "" };
-  let queries, locations, custom;
+  let queries, locations, custom, dismissedSuggestion = "";
+  // Which of FIELD_SUGGESTIONS, if any, matches what's typed so far - the searches themselves, and any ticked
+  // directory source's own category (set when that source was added in Settings), not guessed from nothing.
+  const matchedSuggestion = () => {
+    const sourceCats = $$("input[name=sources]:checked", v).map((c) => ((SOURCES.find((x) => String(x.id) === c.value) || {}).category || "").toLowerCase());
+    const text = (queries?.items || []).join(" ").toLowerCase();
+    return FIELD_SUGGESTIONS.find((fs) => fs.keywords.some((k) => text.includes(k)) || sourceCats.some((c) => c.includes(fs.label.toLowerCase()) || fs.label.toLowerCase().includes(c)));
+  };
+  const renderSuggestion = () => {
+    const box = $("#field-suggest");
+    if (!box) return;
+    const match = matchedSuggestion();
+    if (!match || match.label === dismissedSuggestion) { box.hidden = true; return; }
+    const missing = match.fields.filter((f) => !custom.items.includes(f));
+    if (!missing.length) { box.hidden = true; return; }
+    box.hidden = false;
+    box.innerHTML = `<b>${esc(match.label)} search detected.</b> Suggested details${aiReady ? "" : " (needs your AI key in Settings)"}: `
+      + missing.map((f) => `<button type="button" class="chip" data-sf="${esc(f)}">+ ${esc(f)}</button>`).join(" ")
+      + ` <button type="button" class="btn btn-sm" id="sf-all">Add all</button> <button type="button" class="btn btn-sm" id="sf-dismiss">Not this</button>`;
+    $$("[data-sf]", box).forEach((b) => b.onclick = () => custom.add(b.dataset.sf));
+    $("#sf-all").onclick = () => custom.addMany(missing);
+    $("#sf-dismiss").onclick = () => { dismissedSuggestion = match.label; renderSuggestion(); };
+  };
   const update = () => {
     const rows = [], checks = [];
     if (mode === "web") {
@@ -651,6 +689,7 @@ async function viewNewRun(mode) {
         ["Country", CFG.regions[$("#region").value]], ["Columns", fields.length ? `${fields.length} details` : "—"]);
       if (seedOn) rows.splice(1, 0, ["Directory source" + (sourceEls.length > 1 ? "s" : ""), sourceEls.map((c) => seedLabels[c.value]).join(", ")]);
       checks.push([queries.items.length > 0 || seedOn, "At least one search, or a directory source"], [fields.length > 0, "At least one detail"], [plats.length > 0, "A place to search"]);
+      renderSuggestion();
     } else {
       rows.push(["Category", state.category], ["Locations", locations.items.length ? locations.items.slice(0, 2).join("; ") + (locations.items.length > 2 ? ` +${locations.items.length - 2}` : "") : "—"],
         ["Max per location", fmtNum($("#max_places").value)], ["Website check", $("#enrich").checked || custom.items.length ? "Yes" : "No"]);
@@ -860,15 +899,21 @@ async function viewRunDetail(id) {
       <div id="result"></div>
     </div></div>
     <div class="card mt-16">
-      <div class="tabs" role="tablist"><button class="active" data-tab="results">Results</button><button data-tab="log">Log</button><button data-tab="input">Input</button></div>
+      <div class="tabs" role="tablist"><button class="active" data-tab="results">Results</button><button data-tab="log">Log</button><button data-tab="input">Input</button>
+        <button class="btn btn-sm" id="copy-log" style="margin-left:auto" hidden>${icon("copy", 14)}Copy log</button></div>
       <div id="tab-results"></div>
       <pre class="log" id="tab-log" hidden></pre>
       <div id="tab-input" class="card-body" hidden></div>
     </div>`;
-  $$(".tabs button", v).forEach((b) => b.onclick = () => {
-    $$(".tabs button", v).forEach((x) => x.classList.toggle("active", x === b));
+  $$(".tabs button[data-tab]", v).forEach((b) => b.onclick = () => {
+    $$(".tabs button[data-tab]", v).forEach((x) => x.classList.toggle("active", x === b));
     ["results", "log", "input"].forEach((t) => $(`#tab-${t}`).hidden = t !== b.dataset.tab);
+    $("#copy-log").hidden = b.dataset.tab !== "log";
   });
+  $("#copy-log").onclick = async () => {
+    const ok = await copyText($("#tab-log").textContent);
+    toast(ok ? "Log copied" : "Couldn't copy - select the text and copy it manually", ok ? "ok" : "err");
+  };
   const INPUT_LABELS = { queries: "Searches", category: "Category", locations: "Locations", region: "Country", fields: "Details", custom_fields: "AI details",
     platforms: "Search on", max_results: "Max results", require: "Keep only rows with", follow_contact: "Check contact pages", one_per_site: "One row per website",
     enrich: "Check websites", name_filter: "Name contains", file_name: "Sheet name", source_sheet: "From sheet",
