@@ -678,6 +678,31 @@ ok("end to end: only the real college survives, the unrelated pages the engine p
 ok("the run log says how many unrelated results were skipped", any("unrelated" in m and "skipped" in m for m in j2.log), j2.log)
 jobs.web_search = real_jobs_web_search
 
+# ---- _keep(): the "Keep only rows that have" filter, exercised directly - had no test at all until now -----------
+ok("require=emails keeps only rows with an email", jobs._keep({"require": "emails"}, {"Emails": "a@b.com"}) is True
+   and jobs._keep({"require": "emails"}, {"Emails": "", "Phone Numbers": "123"}) is False)
+ok("require=phones keeps only rows with a phone", jobs._keep({"require": "phones"}, {"Phone Numbers": "123"}) is True
+   and jobs._keep({"require": "phones"}, {"Phone Numbers": "", "Emails": "a@b.com"}) is False)
+ok("require=any_contact keeps a row with either", jobs._keep({"require": "any_contact"}, {"Emails": "", "Phone Numbers": "123"}) is True
+   and jobs._keep({"require": "any_contact"}, {"Emails": "a@b.com", "Phone Numbers": ""}) is True
+   and jobs._keep({"require": "any_contact"}, {"Emails": "", "Phone Numbers": ""}) is False)
+ok("no requirement (empty/unset) keeps everything, even a row with no contact at all",
+   jobs._keep({"require": ""}, {}) is True and jobs._keep({}, {"Emails": "", "Phone Numbers": ""}) is True)
+
+# ---- one_per_site: dedupes by domain instead of exact URL - also had no test at all until now --------------------
+two_pages_same_site = [
+    {"title": "Admissions", "body": "GRIET admissions office", "href": "https://griet.ac.in/admissions"},
+    {"title": "GRIET", "body": "Gokaraju Rangaraju Institute", "href": "https://griet.ac.in/"},
+]
+jobs.web_search = lambda q, region, n, say: two_pages_same_site
+j_ops_off = FakeJob2(); j_ops_off.spec = {"queries": ["griet college"], "platforms": ["web"], "max_results": 50, "one_per_site": False, "region": "in-en"}
+rows_off, _ = jobs._search(j_ops_off)
+ok("one_per_site off: two different pages on the same site are both kept", len(rows_off) == 2, rows_off)
+j_ops_on = FakeJob2(); j_ops_on.spec = {"queries": ["griet college"], "platforms": ["web"], "max_results": 50, "one_per_site": True, "region": "in-en"}
+rows_on, _ = jobs._search(j_ops_on)
+ok("one_per_site on: the second page on the same site is dropped, only one row per domain", len(rows_on) == 1, rows_on)
+jobs.web_search = real_jobs_web_search
+
 # ---- a genuine official site for a hyperlocal query is kept even when it never repeats the micro-area name --------
 # Real failure, found on a live run: "engineering colleges in Tarnaka" returned Osmania University's own engineering
 # college page, whose own text says "Hyderabad - 500 007" (city + PIN code) and never "Tarnaka" - a real institution

@@ -9,7 +9,13 @@ const $$ = (sel, root = document) => [...root.querySelectorAll(sel)];
 const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
 const icon = (id, size = 16) => `<svg width="${size}" height="${size}" aria-hidden="true"><use href="#i-${id}"/></svg>`;
 const fmtNum = (n) => Number(n || 0).toLocaleString();
-function fmtDuration(seconds) {
+// A *rough* estimate for New Run's summary panel, rounded to a friendly unit ("~5 min", "~1.5 hours") - distinct
+// from fmtDuration(seconds) below, which formats an exact elapsed run time ("2m 34s") and is used in the runs
+// list/detail. These two used to have the same name: the second definition silently replaced the first (plain
+// JS function declarations just overwrite each other), so every "Estimated time" row was actually running
+// through the elapsed-time formatter and showing things like "300s" rather than "~5 min" - never caught because
+// nothing compared the two outputs, only ever looked at whichever one happened to still be reachable.
+function fmtRoughDuration(seconds) {
   seconds = Math.max(1, Math.round(seconds));
   if (seconds < 60) return `${seconds}s`;
   const mins = Math.round(seconds / 60);
@@ -18,10 +24,10 @@ function fmtDuration(seconds) {
   const hrsText = hrs < 10 ? (Number.isInteger(hrs) ? String(hrs) : hrs.toFixed(1)) : String(Math.round(hrs));
   return `${hrsText} hour${hrs >= 1.5 ? "s" : ""}`;
 }
-// A rough estimate, shown on New Run so a huge batch doesn't silently turn into an hours-long surprise. Counts
-// only the search pacing itself (see README "Scaling 'Search the web'" for the measured gap this mirrors) - not
-// how long visiting each found website then takes, which runs on several workers in parallel and is usually
-// fast by comparison, and not any website lookup that falls back to a search for a listing-expanded name.
+// Counts only the search pacing itself (see README "Scaling 'Search the web'" for the measured gap this
+// mirrors) - not how long visiting each found website then takes, which runs on several workers in parallel and
+// is usually fast by comparison, and not any website lookup that falls back to a search for a listing-expanded
+// name.
 function estimateWebSeconds(numQueries, numPlatforms, hasBraveKey) {
   const gapPerQuery = hasBraveKey ? 1.1 : 5;
   return numQueries * numPlatforms * gapPerQuery;
@@ -57,7 +63,9 @@ const badge = (status) => `<span class="badge ${esc(status)}">${STATUS_LABEL[sta
 // anything there) is not the same thing as a run that actually found something - a bare green "Succeeded" on
 // both looks identical in the list until you open it. An actual failure (status "error") already shows as
 // "Failed" with its reason, so this only has to tell "found nothing" apart from "found something".
-const runBadge = (r) => (r.status === "done" && !r.rows ? '<span class="badge empty">Succeeded · empty</span>' : badge(r.status));
+// Exactly 0, not just falsy - r.rows missing/undefined (an old or malformed run record) is a different problem
+// and should show as a plain "Succeeded" rather than quietly getting relabelled as "empty" too.
+const runBadge = (r) => (r.status === "done" && r.rows === 0 ? '<span class="badge empty">Succeeded · empty</span>' : badge(r.status));
 const SOURCE_LABEL = { run: "Run", merge: "Merged", import: "Imported", shared: "Shared copy" };
 
 /* ---------------------------------------------------------------- API */
@@ -563,7 +571,7 @@ async function viewNewRun(mode) {
     <div class="form-section">
       <div class="section-title"><div class="step-num">1</div><div><h3>What should we search for?</h3><p>Write it like a Google search. Add as many as you like.</p></div></div>
       <div class="section-body">
-        ${settings.brave_key_mask ? "" : `<div class="callout info">${icon("info")}<div class="grow"><b>Website lookups will be slower and less reliable without a search key.</b> Without one, this falls back to free search engines, which cloud servers often get refused by. <a href="#/settings">Add a free Brave key in Settings</a> - it's optional, the run still works without it, just slower.</div></div>`}
+        ${settings.brave_key_mask ? "" : `<div class="callout info">${icon("info")}<div class="grow"><b>Searching for the right website for each name will be slower without a search key.</b> Fetching the pages themselves is unaffected - this is specifically about finding which site to fetch, which without a key falls back to free search engines that cloud servers often get refused by. <a href="#/settings">Add a free Brave key in Settings</a> - it's optional, the run still works without it, just slower.</div></div>`}
         <div class="tags" id="queries"></div>
         <div class="hint">Press <kbd>Enter</kbd> after each search. Paste a list to add many at once.</div>
         <div class="chips"><small>Try</small>
@@ -650,6 +658,7 @@ async function viewNewRun(mode) {
         </div>
         <label class="switch"><input type="checkbox" id="enrich" checked><span class="sw"></span><span><b>Find emails &amp; phone numbers</b><small>Reads each place's website for contact details. The map itself rarely has them, so leave this on if you need contacts. Slower.</small></span></label>
         <label class="switch mt-8" id="find-sites-row"><input type="checkbox" id="find_sites" checked><span class="sw"></span><span><b>Look up websites the map doesn't list</b><small>Searches the web for each place's own site first (about 2 seconds per place, up to 80 per run). Without this, only places with a website on the map get contacts.</small></span></label>
+        ${settings.brave_key_mask ? "" : `<div class="callout info mt-8" id="places-brave-nudge" hidden>${icon("info")}<div class="grow">Without a search key, this website lookup falls back to free search engines, which cloud servers often get refused by, and paces itself much more slowly. <a href="#/settings">Add a free Brave key in Settings</a> to speed it up - optional, this still works without it.</div></div>`}
         ${aiBlock("custom-places", true)}
         <div class="callout info mt-16">${icon("info")}<div>Places come from OpenStreetMap, a free public map. Well-known places are almost always listed; very small ones may be missing.</div></div>
       </div>
@@ -720,7 +729,7 @@ async function viewNewRun(mode) {
       // A rough estimate only - actual time also depends on how many pages need visiting and whether any
       // website lookups fall back to a search (see estimateWebSeconds below for exactly what this does and
       // doesn't count).
-      if (queries.items.length) rows.push(["Estimated time", "~" + fmtDuration(estimateWebSeconds(queries.items.length, plats.length, !!settings.brave_key_mask))]);
+      if (queries.items.length) rows.push(["Estimated time", "~" + fmtRoughDuration(estimateWebSeconds(queries.items.length, plats.length, !!settings.brave_key_mask))]);
       checks.push([queries.items.length > 0 || seedOn, "At least one search, or a directory source"], [fields.length > 0, "At least one detail"], [plats.length > 0, "A place to search"]);
       renderSuggestion();
     } else {
@@ -731,8 +740,13 @@ async function viewNewRun(mode) {
       // out how many that actually is.
       if (locations.items.length) {
         const checkingSites = $("#enrich").checked || custom.items.length > 0;
-        rows.push(["Estimated time", "~" + fmtDuration(locations.items.length * 4) + (checkingSites ? " or more, depending how many places need a website lookup" : "")]);
+        rows.push(["Estimated time", "~" + fmtRoughDuration(locations.items.length * 4) + (checkingSites ? " or more, depending how many places need a website lookup" : "")]);
       }
+      // The Brave nudge is specifically about "Look up websites the map doesn't list" (find_sites) - that's the
+      // toggle that falls back to a search engine. "Find emails & phone numbers" (enrich) just reads whatever
+      // website is already known and isn't affected by a search key either way.
+      const placesNudge = $("#places-brave-nudge");
+      if (placesNudge) placesNudge.hidden = !$("#find_sites").checked;
       checks.push([!!state.category, "A category"], [locations.items.length > 0, "At least one location"]);
       renderSuggestion();
     }
@@ -788,6 +802,7 @@ async function viewNewRun(mode) {
     $("#max_places").oninput = () => { $("#places_out").textContent = $("#max_places").value; update(); };
     const syncSites = () => { $("#find-sites-row").hidden = !$("#enrich").checked; };
     $("#enrich").onchange = () => { syncSites(); update(); };
+    $("#find_sites").onchange = update;  // previously had no listener at all - toggling it never refreshed anything
     syncSites();
   }
   update();
