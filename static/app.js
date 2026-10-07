@@ -502,6 +502,9 @@ const CAT_GROUPS = [
 async function viewNewRun(mode) {
   if (IS_VIEWER) return viewNotFound();
   const tk = routeToken();
+  // The person's own directory sources (Settings -> Directory sources), loaded fresh each time the form opens.
+  const SOURCES = (await api("/api/sources").catch(() => ({ sources: [] }))).sources || [];
+  const seedLabels = Object.fromEntries(SOURCES.map((x) => [String(x.id), x.name]));
   setCrumbs({ label: "Runs", href: "#/runs" }, "New run");
   const v = $("#view");
   let settings = { ai_key_mask: "", ai_provider: "anthropic" };
@@ -547,14 +550,14 @@ async function viewNewRun(mode) {
           <div class="hint">${CFG.restricted ? "Logged-in collection for LinkedIn/Facebook is enabled by your admin and uses the cookies in your Settings."
             : "For social sites we collect only what appears in public search results (name, link, snippet). Their pages are not opened."}</div>
         </div>
-        ${Object.keys(CFG.known_seeds || {}).length ? `
-        <div class="field mt-24"><label class="label">Known directories <span class="opt">(no search engine needed)</span></label>
-          <div class="option-grid">${Object.entries(CFG.known_seeds).map(([val, label]) => `
-            <label class="option"><input type="radio" name="seed" value="${val}"><span class="o-ico">${icon("globe")}</span><span><b>${esc(label)}</b></span><span class="box"></span></label>`).join("")}
+        <div class="field mt-24"><label class="label">Your directory sources <span class="opt">(no search engine needed)</span></label>
+          ${SOURCES.length ? `<div class="option-grid">${SOURCES.map((x) => `
+            <label class="option"><input type="radio" name="seed" value="${x.id}"><span class="o-ico">${icon("globe")}</span><span><b>${esc(x.name)}</b><small>${esc(x.category || "")}</small></span><span class="box"></span></label>`).join("")}
             <label class="option"><input type="radio" name="seed" value="" checked><span><b>None</b><small>Just my searches above</small></span><span class="box"></span></label>
           </div>
-          <div class="hint">Fetched directly, page by page - not affected by free search engines refusing requests. Adds to whatever searches you listed above; you can also leave the searches empty and use this alone.</div>
-        </div>` : ""}
+          <div class="hint">Read directly, page by page - not affected by free search engines refusing requests. Adds to whatever searches you listed above; you can also leave the searches empty and use this alone.</div>`
+            : `<div class="hint">You haven't added a directory source yet. Add one in <a href="#/settings">Settings → Directory sources</a>, or start from a preset there.</div>`}
+        </div>
       </div>
     </div>
     <div class="form-section">
@@ -647,7 +650,7 @@ async function viewNewRun(mode) {
       rows.push(["Searches", queries.items.length || "—"], ["Search on", plats.join(", ") || "—"],
         ["Websites", queries.items.length ? `up to ${fmtNum(queries.items.length * plats.length * +$("#max_results").value)}` : "—"],
         ["Country", CFG.regions[$("#region").value]], ["Columns", fields.length ? `${fields.length} details` : "—"]);
-      if (seedOn) rows.splice(1, 0, ["Known directory", CFG.known_seeds[seedEl.value]]);
+      if (seedOn) rows.splice(1, 0, ["Directory source", seedLabels[seedEl.value]]);
       checks.push([queries.items.length > 0 || seedOn, "At least one search, or a known directory"], [fields.length > 0, "At least one detail"], [plats.length > 0, "A place to search"]);
     } else {
       rows.push(["Category", state.category], ["Locations", locations.items.length ? locations.items.slice(0, 2).join("; ") + (locations.items.length > 2 ? ` +${locations.items.length - 2}` : "") : "—"],
@@ -722,7 +725,7 @@ async function viewNewRun(mode) {
         seed: seedEl ? seedEl.value : "",
         fields: $$("input[name=field]:checked", v).map((c) => c.value), platforms: $$("input[name=platform]:checked", v).map((c) => c.value),
       });
-      if (!queries.items.length && !body.seed) { toast("Add at least one search in step 1, or pick a known directory.", "err"); return queries.input.focus(); }
+      if (!queries.items.length && !body.seed) { toast("Add at least one search in step 1, or pick one of your directory sources.", "err"); return queries.input.focus(); }
       if (!body.platforms.length) return toast("Choose at least one place to search.", "err");
       if (!body.fields.length && !custom.items.length) return toast("Pick at least one detail in step 2.", "err");
     } else {
@@ -742,7 +745,7 @@ async function viewNewRun(mode) {
       const spec = { ...body, queries: lines(body.queries), locations: lines(body.locations),
         custom_fields: String(body.custom_fields || "").split(",").map((x) => x.trim()).filter(Boolean) };
       const name = body.file_name || (mode === "places" ? `${body.category} in ${spec.locations.slice(0, 2).join(", ")}`
-        : spec.queries[0] || CFG.known_seeds[body.seed] || "Web search");
+        : spec.queries[0] || seedLabels[body.seed] || "Web search");
       await Store.runs.put({ id: r.id, name, mode, spec, status: "running", started: nowIso(), rows: 0, with_email: 0, with_phone: 0,
         duration: 0, error: "", sheet_id: null });
       Tracker.watch(r.id);
@@ -1669,6 +1672,9 @@ async function viewSettings() {
   const v = $("#view");
   const s = await api("/api/settings");
   if (stale(tk)) return;
+  const srcData = await api("/api/sources");
+  const presetData = await api("/api/sources/presets");
+  if (stale(tk)) return;
   const st = { provider: s.ai_provider, replacing: !s.ai_key_mask };
   v.innerHTML = `
     <div class="page-head"><div><h1>Settings</h1><p>Your AI provider, password and appearance.</p></div></div>
@@ -1685,6 +1691,39 @@ async function viewSettings() {
             <div class="field" id="url-field"><label class="label" for="base_url">API URL</label><input class="input mono" id="base_url" value="${esc(s.ai_base_url)}" placeholder="e.g. http://localhost:11434/v1" autocomplete="off"><div class="hint">For Ollama, LM Studio, Together, DeepSeek or any OpenAI-compatible service.</div></div>
           </div>
           <div class="row-flex"><button class="btn btn-primary" id="save-ai">Save</button><button class="btn" id="test-ai">${icon("check")}Test connection</button><span id="test-msg" class="small"></span></div>
+        </div>
+      </section>
+      <section class="card">
+        <div class="card-head"><div><h3>${icon("globe")} Directory sources</h3><p>Websites that list places, such as a college, school or hospital directory. Each one says where its lists are and how to read them - no code needed.</p></div><span class="badge plain">${srcData.sources.length} saved</span></div>
+        <div class="card-body">
+          ${srcData.sources.length ? `<ul class="summary-list" id="src-list">${srcData.sources.map((x) => `
+            <li><span>${esc(x.name)}${x.category ? ` <small>· ${esc(x.category)}</small>` : ""}</span><b><small>${x.lists} list page${x.lists === 1 ? "" : "s"} · ${x.pages} page${x.pages === 1 ? "" : "s"} each${x.profile ? " · reads each entry's page" : ""}</small> <button class="btn btn-sm btn-danger" data-del="${x.id}">Remove</button></b></li>`).join("")}</ul>` : `<p class="small">No sources yet. Start from a preset below, or write your own.</p>`}
+          <div class="field mt-24"><span class="label">Start from a preset <span class="opt">(copied into your sources, then you can change it)</span></span>
+            <div class="row-flex" id="presets">${presetData.presets.map((p) => `<button class="btn btn-sm" data-preset="${esc(p.id)}" title="${esc(p.description || "")}">${icon("plus")}${esc(p.name)}</button>`).join("") || '<span class="small">No presets are installed.</span>'}</div>
+          </div>
+          <details class="mt-24" id="src-form-wrap"><summary><b>Write your own source</b></summary>
+            <div class="grid grid-2 mt-24">
+              <div class="field"><label class="label" for="src-name">Name</label><input class="input" id="src-name" placeholder="e.g. Hospitals - Pune"></div>
+              <div class="field"><label class="label" for="src-cat">Category <span class="opt">(optional)</span></label><input class="input" id="src-cat" placeholder="e.g. Hospitals"></div>
+            </div>
+            <div class="field"><label class="label" for="src-urls">List page addresses <span class="opt">(one per line, up to 10)</span></label><textarea class="input mono" id="src-urls" rows="3" placeholder="https://example.com/hospitals/pune/"></textarea></div>
+            <div class="grid grid-2">
+              <div class="field"><label class="label" for="src-mode">How to read the list</label>
+                <select class="input" id="src-mode"><option value="jsonld">Structured data (the list the page publishes for search engines)</option><option value="css">CSS selectors (for other pages)</option></select></div>
+              <div class="field"><label class="label" for="src-pages">Pages per list</label><input class="input" id="src-pages" type="number" min="1" max="30" value="1"><div class="hint">Page 2, 3… are added as ?page=2, ?page=3…</div></div>
+            </div>
+            <div id="src-css" hidden>
+              <div class="grid grid-2">
+                <div class="field"><label class="label" for="src-item">Entry selector</label><input class="input mono" id="src-item" placeholder="e.g. div.hospital-card"></div>
+                <div class="field"><label class="label" for="src-namesel">Name selector</label><input class="input mono" id="src-namesel" placeholder="e.g. h3"></div>
+                <div class="field"><label class="label" for="src-link">Link selector <span class="opt">(optional)</span></label><input class="input mono" id="src-link" placeholder="e.g. a[href]"></div>
+                <div class="field"><label class="label" for="src-addr">Address selector <span class="opt">(optional)</span></label><input class="input mono" id="src-addr" placeholder="e.g. .address"></div>
+              </div>
+            </div>
+            <label class="row-flex mt-24"><input type="checkbox" id="src-profile"> Open each entry's own page for its phone, email and website</label>
+            <div class="row-flex mt-24"><button class="btn" id="src-test">${icon("check")}Test on the first page</button><button class="btn btn-primary" id="src-save">Save source</button><span id="src-msg" class="small"></span></div>
+            <div id="src-preview" class="mt-24"></div>
+          </details>
         </div>
       </section>
       <section class="card">
@@ -1782,6 +1821,46 @@ async function viewSettings() {
     } catch (e) { msg.innerHTML = `<span class="badge error">${esc(e.message)}</span>`; }
     b.disabled = false;
   };
+  const srcBody = () => {
+    const mode = $("#src-mode").value;
+    const config = {
+      list_urls: $("#src-urls").value.split("\n").map((x) => x.trim()).filter(Boolean),
+      pages: +$("#src-pages").value || 1, page_param: "page", mode, profile: $("#src-profile").checked,
+    };
+    if (mode === "css") Object.assign(config, { item_selector: $("#src-item").value.trim(), name_selector: $("#src-namesel").value.trim(),
+      link_selector: $("#src-link").value.trim(), address_selector: $("#src-addr").value.trim() });
+    return { name: $("#src-name").value.trim(), category: $("#src-cat").value.trim(), config };
+  };
+  $("#src-mode").onchange = () => { $("#src-css").hidden = $("#src-mode").value !== "css"; };
+  $("#src-test").onclick = async () => {
+    const b = $("#src-test"), out = $("#src-preview");
+    b.disabled = true; out.innerHTML = '<span class="spinner"></span> Reading the first page…';
+    try {
+      const r = await api("/api/sources/test", { method: "POST", body: { config: srcBody().config } });
+      if (!r.ok) { out.innerHTML = `<span class="badge error">${esc(r.error)}</span>`; }
+      else {
+        out.innerHTML = `<p class="small"><b>${r.count}</b> entries found. First few:</p><ul class="summary-list">${r.sample.map((x) => `<li><span>${esc(x.name)}</span><b>${esc(x.address || "")}</b></li>`).join("")}</ul>`
+          + (r.profile ? `<p class="small mt-24">Its own page gave: ${esc(["phones", "emails"].map((k) => (r.profile[k] || []).join(", ")).filter(Boolean).join(" · ") || "no phone or email")}${r.profile.website ? ` · website ${esc(r.profile.website)}` : ""}</p>` : "");
+      }
+    } catch (e) { out.innerHTML = `<span class="badge error">${esc(e.message)}</span>`; }
+    b.disabled = false;
+  };
+  $("#src-save").onclick = async () => {
+    const body = srcBody();
+    try {
+      await api("/api/sources", { method: "POST", body });
+      toast("Source saved", "ok"); route();
+    } catch (e) { $("#src-msg").innerHTML = `<span class="badge error">${esc(e.message)}</span>`; }
+  };
+  $$("[data-preset]").forEach((b) => b.addEventListener("click", async () => {
+    try { await api(`/api/sources/presets/${b.dataset.preset}`, { method: "POST" }); toast("Preset added to your sources", "ok"); route(); }
+    catch (e) { toast(e.message, "err"); }
+  }));
+  $$("[data-del]").forEach((b) => b.addEventListener("click", async () => {
+    if (!await confirmDialog("Remove this source?", "Runs already made from it are not affected.", "Remove")) return;
+    try { await api(`/api/sources/${b.dataset.del}`, { method: "DELETE" }); route(); }
+    catch (e) { toast(e.message, "err"); }
+  }));
   const renderBrave = () => {
     $("#brave-status").innerHTML = s.brave_key_mask ? '<span class="badge done">Connected</span>' : '<span class="badge plain">Not set up</span>';
     $("#brave-field").innerHTML = s.brave_key_mask

@@ -47,8 +47,9 @@ def _secret_key() -> str:
 _load_env_file()
 _secret_key()
 
-from models import ROLES, AppSetting, Share, User, VaultCredential, db, decrypt, encrypt  # noqa: E402
-from scraper import ai_extract, extract, listings, places, search, sheets  # noqa: E402
+from models import ROLES, AppSetting, DirectorySource, Share, User, VaultCredential, db, decrypt, encrypt  # noqa: E402
+from scraper import ai_extract, extract, listings, places, search, sheets, sources  # noqa: E402
+from scraper.fetch import Fetcher  # noqa: E402
 from scraper.excel import write_workbook  # noqa: E402
 from scraper.jobs import JOBS, REGIONS, purge_jobs, start_job  # noqa: E402
 
@@ -295,7 +296,6 @@ def index():
         fields=extract.STANDARD_FIELDS,
         categories=list(places.CATEGORIES),
         regions=REGIONS,
-        known_seeds={k: v["label"] for k, v in listings.KNOWN_SEEDS.items()},
         providers={k: {"label": v["label"], "model": v["model"]} for k, v in ai_extract.PROVIDERS.items()},
         restricted=_restricted_enabled(),
         company=COMPANY_NAME,
@@ -400,15 +400,21 @@ def create_job():
         # 300 is generous on purpose - for breadth across "100-200 websites" the limit that actually matters is how
         # fast search engines can be queried without being refused (see scraper/search.py), not this count.
         queries = list(dict.fromkeys(q.strip() for q in (d.get("queries") or "").splitlines() if q.strip()))[:300]
-        seed = d.get("seed") if d.get("seed") in listings.KNOWN_SEEDS else ""
-        if not queries and not seed:
-            return jsonify(error="Add at least one search, or pick a known directory below."), 400
+        source_row = None
+        try:
+            source_row = DirectorySource.query.filter_by(id=int(d.get("seed") or 0), owner_id=current_user.id).first()
+        except (TypeError, ValueError):
+            source_row = None
+        if not queries and not source_row:
+            return jsonify(error="Add at least one search, or pick one of your directory sources."), 400
         fields = [f for f in d.get("fields", []) if f in extract.STANDARD_FIELDS]
         if not fields and not custom:
             return jsonify(error="Pick at least one detail to collect."), 400
         platforms = [p for p in (d.get("platforms") or ["web"])
                      if p in ("web", "linkedin.com", "facebook.com", "instagram.com", "twitter.com")] or ["web"]
-        spec = {"mode": "web", "queries": queries, "seed": seed,
+        spec = {"mode": "web", "queries": queries, "seed": str(source_row.id) if source_row else "",
+                "source": source_row.config() if source_row else None,
+                "source_name": source_row.name if source_row else "",
                 "region": d.get("region") if d.get("region") in REGIONS else "wt-wt",
                 "fields": fields, "platforms": platforms,
                 "follow_contact": bool(d.get("follow_contact", True)), "one_per_site": bool(d.get("one_per_site")),
@@ -503,6 +509,102 @@ def get_settings():
         restricted=_restricted_enabled(),
         li_cookie_mask=_mask(v.get("li_at_cookie", "")), fb_cookie_mask=_mask(v.get("fb_cookie", "")),
     )
+
+
+# ---------------------------------------------------------------- directory sources (saved per person, data not code)
+
+def _source_json(row: DirectorySource) -> dict:
+    c = row.config()
+    return {"id": row.id, "name": row.name, "category": row.category, "pages": c.get("pages", 1),
+            "lists": len(c.get("list_urls", [])), "mode": c.get("mode"), "profile": bool(c.get("profile"))}
+
+
+@app.get("/api/sources")
+@login_required
+def list_sources():
+    rows = DirectorySource.query.filter_by(owner_id=current_user.id).order_by(DirectorySource.name).all()
+    return jsonify(sources=[_source_json(r) for r in rows])
+
+
+@app.post("/api/sources")
+@roles_required("admin", "member")
+def save_source():
+    d = request.get_json(force=True)
+    name = (d.get("name") or "").strip()[:120]
+    if not name:
+        return jsonify(error="Give this source a name."), 400
+    try:
+        config = sources.validate(d.get("config"))
+    except sources.SourceError as e:
+        return jsonify(error=str(e)), 400
+    row = None
+    if d.get("id"):
+        row = DirectorySource.query.filter_by(id=int(d["id"]), owner_id=current_user.id).first()
+        if not row:
+            return jsonify(error="That source was not found."), 404
+    elif DirectorySource.query.filter_by(owner_id=current_user.id).count() >= sources.MAX_SOURCES_PER_USER:
+        return jsonify(error=f"You can keep up to {sources.MAX_SOURCES_PER_USER} sources. Remove one first."), 400
+    if row is None:
+        row = DirectorySource(owner_id=current_user.id)
+        db.session.add(row)
+    row.name, row.category = name, (d.get("category") or "").strip()[:80]
+    row.config_json = json.dumps(config)
+    db.session.commit()
+    return jsonify(_source_json(row))
+
+
+@app.delete("/api/sources/<int:sid>")
+@roles_required("admin", "member")
+def delete_source(sid):
+    row = DirectorySource.query.filter_by(id=sid, owner_id=current_user.id).first()
+    if not row:
+        return jsonify(error="That source was not found."), 404
+    db.session.delete(row)
+    db.session.commit()
+    return jsonify(ok=True)
+
+
+@app.get("/api/sources/presets")
+@login_required
+def list_presets():
+    return jsonify(presets=sources.PRESETS)
+
+
+@app.post("/api/sources/presets/<pid>")
+@roles_required("admin", "member")
+def add_preset(pid):
+    preset = next((p for p in sources.PRESETS if p["id"] == pid), None)
+    if not preset:
+        return jsonify(error="That preset was not found."), 404
+    row = DirectorySource(owner_id=current_user.id, name=preset["name"], category=preset.get("category", ""),
+                          config_json=json.dumps(sources.validate(preset["config"])))
+    db.session.add(row)
+    db.session.commit()
+    return jsonify(_source_json(row))
+
+
+@app.post("/api/sources/test")
+@roles_required("admin", "member")
+def test_source():
+    """Read the first page (and the first entry's own page) with these settings, to check them before a real run."""
+    try:
+        config = sources.validate(request.get_json(force=True).get("config"))
+    except sources.SourceError as e:
+        return jsonify(ok=False, error=str(e))
+    fetcher = Fetcher({})
+    url = sources.list_urls(config)[0]
+    html, note = fetcher.get_html(url)
+    if not html:
+        return jsonify(ok=False, error=f"Could not read {url}: {note}")
+    items = sources.extract_items(html, url, config)
+    if not items:
+        return jsonify(ok=False, error="No entries were found on that page. Check the list address and the selectors.")
+    profile = None
+    if config.get("profile") and items[0].get("href"):
+        page, _ = fetcher.get_html(items[0]["href"])
+        if page:
+            profile = listings.extract_profile(page, items[0]["href"])
+    return jsonify(ok=True, count=len(items), sample=items[:5], profile=profile)
 
 
 @app.post("/api/settings/brave/test")

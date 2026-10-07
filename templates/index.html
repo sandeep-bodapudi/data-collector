@@ -117,7 +117,7 @@
 <div class="toasts" id="toasts" role="status" aria-live="polite"></div>
 
 <script id="config" type="application/json">{{ {
-  "user": user, "fields": fields, "categories": categories, "regions": regions, "known_seeds": known_seeds,
+  "user": user, "fields": fields, "categories": categories, "regions": regions,
   "providers": providers, "restricted": restricted, "company": company
 } | tojson }}</script>
 <script src="{{ url_for('static', filename='store.js') }}?v={{ v }}"></script>

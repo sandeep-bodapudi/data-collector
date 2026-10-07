@@ -654,12 +654,14 @@ discover.guess_website, discover.find_website = real_guess4, real_find4
 jobs.Fetcher = real_fetcher
 jobs.web_search = real_jobs_web_search
 
-# ---- known seed directories: real rows with zero search engine involved -----------------------------------------
-ok("the Telangana engineering-colleges seed covers all 10 real districts",
-   len(listings.KNOWN_SEEDS["telangana_engineering_colleges"]["urls"]) == 10)
-ok("every seed URL is colleges9.in's own Engineering-Colleges page for a district",
+# ---- directory presets: real rows with zero search engine involved -------------------------------------------
+from scraper import sources as sources_mod
+COLLEGES_PRESET = next(p for p in sources_mod.PRESETS if p["id"] == "colleges9-telangana-engineering")
+COLLEGES_CFG = sources_mod.validate(COLLEGES_PRESET["config"])
+ok("the colleges preset covers all 10 real districts", len(COLLEGES_CFG["list_urls"]) == 10)
+ok("every preset list URL is colleges9.in's own Engineering-Colleges page for a district",
    all(u.startswith("https://www.colleges9.in/Telangana/") and u.endswith("/Engineering-Colleges/")
-       for u in listings.KNOWN_SEEDS["telangana_engineering_colleges"]["urls"]))
+       for u in COLLEGES_CFG["list_urls"]))
 
 COLLEGE_HOME_PAGE = ('<html><title>AAR Mahaveer Engineering College</title>'
                       '<body>Contact us: info@aarmahaveer.ac.in, 040-23146077. Hyderabad.</body></html>')
@@ -677,7 +679,7 @@ real_guess, real_find = discover.guess_website, discover.find_website
 # (see "nothing is guessed when no address resolves" above). Only the paced web-search fallback is exercised here.
 discover.guess_website = lambda fetcher, name, area="", aliases=(): None
 discover.find_website = lambda name, where, say=None, aliases=(), gap=None: (("https://aarmahaveer.ac.in/", 5) if "AAR" in name.upper() else (None, 3))
-j7 = jobs.Job({"queries": [], "seed": "telangana_engineering_colleges", "platforms": ["web"], "max_results": 50,
+j7 = jobs.Job({"queries": [], "seed": "1", "source": COLLEGES_CFG, "source_name": "colleges", "platforms": ["web"], "max_results": 50,
                "one_per_site": False, "region": "in-en", "fields": ["address", "emails", "phones"], "custom_fields": [],
                "require": "", "follow_contact": False, "ai": {}})
 jobs._run_web(j7)
@@ -760,8 +762,9 @@ ok("the profile page yields phone, email, official website and address",
    prof["phones"] == ["4065810046"] and prof["emails"] == ["agireddy@gmail.com"]
    and prof["website"] == "https://www.mist.ac.in" and prof["address"].startswith("Vyasapuri"), prof)
 ok("a non-profile or unregistered page yields nothing and never raises",
-   listings.extract_profile("<html>garbage</html>", PROFILE_URL)["phones"] == [] and
-   listings.extract_profile(PROFILE_HTML, "https://example.com/colleges/x/")["phones"] == [])
+   listings.extract_profile("<html>garbage</html>", PROFILE_URL)["phones"] == [])
+ok("a page from any other site is read with the generic label reader (phone under a 'Phone No.' label)",
+   listings.extract_profile(PROFILE_HTML, "https://example.com/school/x/")["phones"] == ["4065810046"])
 
 class FakeProfileFetcher:
     def get_html(self, url):
@@ -822,34 +825,4 @@ print(f"\n{len(failures)} failure(s)" if failures else "\nAll tests passed")
 
 sys.exit(1 if failures else 0)
 
-# ---- college profile pages: the phone, email and official website live there, not on the category listing -------
-PROFILE_HTML = ("<html><body><h3>AAR MAHAVEER ENGINEERING COLLEGE</h3><b>Address Details</b> Address Vyasapuri ,Bandlaguda "
-                ",Kesavagiri 500005, Hyderabad District. District Hyderabad State Telangana <b>Contact Details</b> Phone No. "
-                "4065810046 Head of The Institution: Mobile: Email agireddy@gmail.com Website www.mist.ac.in Hostel Details "
-                "Not Available</body></html>")
-PROFILE_URL = "https://www.colleges9.in/colleges/AAR-MAHAVEER-ENGINEERING-COLLEGE/EN728/"
-ok("a colleges9 profile link is recognised; a category listing link is not",
-   listings.is_profile_url(PROFILE_URL) and not listings.is_profile_url("https://www.colleges9.in/Telangana/Hyderabad/Engineering-Colleges/"))
-prof = listings.extract_profile(PROFILE_HTML, PROFILE_URL)
-ok("the profile page yields phone, email, official website and address",
-   prof["phones"] == ["4065810046"] and prof["emails"] == ["agireddy@gmail.com"]
-   and prof["website"] == "https://www.mist.ac.in" and prof["address"].startswith("Vyasapuri"), prof)
-ok("a non-profile or unregistered page yields nothing and never raises",
-   listings.extract_profile("<html>garbage</html>", PROFILE_URL)["phones"] == [] and
-   listings.extract_profile(PROFILE_HTML, "https://example.com/colleges/x/")["phones"] == [])
-
-class FakeProfileFetcher:
-    def get_html(self, url):
-        return (PROFILE_HTML, "ok") if url == PROFILE_URL else (None, "not used")
-real_guess5, real_find5 = discover.guess_website, discover.find_website
-discover.guess_website = lambda fetcher, name, area="", aliases=(): (_ for _ in ()).throw(AssertionError("no guess needed"))
-discover.find_website = lambda name, where, say=None, aliases=(), gap=None: (_ for _ in ()).throw(AssertionError("no search needed"))
-prow = [{"Name": "AAR MAHAVEER ENGINEERING COLLEGE", "Address": "", "Website": PROFILE_URL, "Phone Numbers": "", "Emails": ""}]
-pjob = jobs.Job({"rows": [], "columns": [], "custom_fields": [], "ai": {}, "fields": []})
-jobs._enrich_listed_rows(pjob, FakeProfileFetcher(), prow, {"custom_fields": [], "ai": {}})
-ok("a listed college gets its phone and email from its profile page, with no search or guess at all",
-   prow[0]["Phone Numbers"] == "4065810046" and prow[0]["Emails"] == "agireddy@gmail.com", prow[0])
-ok("the profile's official website becomes the row's Website",
-   prow[0]["Website"] == "https://www.mist.ac.in", prow[0]["Website"])
-discover.guess_website, discover.find_website = real_guess5, real_find5
-
+

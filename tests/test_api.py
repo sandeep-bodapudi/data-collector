@@ -333,5 +333,44 @@ ok("fallback is quick", time.time() - t0 < 15)
 os.environ["DATABASE_URL"] = "postgres://u:p@host/db"
 ok("Render-style postgres:// URLs use the psycopg driver", appmod._database_url().startswith("postgresql+psycopg://u:p@host/db"))
 
+# ---- directory sources: saved per person, validated, presets, and never visible to anyone else -------------------
+GOOD = {"name": "Hyderabad schools", "category": "Schools", "config": {
+    "mode": "jsonld", "list_urls": ["https://www.example-directory.test/schools/hyderabad"], "pages": 2, "profile": True}}
+r = c.post("/api/sources", json=GOOD)
+ok("a person can save a source (structured-data mode, two pages, profile reading)", r.status_code == 200, r.get_data(as_text=True)[:200])
+sid = r.get_json()["id"]
+ok("the saved source comes back with its summary", r.get_json()["lists"] == 1 and r.get_json()["pages"] == 2)
+ok("the owner sees their own sources", any(x["id"] == sid for x in c.get("/api/sources").get_json()["sources"]))
+ok("another person does not see it", not any(x["id"] == sid for x in meena.get("/api/sources").get_json()["sources"]))
+ok("another person cannot remove it", meena.delete(f"/api/sources/{sid}").status_code == 404)
+ok("a source with no name is refused", c.post("/api/sources", json={**GOOD, "name": ""}).status_code == 400)
+ok("a list address that is not a web address is refused",
+   c.post("/api/sources", json={"name": "x", "config": {"mode": "jsonld", "list_urls": ["ftp://bad"]}}).status_code == 400)
+ok("CSS mode needs its selectors",
+   c.post("/api/sources", json={"name": "x", "config": {"mode": "css", "list_urls": ["https://a.test/"]}}).status_code == 400)
+ok("a broken CSS selector is refused with a message, not saved",
+   "not valid CSS" in c.post("/api/sources", json={"name": "x", "config": {"mode": "css", "list_urls": ["https://a.test/"],
+       "item_selector": "div[[[", "name_selector": "h3"}}).get_json()["error"])
+ok("pages above the limit are refused",
+   c.post("/api/sources", json={"name": "x", "config": {"mode": "jsonld", "list_urls": ["https://a.test/"], "pages": 999}}).status_code == 400)
+pres = c.get("/api/sources/presets").get_json()["presets"]
+ok("the presets ship as data: colleges and schools are both there", {p["id"] for p in pres} >= {"colleges9-telangana-engineering", "edzy-schools-hyderabad"})
+ok("a preset is copied into the person's own sources", c.post("/api/sources/presets/edzy-schools-hyderabad").status_code == 200)
+ok("deleting a source removes it", c.delete(f"/api/sources/{sid}").status_code == 200
+   and not any(x["id"] == sid for x in c.get("/api/sources").get_json()["sources"]))
+import scraper.fetch as _fetch_mod
+class _FakeSourceFetcher:
+    def __init__(self, spec=None): pass
+    def get_html(self, url):
+        if url.endswith("/hyderabad"):
+            return ('<script type="application/ld+json">{"@type":"ItemList","itemListElement":[{"@type":"School","name":"Test School","url":"https://www.example-directory.test/s/1"}]}</script>', "ok")
+        return ('<html><body>Phone No. 040-12345678 Email info@testschool.in</body></html>', "ok")
+appmod.Fetcher = _FakeSourceFetcher
+t = c.post("/api/sources/test", json={"config": GOOD["config"]}).get_json()
+ok("the test reads the first page and the first entry's own page", t["ok"] and t["count"] == 1 and t["sample"][0]["name"] == "Test School"
+   and t["profile"] and "040-12345678" in t["profile"]["phones"][0], t)
+appmod.Fetcher = _fetch_mod.Fetcher
+
+
 print(f"\n{len(failures)} failure(s)" if failures else "\nAll tests passed")
 sys.exit(1 if failures else 0)

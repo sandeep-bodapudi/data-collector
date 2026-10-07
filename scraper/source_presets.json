@@ -1,0 +1,44 @@
+[
+  {
+    "id": "colleges9-telangana-engineering",
+    "name": "Engineering colleges - Telangana (colleges9.in)",
+    "category": "Colleges",
+    "description": "Every district's engineering colleges, with each college's own page for phone, email and website.",
+    "config": {
+      "mode": "css",
+      "list_urls": [
+        "https://www.colleges9.in/Telangana/Adilabad/Engineering-Colleges/",
+        "https://www.colleges9.in/Telangana/Hyderabad/Engineering-Colleges/",
+        "https://www.colleges9.in/Telangana/Karimnagar/Engineering-Colleges/",
+        "https://www.colleges9.in/Telangana/Khammam/Engineering-Colleges/",
+        "https://www.colleges9.in/Telangana/Mahaboobnagar/Engineering-Colleges/",
+        "https://www.colleges9.in/Telangana/Medak/Engineering-Colleges/",
+        "https://www.colleges9.in/Telangana/Nalgonda/Engineering-Colleges/",
+        "https://www.colleges9.in/Telangana/Nizamabad/Engineering-Colleges/",
+        "https://www.colleges9.in/Telangana/Ranga-Reddy/Engineering-Colleges/",
+        "https://www.colleges9.in/Telangana/Warangal/Engineering-Colleges/"
+      ],
+      "pages": 1,
+      "item_selector": "tr:has(a[href*='/colleges/']):not(:has(tr))",
+      "name_selector": "b",
+      "link_selector": "a[href*='/colleges/']",
+      "address_selector": "td:has(b)",
+      "profile": true
+    }
+  },
+  {
+    "id": "edzy-schools-hyderabad",
+    "name": "Schools - Hyderabad (edzy.ai)",
+    "category": "Schools",
+    "description": "The first list edzy.ai publishes for Hyderabad (88 schools). The site says it has 131; its extra pages repeat these 88, so the rest isn't reachable this way.",
+    "config": {
+      "mode": "jsonld",
+      "list_urls": [
+        "https://www.edzy.ai/schools/states/telangana/districts/hyderabad"
+      ],
+      "pages": 1,
+      "page_param": "page",
+      "profile": true
+    }
+  }
+]

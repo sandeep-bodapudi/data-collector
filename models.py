@@ -161,3 +161,18 @@ class Share(db.Model):
         if self.is_external:
             return user.id == self.owner_id
         return user.id == self.owner_id or bool(self.link_access) or user.id in self.recipients
+
+
+class DirectorySource(db.Model):
+    """A directory a person has set up to pull entries from: list page addresses and how to read them. The settings
+    are data (JSON), so any site can be added without a code change. See scraper/sources.py."""
+    __tablename__ = "directory_sources"
+    id = db.Column(db.Integer, primary_key=True)
+    owner_id = db.Column(db.Integer, db.ForeignKey("users.id"), nullable=False, index=True)
+    name = db.Column(db.String(120), nullable=False)
+    category = db.Column(db.String(80), nullable=False, default="")
+    config_json = db.Column(db.Text, nullable=False)
+    created_at = db.Column(db.DateTime, default=datetime.utcnow)
+
+    def config(self) -> dict:
+        return json.loads(self.config_json)

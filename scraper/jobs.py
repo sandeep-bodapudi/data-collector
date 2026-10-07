@@ -11,7 +11,7 @@ import uuid
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 
-from . import ai_extract, discover, extract, listings, places, search
+from . import ai_extract, discover, extract, listings, places, search, sources
 from .excel import SECRET_KEYS
 from .fetch import WORKERS, Fetcher, domain_of
 from .search import SearchBlocked, web_search
@@ -266,14 +266,18 @@ def _expand_listings(job: Job, fetcher: Fetcher, listing_hits: list[dict], known
         if not html:
             job.say(f"  could not read listing page {hit['url']}: {note}")
             continue
-        items = listings.extract_listing(html, hit["url"])
+        recipe = hit.get("recipe")
+        items = sources.extract_items(html, hit["url"], recipe) if recipe else listings.extract_listing(html, hit["url"])
         added = 0
         for it in items:
             key = it["name"].lower()
             if key in known_names:
                 continue
             known_names.add(key)
-            rows.append({"Name": it["name"], "Address": it.get("address", ""), "Website": it["href"]})
+            row = {"Name": it["name"], "Address": it.get("address", ""), "Website": it["href"]}
+            if recipe and recipe.get("profile"):
+                row["_profile_ok"] = True  # the person's source asked for each entry's own page to be read
+            rows.append(row)
             added += 1
         if items:
             dupes = len(items) - added
@@ -325,7 +329,7 @@ def _read_profiles(job: Job, fetcher: Fetcher, rows: list[dict]):
     """Read each row's own profile page on its directory (e.g. colleges9.in's per-college page) for its phone number,
     email, address and official website. Plain page fetches, not search, so they run in parallel. A row whose profile
     gives an official website skips the free guess and the search entirely."""
-    todo = [r for r in rows if listings.is_profile_url(r.get("_listing_url", ""))]
+    todo = [r for r in rows if r.get("_listing_url") and (r.get("_profile_ok") or listings.is_profile_url(r["_listing_url"]))]
     if not todo:
         return
     job.phase, job.total, job.done = "visit", len(todo), 0
@@ -457,10 +461,10 @@ def _run_web(job: Job):
     job.columns = (["Name"] + [extract.STANDARD_FIELDS[k] for k in spec["fields"] if k != "title"]
                    + ["Website"] + spec["custom_fields"])
     hits, listing_hits = _search(job)
-    if spec.get("seed") in listings.KNOWN_SEEDS:
-        seed = listings.KNOWN_SEEDS[spec["seed"]]
-        job.say(f"Also pulling {seed['label']}…")
-        listing_hits += [{"url": u} for u in seed["urls"]]
+    source = spec.get("source")
+    if source:
+        job.say(f"Also pulling {spec.get('source_name') or 'your directory source'}…")
+        listing_hits += [{"url": u, "recipe": source} for u in sources.list_urls(source)]
     job.total = len(hits) + len(listing_hits)
     job.phase, job.activity = "visit", f"Reading {len(hits)} websites and picking out the details…"
     job.say(f"Visiting {len(hits)} pages…")
