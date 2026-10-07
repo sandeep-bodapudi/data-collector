@@ -1,0 +1,25 @@
+name: Keep Render app warm (work hours only)
+
+# Render's free plan spins a service down after ~15 minutes idle, and the next real visitor eats a 30-50s cold
+# start. Pinging it keeps it awake - but Render's free tier gives 750 instance-hours/month SHARED across every
+# free service in the account, not 750 each, and this account has four free services. Pinging 24/7 would use
+# almost that entire shared budget on this one app and likely get the other three suspended for the rest of the
+# month. So this runs only 9am-9pm IST (3:30-15:30 UTC), Monday-Friday - about 260 hours/month for this service,
+# leaving most of the 750 for the other three. Change the schedule below if you want different hours/days; see
+# https://crontab.guru to work out a new cron expression (remember GitHub Actions schedules are in UTC).
+#
+# GitHub stops running a repo's scheduled workflows automatically after 60 days with no commits to the repo -
+# a quiet repo silently loses this, not an error, nothing to fix except making a commit (or re-enable it by hand
+# in this workflow's "..." menu on the Actions tab).
+
+"on":
+  schedule:
+    - cron: "*/10 3-15 * * 1-5"
+  workflow_dispatch: {}  # lets you trigger one ping by hand from the Actions tab, to test the URL below works
+
+jobs:
+  ping:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Ping the app so it doesn't spin down
+        run: curl -fsS --max-time 20 -o /dev/null -w "%{http_code}\n" "https://data-collector-ttza.onrender.com/" || true
