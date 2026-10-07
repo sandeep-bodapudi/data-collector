@@ -1,9 +1,9 @@
-/* OneBridge Data Collector - design tokens follow PRD section 4 (neutral surfaces, one blue accent). */
+/* OneBridge Data Collector - design tokens follow PRD section 4 (neutral surfaces, one accent colour matching the OneBridge logo's orange). */
 :root {
   --bg: #f6f7f9; --surface: #ffffff; --surface-2: #f9fafb; --surface-3: #f2f4f7; --hover: #f2f4f7;
   --text: #101828; --text-2: #344054; --muted: #667085; --faint: #98a2b3;
   --line: #eaecf0; --line-2: #d0d5dd;
-  --accent: #2563eb; --accent-2: #1d4ed8; --accent-soft: #eff4ff; --accent-text: #1d4ed8; --accent-ring: rgba(37,99,235,.18);
+  --accent: #a8450a; --accent-2: #8a3807; --accent-soft: #fdf1e9; --accent-text: #a8450a; --accent-ring: rgba(168,69,10,.18);
   --green: #067647; --green-bg: #ecfdf3; --green-dot: #17b26a;
   --amber: #b54708; --amber-bg: #fffaeb; --amber-dot: #f79009;
   --red: #b42318; --red-bg: #fef3f2; --red-dot: #f04438;
@@ -21,7 +21,7 @@
   --bg: #0c111d; --surface: #161b26; --surface-2: #1b2130; --surface-3: #232a3a; --hover: #1f2635;
   --text: #f5f5f6; --text-2: #cecfd2; --muted: #94969c; --faint: #6b6f78;
   --line: #262c3a; --line-2: #333b4d;
-  --accent: #4b83f5; --accent-2: #6b9bff; --accent-soft: #172341; --accent-text: #84aaff; --accent-ring: rgba(75,131,245,.28);
+  --accent: #f68713; --accent-2: #ffa23c; --accent-soft: #2e1d0c; --accent-text: #f68713; --accent-ring: rgba(246,135,19,.28);
   --green: #47cd89; --green-bg: #0f2a1e; --amber: #fdb022; --amber-bg: #2e2210; --red: #f97066; --red-bg: #2f1513;
   --gray-bg: #232a3a;
   --shadow-sm: 0 1px 2px rgba(0,0,0,.4); --shadow: 0 1px 3px rgba(0,0,0,.4); --shadow-lg: 0 12px 32px rgba(0,0,0,.55);
@@ -32,7 +32,7 @@
     --bg: #0c111d; --surface: #161b26; --surface-2: #1b2130; --surface-3: #232a3a; --hover: #1f2635;
     --text: #f5f5f6; --text-2: #cecfd2; --muted: #94969c; --faint: #6b6f78;
     --line: #262c3a; --line-2: #333b4d;
-    --accent: #4b83f5; --accent-2: #6b9bff; --accent-soft: #172341; --accent-text: #84aaff; --accent-ring: rgba(75,131,245,.28);
+    --accent: #f68713; --accent-2: #ffa23c; --accent-soft: #2e1d0c; --accent-text: #f68713; --accent-ring: rgba(246,135,19,.28);
     --green: #47cd89; --green-bg: #0f2a1e; --amber: #fdb022; --amber-bg: #2e2210; --red: #f97066; --red-bg: #2f1513;
     --gray-bg: #232a3a;
     --shadow-sm: 0 1px 2px rgba(0,0,0,.4); --shadow: 0 1px 3px rgba(0,0,0,.4); --shadow-lg: 0 12px 32px rgba(0,0,0,.55);

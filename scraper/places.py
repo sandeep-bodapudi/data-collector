@@ -65,6 +65,19 @@ CATEGORIES = {
     "Tourist attractions": ['[tourism=attraction]', '[tourism=museum]'],
     "Police stations": ['[amenity=police]'],
     "Government offices": ['[office=government]', '[amenity=townhall]'],
+    # Added after live-checking each tag against a real area (Hyderabad) and confirming real, non-zero results -
+    # not guessed. A few more candidates (dentists, opticians, libraries, lawyers, travel agents...) were tried
+    # the same way but the map servers were overloaded (504s) partway through, so those are deferred rather than
+    # added on an unconfirmed guess - ask to have them checked again when the servers aren't busy.
+    "Veterinary clinics": ['[amenity=veterinary]'],
+    "Furniture stores": ['[shop=furniture]'],
+    "Railway stations": ['[railway=station]'],
+    "Accountants": ['[office=accountant]'],
+    "Car wash": ['[amenity=car_wash]'],
+    "Courthouses": ['[amenity=courthouse]'],
+    "Parks": ['[leisure=park]'],
+    "Co-working spaces": ['[office=coworking]'],
+    "Dry cleaners & laundry": ['[shop=laundry]'],
 }
 
 # Names that say it is not an engineering college (unless the name also says engineering/technology).
@@ -269,6 +282,10 @@ FALLBACK_HINT = {
     "IT companies": ("IT company", None), "Factories / industrial": ("factory", None), "Petrol pumps": ("petrol station", None),
     "Tourist attractions": ("tourist attraction", None), "Police stations": ("police station", None),
     "Government offices": ("government office", None),
+    "Veterinary clinics": ("veterinary clinic", None), "Furniture stores": ("furniture store", None),
+    "Railway stations": ("railway station", None), "Accountants": ("accountant", None),
+    "Car wash": ("car wash", None), "Courthouses": ("courthouse", None), "Parks": ("park", None),
+    "Co-working spaces": ("co-working space", None), "Dry cleaners & laundry": ("dry cleaner", None),
 }
 
 

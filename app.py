@@ -353,7 +353,10 @@ def offline_page():
 def create_job():
     d = request.get_json(force=True)
     mode = d.get("mode", "web")
-    custom = _list(d.get("custom_fields", ""))[:15]
+    # Capped per-field, not just by count: a custom field name goes straight into the AI prompt for every page the
+    # run visits, so one accidentally-pasted paragraph (no comma/newline to split it) would otherwise be repeated,
+    # uncapped, into every single one of those calls - a cost and token-bloat problem, not just a display one.
+    custom = [f[:100] for f in _list(d.get("custom_fields", ""))[:15]]
     vault = _vault(current_user.id)
     ai = {"provider": vault.get("ai_provider", "anthropic"), "key": vault.get("ai_api_key", ""),
           "model": vault.get("ai_model", ""), "base_url": vault.get("ai_base_url", "")}

@@ -286,7 +286,15 @@ function exportMenu(sheetId) {
 }
 
 /* ---------------------------------------------------------------- tag input */
-function TagInput(box, { placeholder = "", disabled = false, onChange = () => {} } = {}) {
+// A custom AI detail someone types gets light, non-destructive normalising: trimmed, extra spaces collapsed,
+// and the first letter capitalised only when the whole thing was typed lowercase - an acronym someone already
+// capitalised (RERA, CBSE) is left exactly as typed, not mangled into "Rera" or "Cbse".
+const formatCustomField = (v) => {
+  v = v.trim().replace(/\s+/g, " ");
+  return /^[a-z]/.test(v) ? v[0].toUpperCase() + v.slice(1) : v;
+};
+
+function TagInput(box, { placeholder = "", disabled = false, onChange = () => {}, format = (v) => v } = {}) {
   const items = [];
   const input = document.createElement("input");
   input.disabled = disabled;
@@ -310,7 +318,12 @@ function TagInput(box, { placeholder = "", disabled = false, onChange = () => {}
   // rebuild the entire tag list after each single item (quadratic, and visibly janky at "search 100+ areas" scale).
   const addMany = (list) => {
     let changed = false;
-    for (let v of list) { v = v.trim(); if (v && !items.includes(v)) { items.push(v); changed = true; } }
+    // Case-insensitive dedupe: "Hyderabad" and "hyderabad" typed separately were silently both kept before,
+    // quietly doubling a search/field that looked like one thing to the person who typed it.
+    for (let v of list) {
+      v = format(v.trim());
+      if (v && !items.some((x) => x.toLowerCase() === v.toLowerCase())) { items.push(v); changed = true; }
+    }
     if (changed) render();
   };
   const add = (v) => addMany([v]);
@@ -490,28 +503,15 @@ const FIELD_INFO = {
 };
 const DEFAULT_FIELDS = ["emails", "phones", "address"];
 const PLATFORMS = [["web", "Websites", "globe"], ["linkedin.com", "LinkedIn", "link"], ["facebook.com", "Facebook", "link"], ["instagram.com", "Instagram", "link"], ["twitter.com", "X / Twitter", "link"]];
-// Plain Emails/Phone/Address/Website are generic - they fit any business, but miss what actually matters for a
-// temple, a hospital, a hotel... These are suggested AI details (see the "Other details with AI" box below),
-// matched against the typed searches and any ticked directory source's category, not forced on anyone: they
-// still cost an AI key to actually run, same as any other custom detail.
-const FIELD_SUGGESTIONS = [
-  { label: "Temples", keywords: ["temple", "mandir", "devasthanam", "swamy temple"], fields: ["Deity", "Darshan timings", "Major festivals", "Managed by (trust/devasthanam)"] },
-  { label: "Hospitals", keywords: ["hospital", "clinic", "nursing home", "medical cent"], fields: ["Specialities", "Emergency services available", "Visiting hours", "Number of beds"] },
-  { label: "Schools", keywords: ["school"], fields: ["Board (CBSE/ICSE/State)", "Grades offered", "Admission process", "Medium of instruction"] },
-  { label: "Colleges", keywords: ["college", "university", "engineering college", "polytechnic"], fields: ["Courses offered", "Affiliated university", "Established year", "Accreditation"] },
-  { label: "Restaurants", keywords: ["restaurant", "cafe", "dhaba", "eatery", "bakery"], fields: ["Cuisine", "Price range", "Opening hours", "Home delivery available"] },
-  { label: "Hotels", keywords: ["hotel", "resort", "lodge", "guest house", "homestay"], fields: ["Star rating", "Room types", "Check-in / check-out time", "Amenities"] },
-  { label: "Real estate", keywords: ["real estate", "property", "builders", "apartments for sale", "plots for sale"], fields: ["Property types", "Price range", "RERA number"] },
-  { label: "Gyms & fitness", keywords: ["gym", "fitness cent", "yoga studio", "crossfit"], fields: ["Membership plans", "Trainers available", "Timings"] },
-  { label: "Salons & spas", keywords: ["salon", " spa", "parlour", "parlor"], fields: ["Services offered", "Price range", "Timings"] },
-];
+// FIELD_SUGGESTIONS now lives in static/fieldSuggestions.js (loaded before this file; see templates/index.html),
+// the same way sheetops.js holds the pure merge/export logic - testable from Node without a browser.
 const CAT_GROUPS = [
   ["Religious", ["Hindu temples", "Churches", "Mosques", "Gurudwaras", "Buddhist / Jain temples", "All places of worship"]],
-  ["Health", ["Hospitals", "Clinics & doctors", "Pharmacies"]],
+  ["Health", ["Hospitals", "Clinics & doctors", "Pharmacies", "Veterinary clinics"]],
   ["Education", ["Schools", "Colleges & universities", "Engineering colleges"]],
   ["Food & stay", ["Restaurants", "Cafes", "Hotels"]],
-  ["Business", ["Offices / companies", "IT companies", "Factories / industrial", "Supermarkets & shops", "Banks", "ATMs", "Petrol pumps"]],
-  ["Public", ["Government offices", "Police stations", "Tourist attractions"]],
+  ["Business", ["Offices / companies", "IT companies", "Factories / industrial", "Supermarkets & shops", "Furniture stores", "Banks", "ATMs", "Petrol pumps", "Accountants", "Co-working spaces", "Car wash", "Dry cleaners & laundry"]],
+  ["Public", ["Government offices", "Police stations", "Courthouses", "Tourist attractions", "Railway stations", "Parks"]],
 ];
 
 async function viewNewRun(mode) {
@@ -627,7 +627,7 @@ async function viewNewRun(mode) {
         </div>
         <label class="switch"><input type="checkbox" id="enrich" checked><span class="sw"></span><span><b>Find emails &amp; phone numbers</b><small>Reads each place's website for contact details. The map itself rarely has them, so leave this on if you need contacts. Slower.</small></span></label>
         <label class="switch mt-8" id="find-sites-row"><input type="checkbox" id="find_sites" checked><span class="sw"></span><span><b>Look up websites the map doesn't list</b><small>Searches the web for each place's own site first (about 2 seconds per place, up to 80 per run). Without this, only places with a website on the map get contacts.</small></span></label>
-        ${aiBlock("custom-places")}
+        ${aiBlock("custom-places", true)}
         <div class="callout info mt-16">${icon("info")}<div>Places come from OpenStreetMap, a free public map. Well-known places are almost always listed; very small ones may be missing.</div></div>
       </div>
     </div>`;
@@ -658,21 +658,27 @@ async function viewNewRun(mode) {
   // Which of FIELD_SUGGESTIONS, if any, matches what's typed so far - the searches themselves, and any ticked
   // directory source's own category (set when that source was added in Settings), not guessed from nothing.
   const matchedSuggestion = () => {
-    const sourceCats = $$("input[name=sources]:checked", v).map((c) => ((SOURCES.find((x) => String(x.id) === c.value) || {}).category || "").toLowerCase());
-    const text = (queries?.items || []).join(" ").toLowerCase();
-    return FIELD_SUGGESTIONS.find((fs) => fs.keywords.some((k) => text.includes(k)) || sourceCats.some((c) => c.includes(fs.label.toLowerCase()) || fs.label.toLowerCase().includes(c)));
+    if (mode === "places") return FieldSuggestions.matchByPlacesCategory(state.category);
+    const text = (queries?.items || []).join(" ");
+    const sourceCats = $$("input[name=sources]:checked", v).map((c) => (SOURCES.find((x) => String(x.id) === c.value) || {}).category);
+    return FieldSuggestions.matchByText(text) || FieldSuggestions.matchByCategory(sourceCats);
   };
   const renderSuggestion = () => {
     const box = $("#field-suggest");
     if (!box) return;
     const match = matchedSuggestion();
     if (!match || match.label === dismissedSuggestion) { box.hidden = true; return; }
-    const missing = match.fields.filter((f) => !custom.items.includes(f));
-    if (!missing.length) { box.hidden = true; return; }
+    const missing = match.fields.filter((f) => !custom.items.some((x) => x.toLowerCase() === f.toLowerCase()));
+    // Still worth telling them which mode actually fits better, even once every suggested field has been added -
+    // but only pointed at Places from the web form; someone already in Places doesn't need to be told to switch.
+    const placesNote = (mode === "web" && match.placesCategory)
+      ? `<p class="small mt-16">Places mode has a "${esc(match.placesCategory)}" category that lists every one OpenStreetMap has mapped in an area at once - better than typing one search per city if that's what you need. <a href="#/new/places">Switch to Places</a>.</p>` : "";
+    if (!missing.length) { box.innerHTML = placesNote; box.hidden = !placesNote; return; }
     box.hidden = false;
     box.innerHTML = `<b>${esc(match.label)} search detected.</b> Suggested details${aiReady ? "" : " (needs your AI key in Settings)"}: `
       + missing.map((f) => `<button type="button" class="chip" data-sf="${esc(f)}">+ ${esc(f)}</button>`).join(" ")
-      + ` <button type="button" class="btn btn-sm" id="sf-all">Add all</button> <button type="button" class="btn btn-sm" id="sf-dismiss">Not this</button>`;
+      + ` <button type="button" class="btn btn-sm" id="sf-all">Add all</button> <button type="button" class="btn btn-sm" id="sf-dismiss">Not this</button>`
+      + placesNote;
     $$("[data-sf]", box).forEach((b) => b.onclick = () => custom.add(b.dataset.sf));
     $("#sf-all").onclick = () => custom.addMany(missing);
     $("#sf-dismiss").onclick = () => { dismissedSuggestion = match.label; renderSuggestion(); };
@@ -694,6 +700,7 @@ async function viewNewRun(mode) {
       rows.push(["Category", state.category], ["Locations", locations.items.length ? locations.items.slice(0, 2).join("; ") + (locations.items.length > 2 ? ` +${locations.items.length - 2}` : "") : "—"],
         ["Max per location", fmtNum($("#max_places").value)], ["Website check", $("#enrich").checked || custom.items.length ? "Yes" : "No"]);
       checks.push([!!state.category, "A category"], [locations.items.length > 0, "At least one location"]);
+      renderSuggestion();
     }
     if (custom.items.length) { rows.push(["AI details", custom.items.length]); checks.push([aiReady, "Your AI key is set"]); }
     $("#summary").innerHTML = rows.map(([k, val]) => `<li><span>${esc(k)}</span><b>${esc(val)}</b></li>`).join("");
@@ -722,7 +729,7 @@ async function viewNewRun(mode) {
       $("#batch-areas").value = ""; $("#batch-count").textContent = "";
       toast(`Added ${fmtNum(made.length)} search${made.length === 1 ? "" : "es"}`, "ok");
     };
-    custom = TagInput($("#custom"), { placeholder: aiReady ? "e.g. founder name, services offered" : "Add your AI key in Settings first", disabled: !aiReady, onChange: update });
+    custom = TagInput($("#custom"), { placeholder: aiReady ? "e.g. founder name, services offered" : "Add your AI key in Settings first", disabled: !aiReady, onChange: update, format: formatCustomField });
     $("#max_results").oninput = () => { $("#max_out").textContent = $("#max_results").value; update(); };
     $$("#require button", v).forEach((b) => b.onclick = () => { $$("#require button", v).forEach((x) => x.classList.remove("active")); b.classList.add("active"); state.require = b.dataset.v; });
     $$("input[name=field], input[name=platform], input[name=sources], #region", v).forEach((c) => c.addEventListener("change", update));
@@ -730,7 +737,7 @@ async function viewNewRun(mode) {
   } else {
     locations = TagInput($("#locations"), { placeholder: "e.g. Bachupally, Hyderabad", onChange: update });
     $$("[data-l]", v).forEach((b) => b.onclick = () => locations.add(b.dataset.l));
-    custom = TagInput($("#custom-places"), { placeholder: aiReady ? "e.g. main deity, temple timings" : "Add your AI key in Settings first", disabled: !aiReady, onChange: update });
+    custom = TagInput($("#custom-places"), { placeholder: aiReady ? "e.g. main deity, temple timings" : "Add your AI key in Settings first", disabled: !aiReady, onChange: update, format: formatCustomField });
     const renderCats = () => {
       const q = $("#cat-filter").value.trim().toLowerCase();
       const known = new Set(CAT_GROUPS.flatMap((g) => g[1]));
