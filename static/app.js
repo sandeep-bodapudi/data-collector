@@ -153,6 +153,30 @@ const Tracker = (() => {
     } finally { saving.delete(run.id); live.delete(run.id); emit(run.id, true); }
   }
 
+  // Stage-1 discovery runs save company names into their sheet as they arrive, so
+  // stopping early or losing the connection never loses the names already found.
+  // Preview rows stream from the server; this merges them into the live sheet.
+  async function appendNames(run, job) {
+    const cols = ["Company Name", "Source", "Location / Search", "Status"];
+    let data = null;
+    try { data = await Store.sheets.data(run.id); } catch { data = null; }
+    const rows = data ? data.rows.slice() : [];
+    const seen = new Set(rows.map((r) => String(r["Company Name"] ?? "").trim().toLowerCase()));
+    let added = false;
+    for (const p of job.preview || []) {
+      const name = String(p["Company Name"] ?? "").trim();
+      if (name.length < 2 || seen.has(name.toLowerCase())) continue;
+      seen.add(name.toLowerCase());
+      rows.push({ "Company Name": name, "Source": p["Source"] || "",
+                  "Location / Search": p["Location / Search"] || "", "Status": p["Status"] || "Name only" });
+      added = true;
+    }
+    if (!added && data) return;
+    await Store.sheets.put({ id: run.id, name: run.name, source: "run", created: run.started, run_id: run.id },
+      { columns: cols, rows });
+    Store.persist();
+  }
+
   async function tick() {
     if (busy) return;
     busy = true;
@@ -172,6 +196,14 @@ const Tracker = (() => {
           continue;  // network hiccup: try again on the next tick
         }
         live.set(id, job);
+        if (!FINISHED.includes(job.status)) {
+          // Names-only runs keep their sheet live: a dropped connection or an early
+          // stop still leaves every name found so far saved on this device.
+          try {
+            const run = await Store.runs.get(id);
+            if (run && run.names_only && job.preview && job.preview.length) await appendNames(run, job);
+          } catch { /* next tick retries; nothing is lost server-side either */ }
+        }
         if (FINISHED.includes(job.status)) {
           watching.delete(id);
           // With two tabs open both see the finished run; only one may save it. The lock makes the second wait,
@@ -631,6 +663,7 @@ async function viewNewRun(mode) {
           <div class="seg" id="require">${[["", "Everything"], ["emails", "An email"], ["phones", "A phone"], ["any_contact", "Email or phone"]].map(([val, l], i) => `<button type="button" data-v="${val}" class="${i ? "" : "active"}">${l}</button>`).join("")}</div></div>
         <label class="switch"><input type="checkbox" id="follow_contact" checked><span class="sw"></span><span><b>Check “Contact us” and “About” pages</b><small>Finds many more emails and phone numbers.</small></span></label>
         <label class="switch mt-8"><input type="checkbox" id="one_per_site" checked><span class="sw"></span><span><b>One row per website</b><small>Skips duplicate pages from the same site.</small></span></label>
+        <label class="switch mt-8"><input type="checkbox" id="names_only"><span class="sw"></span><span><b>Collect company names only (recommended for large searches)</b><small>We will save the names first. You can add websites and contact details later.</small></span></label>
       </div>
     </div>`;
 
@@ -658,6 +691,7 @@ async function viewNewRun(mode) {
           <div class="field"><label class="label">Max places per location</label><div class="range-row"><input type="range" id="max_places" min="10" max="500" step="10" value="300" aria-label="Max places per location"><output id="places_out">300</output></div></div>
         </div>
         <label class="switch"><input type="checkbox" id="enrich" checked><span class="sw"></span><span><b>Find emails &amp; phone numbers</b><small>Reads each place's website for contact details. The map itself rarely has them, so leave this on if you need contacts. Slower.</small></span></label>
+        <label class="switch mt-8"><input type="checkbox" id="names_only_places"><span class="sw"></span><span><b>Collect company names only (recommended for large searches)</b><small>We will save the names first. You can add websites and contact details later.</small></span></label>
         <label class="switch mt-8" id="find-sites-row"><input type="checkbox" id="find_sites" checked><span class="sw"></span><span><b>Look up websites the map doesn't list</b><small>Searches the web for each place's own site first (about 2 seconds per place, up to 80 per run). Without this, only places with a website on the map get contacts.</small></span></label>
         ${hasBrave ? "" : `<div class="callout info mt-8" id="places-brave-nudge" hidden>${icon("info")}<div class="grow">Without a search key, this website lookup falls back to free search engines, which cloud servers often get refused by, and paces itself much more slowly. <a href="#/settings">Add a free Brave key in Settings</a> to speed it up - optional, this still works without it.</div></div>`}
         ${aiBlock("custom-places", true)}
@@ -755,17 +789,17 @@ async function viewNewRun(mode) {
       const seedOn = sourceEls.length > 0;
       rows.push(["Searches", queries.items.length || "—"], ["Search on", plats.join(", ") || "—"],
         ["Websites", queries.items.length ? `up to ${fmtNum(queries.items.length * plats.length * +$("#max_results").value)}` : "—"],
-        ["Country", CFG.regions[$("#region").value]], ["Columns", fields.length ? `${fields.length} details` : "—"]);
+        ["Country", CFG.regions[$("#region").value]], ["Columns", $("#names_only").checked ? "Company names only" : fields.length ? `${fields.length} details` : "—"]);
       if (seedOn) rows.splice(1, 0, ["Directory source" + (sourceEls.length > 1 ? "s" : ""), sourceEls.map((c) => seedLabels[c.value]).join(", ")]);
       // A rough estimate only - actual time also depends on how many pages need visiting and whether any
       // website lookups fall back to a search (see estimateWebSeconds below for exactly what this does and
       // doesn't count).
       if (queries.items.length) rows.push(["Estimated time", "~" + fmtRoughDuration(estimateWebSeconds(queries.items.length, plats.length, hasBrave))]);
-      checks.push([queries.items.length > 0 || seedOn, "At least one search, or a directory source"], [fields.length > 0, "At least one detail"], [plats.length > 0, "A place to search"]);
+      checks.push([queries.items.length > 0 || seedOn, "At least one search, or a directory source"], [fields.length > 0 || $("#names_only").checked, "At least one detail, or names only"], [plats.length > 0, "A place to search"]);
       renderSuggestion();
     } else if (mode === "places") {
       rows.push(["Category", state.category], ["Locations", locations.items.length ? locations.items.slice(0, 2).join("; ") + (locations.items.length > 2 ? ` +${locations.items.length - 2}` : "") : "—"],
-        ["Max per location", fmtNum($("#max_places").value)], ["Website check", $("#enrich").checked || custom.items.length ? "Yes" : "No"]);
+        ["Max per location", fmtNum($("#max_places").value)], ["Website check", $("#names_only_places").checked ? "Names only" : $("#enrich").checked || custom.items.length ? "Yes" : "No"]);
       // Also rough: each location is one map query (a few seconds), plus - only if "Check websites" is on -
       // a lookup per place the map found with no website of its own, which isn't knowable before the run finds
       // out how many that actually is.
@@ -827,7 +861,7 @@ async function viewNewRun(mode) {
     custom = TagInput($("#custom"), { placeholder: aiReady ? "e.g. founder name, services offered" : "Add your AI key in Settings first", disabled: !aiReady, onChange: update, format: formatCustomField });
     $("#max_results").oninput = () => { $("#max_out").textContent = $("#max_results").value; update(); };
     $$("#require button", v).forEach((b) => b.onclick = () => { $$("#require button", v).forEach((x) => x.classList.remove("active")); b.classList.add("active"); state.require = b.dataset.v; });
-    $$("input[name=field], input[name=platform], input[name=sources], #region", v).forEach((c) => c.addEventListener("change", update));
+    $$("input[name=field], input[name=platform], input[name=sources], #region, #names_only", v).forEach((c) => c.addEventListener("change", update));
     setTimeout(() => queries.input.focus(), 50);
   } else if (mode === "places") {
     locations = TagInput($("#locations"), { placeholder: "e.g. Bachupally, Hyderabad", onChange: update });
@@ -850,6 +884,7 @@ async function viewNewRun(mode) {
     const syncSites = () => { $("#find-sites-row").hidden = !$("#enrich").checked; };
     $("#enrich").onchange = () => { syncSites(); update(); };
     $("#find_sites").onchange = update;  // previously had no listener at all - toggling it never refreshed anything
+    $("#names_only_places").onchange = update;
     syncSites();
   } else {
     profiles = TagInput($("#profiles"), { placeholder: "e.g. https://www.linkedin.com/in/...", onChange: update });
@@ -867,17 +902,19 @@ async function viewNewRun(mode) {
       Object.assign(body, {
         queries: queries.items.join("\n"), max_results: $("#max_results").value, region: $("#region").value,
         require: state.require, follow_contact: $("#follow_contact").checked, one_per_site: $("#one_per_site").checked,
+        names_only: $("#names_only").checked,
         sources: sourceIds,
         fields: $$("input[name=field]:checked", v).map((c) => c.value), platforms: $$("input[name=platform]:checked", v).map((c) => c.value),
       });
       if (!queries.items.length && !body.sources.length) { toast("Add at least one search in step 1, or pick one or more of your directory sources.", "err"); return queries.input.focus(); }
       if (!body.platforms.length) return toast("Choose at least one place to search.", "err");
-      if (!body.fields.length && !custom.items.length) return toast("Pick at least one detail in step 2.", "err");
+      if (!body.names_only && !body.fields.length && !custom.items.length) return toast("Pick at least one detail in step 2, or collect names only.", "err");
     } else if (mode === "places") {
       locations.flush();
       if (!state.category) { toast("Choose a category in step 1.", "err"); return $("#cat-filter").focus(); }
       Object.assign(body, { category: state.category, locations: locations.items.join("\n"), name_filter: $("#name_filter").value,
-        max_results: $("#max_places").value, enrich: $("#enrich").checked, find_websites: $("#find_sites").checked });
+        max_results: $("#max_places").value, enrich: $("#enrich").checked && !$("#names_only_places").checked,
+        names_only: $("#names_only_places").checked, find_websites: $("#find_sites").checked });
       if (!locations.items.length) { toast("Add at least one location in step 2.", "err"); return locations.input.focus(); }
     } else {
       profiles.flush();
@@ -899,7 +936,7 @@ async function viewNewRun(mode) {
       const name = body.file_name || (mode === "places" ? `${body.category} in ${spec.locations.slice(0, 2).join(", ")}`
         : mode === "social" ? `Social enrichment (${profiles.items.length} profiles)`
         : spec.queries[0] || sourceNames.join(", ") || "Web search");
-      await Store.runs.put({ id: r.id, name, mode, spec, body, status: "running", started: nowIso(), rows: 0, with_email: 0, with_phone: 0,
+      await Store.runs.put({ id: r.id, name, mode, spec, body, names_only: !!body.names_only, status: "running", started: nowIso(), rows: 0, with_email: 0, with_phone: 0,
         duration: 0, error: "", sheet_id: null });
       Tracker.watch(r.id);
       location.hash = `#/runs/${r.id}`;
@@ -1350,14 +1387,29 @@ function mountGrid(data) {
   return () => clearTimeout(deb);
 }
 
-// Whether "Fill missing details" makes sense for this sheet: it needs a Name to look up by, an Email/Phone-ish
-// column to know what's missing, and at least one row that's actually missing one.
+// Whether "Fill missing details" makes sense for this sheet: it needs a Name or
+// Company Name to look up by, and at least one row that's still missing a website,
+// an email or a phone number.
 function sheetNeedsFilling(meta, data) {
-  if (!meta.columns.includes("Name")) return false;
+  const nameCol = ["Name", "Company Name"].find((c) => meta.columns.includes(c));
+  if (!nameCol) return false;
+  const siteCol = meta.columns.includes("Website") ? "Website" : null;
   const emailCol = ["Emails", "Email"].find((c) => meta.columns.includes(c));
   const phoneCol = ["Phone Numbers", "Phone"].find((c) => meta.columns.includes(c));
-  if (!emailCol && !phoneCol) return false;
-  return data.rows.some((r) => r.Name && !(emailCol && r[emailCol]) && !(phoneCol && r[phoneCol]));
+  return data.rows.some((r) => r[nameCol] && (!(siteCol && r[siteCol])
+    || !(emailCol && r[emailCol]) && !(phoneCol && r[phoneCol])));
+}
+
+// A sheet that is only names so far: point at the one button that continues it.
+function namesOnlyHint(meta, data) {
+  if (!meta.columns.includes("Company Name") || IS_VIEWER) return "";
+  const emailCol = ["Emails", "Email"].find((c) => meta.columns.includes(c));
+  const phoneCol = ["Phone Numbers", "Phone"].find((c) => meta.columns.includes(c));
+  const siteCol = meta.columns.includes("Website") ? "Website" : null;
+  const hasDetails = siteCol || emailCol || phoneCol;
+  const needs = data.rows.some((r) => r["Company Name"]);
+  if (!needs || hasDetails) return "";
+  return `<div class="callout info" style="margin-bottom:16px">${icon("info")}<div class="grow">This sheet has company names. Click ‘Fill missing details’ to find websites and contact information.</div></div>`;
 }
 
 async function viewSheet(id) {
@@ -1375,26 +1427,51 @@ async function viewSheet(id) {
   v.innerHTML = `
     <div class="page-head"><div><h1>${esc(meta.name)}</h1><p>${fmtNum(meta.rows)} rows · ${meta.columns.length} columns · ${SOURCE_LABEL[meta.source] || "Run"} · ${esc(fmtDate(meta.created))} · saved on this device</p></div>
       <div class="actions">${IS_VIEWER ? "" : `<button class="btn" id="rename">${icon("edit")}Rename</button><a class="btn" href="#/merge?ids=${id}">${icon("merge")}Dedupe / merge</a><button class="btn" id="share">${icon("share")}Share</button>`}
-        ${canFill ? `<button class="btn" id="fill-missing">${icon("search")}Fill missing details</button>` : ""}
+        ${canFill ? `<button class="btn btn-primary" id="fill-missing">${icon("search")}Fill missing details</button>` : ""}
         <span class="menu-wrap"><button class="btn btn-primary" id="export">${icon("download")}Export</button></span></div></div>
+    ${namesOnlyHint(meta, data)}
     ${GRID_CARD}`;
   $("#export").onclick = (e) => { e.stopPropagation(); openMenu($("#export"), exportMenu(id)); };
   $("#rename")?.addEventListener("click", () => renameSheet(meta, () => route()));
   $("#share")?.addEventListener("click", () => shareDialog(meta));
   $("#fill-missing")?.addEventListener("click", async () => {
-    const btn = $("#fill-missing");
-    btn.disabled = true; btn.innerHTML = '<span class="spinner"></span>Starting…';
-    try {
-      const r = await api("/api/jobs", { method: "POST", body: { mode: "enrich", columns: data.columns, rows: data.rows, custom_fields: "" } });
-      await Store.runs.put({ id: r.id, name: meta.name, mode: "enrich", spec: { mode: "enrich", columns: data.columns, source_sheet: meta.name },
-        body: { mode: "enrich", columns: data.columns, rows: data.rows, custom_fields: "" },
-        status: "running", started: nowIso(), rows: 0, with_email: 0, with_phone: 0, duration: 0, error: "", sheet_id: null });
-      Tracker.watch(r.id);
-      location.hash = `#/runs/${r.id}`;
-    } catch (e) {
-      toast(e.message, "err");
-      btn.disabled = false; btn.innerHTML = `${icon("search")}Fill missing details`;
-    }
+    const nameCol = ["Name", "Company Name"].find((c) => data.columns.includes(c));
+    const siteCol = data.columns.includes("Website") ? "Website" : null;
+    const emailCol = ["Emails", "Email"].find((c) => data.columns.includes(c));
+    const phoneCol = ["Phone Numbers", "Phone"].find((c) => data.columns.includes(c));
+    const missing = (r) => r[nameCol] && (!(siteCol && r[siteCol])
+      || !(emailCol && r[emailCol]) && !(phoneCol && r[phoneCol]));
+    const needAll = data.rows.map((r, i) => i).filter((i) => missing(data.rows[i]));
+    if (!needAll.length) return toast("Every row already has its details.", "ok");
+    const q = ($("#q")?.value || "").trim().toLowerCase();
+    const needFiltered = q ? needAll.filter((i) => data.columns.some((c) => String(data.rows[i][c] ?? "").toLowerCase().includes(q))) : needAll;
+    return modal({
+      title: "Fill missing details", confirm: "Continue",
+      body: `<p>We will search for the missing website, email and phone numbers for these companies. This may take some time. You can stop and continue later.</p>
+        <div class="field"><span class="label">Which rows?</span>
+          <label class="option radio"><input type="radio" name="fill-scope" value="all" checked><span><b>All rows needing details (${needAll.length})</b></span><span class="box"></span></label>
+          ${q && needFiltered.length !== needAll.length ? `<label class="option radio"><input type="radio" name="fill-scope" value="filtered"><span><b>Only rows matching “${esc($("#q").value.trim())}” (${needFiltered.length})</b><small>Work in a small batch, then come back for the rest.</small></span><span class="box"></span></label>` : ""}
+        </div>
+        <div class="hint">Only empty details are filled in — anything already there is left alone.</div>`,
+      onConfirm: async (ov) => {
+        const scope = ov.querySelector('input[name="fill-scope"]:checked')?.value || "all";
+        const rowIds = scope === "filtered" ? needFiltered : null;
+        const btn = $("#fill-missing");
+        btn.disabled = true; btn.innerHTML = '<span class="spinner"></span>Starting…';
+        try {
+          const r = await api("/api/jobs", { method: "POST", body: { mode: "enrich", columns: data.columns, rows: data.rows, custom_fields: "",
+            name_column: nameCol, status_column: "Status", row_ids: rowIds } });
+          await Store.runs.put({ id: r.id, name: meta.name, mode: "enrich", spec: { mode: "enrich", columns: data.columns, source_sheet: meta.name },
+            body: { mode: "enrich", columns: data.columns, rows: data.rows, custom_fields: "", name_column: nameCol, status_column: "Status", row_ids: rowIds },
+            status: "running", started: nowIso(), rows: 0, with_email: 0, with_phone: 0, duration: 0, error: "", sheet_id: null });
+          Tracker.watch(r.id);
+          location.hash = `#/runs/${r.id}`;
+        } catch (e) {
+          toast(e.message, "err");
+          btn.disabled = false; btn.innerHTML = `${icon("search")}Fill missing details`;
+        }
+      },
+    });
   });
   return mountGrid(data);
 }

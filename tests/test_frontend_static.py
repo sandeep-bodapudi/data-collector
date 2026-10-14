@@ -61,6 +61,16 @@ class TestFrontendContracts(unittest.TestCase):
         self.assertPresent("Monthly cap (MB)", "proxy cap input")
         self.assertPresent("Company proxy", "proxy section")
 
+    def test_two_stage(self):
+        self.assertPresent("Collect company names only (recommended for large searches)", "names-only toggle")
+        self.assertPresent("We will save the names first.", "names-only helper")
+        self.assertPresent("Fill missing details", "fill button")
+        self.assertPresent("This sheet has company names.", "names-only empty state")
+        self.assertPresent("You can stop and continue later.", "plain-language confirm")
+        self.assertPresent("appendNames", "live sheet merge")
+        self.assertPresent("run.names_only", "names-only run flag")
+        self.assertPresent("name_column", "name alias wiring")
+
 
 if __name__ == "__main__":
     unittest.main()

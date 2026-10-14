@@ -804,8 +804,87 @@ def _keep(spec: dict, row: dict) -> bool:
     return True
 
 
+def _discovery_row(name: str, source: str, location: str) -> dict:
+    from .config import DISCOVERY_COLUMNS, NAME_ONLY_STATUS
+
+    row = {"Company Name": (name or "").strip()[:150], "Source": (source or "")[:200],
+           "Location / Search": (location or "")[:200], "Status": NAME_ONLY_STATUS}
+    return {c: row[c] for c in DISCOVERY_COLUMNS}
+
+
+def _run_web_names(job: Job):
+    """Stage 1 discovery for web search: names only, no page visits.
+
+    Search results and listing pages are read for names, and every name found is
+    kept immediately in job.rows (the browser saves them into a sheet as they
+    arrive, so stopping early loses nothing). Directory sources work the same way.
+    """
+    from .config import DISCOVERY_COLUMNS
+
+    spec = job.spec
+    job.columns = list(DISCOVERY_COLUMNS)
+    job.say("Saving company names as we find them… You can stop anytime and continue later.")
+    job.activity = "Saving company names as we find them…"
+    hits, listing_hits = _search(job)
+    for src in spec.get("sources") or []:
+        job.say(f"Also pulling {src['name']}…")
+        listing_hits += [{"url": u, "recipe": src["config"]} for u in sources.list_urls(src["config"])]
+    job.total = len(hits) + len(listing_hits)
+    job.phase = "search"
+    known: set[str] = set()
+
+    def keep(name: str, source: str, location: str):
+        name = (name or "").strip()
+        if len(name) < 2 or name.lower() in known:
+            return
+        known.add(name.lower())
+        job.rows.append(_discovery_row(name, source, location))
+        job.done += 1
+
+    fetcher = Fetcher(spec)
+    for h in hits:
+        if job.cancelled.is_set():
+            break
+        url = h.get("url", "")  # _search() normalizes hits to {query, title, url, snippet}
+        if not url:
+            continue
+        if "site:" not in h.get("query", "") and not discover._is_official_candidate(url):
+            if domain_of(url) in listings.LISTING_PARSERS:
+                listing_hits.append({"url": url})
+            continue
+        keep(extract.clean_name(h.get("title", "")), domain_of(url), h.get("query", ""))
+    for hit in listing_hits:
+        if job.cancelled.is_set():
+            break
+        html, note = fetcher.get_html(hit["url"])
+        if not html:
+            job.say(f"  could not read listing page {hit['url']}: {note}")
+            job.done += 1
+            continue
+        recipe = hit.get("recipe")
+        try:
+            items = sources.extract_items(html, hit["url"], recipe) if recipe \
+                else listings.extract_listing(html, hit["url"])
+        except Exception:
+            items = []
+        origin = domain_of(hit["url"])
+        added = 0
+        for it in items:
+            before = len(known)
+            keep(it["name"], origin, it.get("address", ""))
+            added += len(known) - before
+        job.say(f"  {origin}: {added} new name{'s' if added != 1 else ''} from its listing")
+        job.done += 1
+    if job.cancelled.is_set():
+        job.say("Stopped by user. The names saved so far are kept.")
+    else:
+        job.say(f"Saved {len(job.rows)} company names. Open the sheet and use ‘Fill missing details’ when ready.")
+
+
 def _run_web(job: Job):
     spec = job.spec
+    if spec.get("names_only"):
+        return _run_web_names(job)
     job.columns = (["Name"] + [extract.STANDARD_FIELDS[k] for k in spec["fields"] if k != "title"]
                    + ["Website"] + spec["custom_fields"])
     hits, listing_hits = _search(job)
@@ -852,9 +931,21 @@ def _run_enrich(job: Job):
     blank where nothing was found) rather than a filtered subset. Capped at MAX_DISCOVER rows per run on purpose,
     same as Places' website lookup - saving the result and running this again on THAT sheet only has the remaining,
     still-blank rows left to do (an already-filled row is never looked up again), so a big sheet gets done in a few
-    runs instead of one very long one that free search engines are more likely to start refusing partway through."""
+    runs instead of one very long one that free search engines are more likely to start refusing partway through.
+
+    Two-stage sheets may call their name column "Company Name" (see NAME_COLUMN_ALIASES);
+    attempted rows get a Status of Enriched / Partial / No website found."""
+    from .config import (DEFAULT_STATUS_COLUMN, NAME_COLUMN_ALIASES, STATUS_ENRICHED,
+                         STATUS_NO_WEBSITE, STATUS_PARTIAL)
+
     spec = job.spec
     rows, columns = spec["rows"], spec["columns"]
+    name_col = spec.get("name_column") or next((c for c in NAME_COLUMN_ALIASES if c in columns), None)
+    if not name_col or name_col not in columns:
+        raise ValueError("This sheet has no Name or Company Name column, so there's nothing to look up by.")
+    status_col = (spec.get("status_column") or DEFAULT_STATUS_COLUMN)[:200] or DEFAULT_STATUS_COLUMN
+    if status_col not in columns:
+        columns = columns + [status_col]
     job.columns = columns
     website_col = "Website" if "Website" in columns else None
     email_col = next((c for c in ("Emails", "Email") if c in columns), None)
@@ -863,18 +954,43 @@ def _run_enrich(job: Job):
     def has_contact(r):
         return (email_col and r.get(email_col)) or (phone_col and r.get(phone_col))
 
-    todo = [r for r in rows if r.get("Name") and not has_contact(r)]
+    def needs_work(r):
+        if not (r.get(name_col) or "").strip():
+            return False
+        if website_col and not (r.get(website_col) or "").strip():
+            return True
+        return not has_contact(r)
+
+    wanted = spec.get("row_ids")
+    if isinstance(wanted, list) and wanted:
+        wanted_idx = {i for i in wanted if isinstance(i, int) and 0 <= i < len(rows)}
+        todo = [rows[i] for i in sorted(wanted_idx) if needs_work(rows[i])]
+        job.say(f"{len(wanted_idx)} selected rows: {len(todo)} still need details.")
+    else:
+        todo = [r for r in rows if needs_work(r)]
     batch = todo[:MAX_DISCOVER]
-    job.say(f"{len(rows)} rows: {len(rows) - len(todo)} already have contacts, {len(todo)} need a lookup"
+    job.say(f"{len(rows)} rows: {len(rows) - len(todo)} already complete, {len(todo)} need a lookup"
             + (f" - doing the first {len(batch)} this run" if len(todo) > len(batch) else "") + ".")
+    job.activity = (f"Looking for websites and contacts… {len(todo)} companies still need details"
+                    if todo else "Checking the sheet…")
+
+    def mark_status(orig, site: str):
+        contact = has_contact(orig)
+        if site and contact:
+            orig[status_col] = STATUS_ENRICHED
+        elif site or contact:
+            orig[status_col] = STATUS_PARTIAL
+        else:
+            orig[status_col] = STATUS_NO_WEBSITE
 
     if batch:
-        work = [{"Name": r["Name"], "Website": (r.get(website_col, "") if website_col else ""),
+        work = [{"Name": r[name_col], "Website": (r.get(website_col, "") if website_col else ""),
                  "Address": r.get("Address", ""), "_orig": r} for r in batch]
         fetcher = Fetcher(spec)
         _enrich_listed_rows(job, fetcher, work, spec)
         for w in work:
             orig = w["_orig"]
+            had_emails = {e.strip() for e in str(orig.get(email_col, "") or "").split(";") if e.strip()} if email_col else set()
             if website_col and w.get("Website"):
                 orig[website_col] = w["Website"]
             if email_col and w.get("Emails"):
@@ -883,12 +999,25 @@ def _run_enrich(job: Job):
                 orig[phone_col] = w["Phone Numbers"]
             if "Address" in columns and not orig.get("Address") and w.get("Address"):
                 orig["Address"] = w["Address"]
+            site = (orig.get(website_col, "") if website_col else "") or w.get("Website", "")
+            mark_status(orig, site)
+            # Company-only rule, stated on the row: free-mail addresses are kept only when
+            # the company's own site publishes no company-domain address. The note goes on
+            # Source only when that column exists (discovery sheets always have it).
+            if email_col and "Source" in columns and not (orig.get("Source") or "").strip():
+                final_emails = [e.strip() for e in str(orig.get(email_col, "") or "").split(";") if e.strip()]
+                added = [e for e in final_emails if e not in had_emails]
+                if added and not any(e.rsplit("@", 1)[-1] not in FREE_MAIL for e in final_emails if "@" in e):
+                    domain = domain_of(site) if site else ""
+                    orig["Source"] = (f"Company website ({domain}) — free-mail address, no company email published"
+                                      if domain else "Company website — free-mail address, no company email published")[:200]
 
     job.rows = rows  # every row, not just the ones looked up this run - nothing gets dropped from the sheet
     filled = sum(1 for r in batch if has_contact(r))
     job.say(f"Filled in details for {filled} of {len(batch)} rows looked up this run."
             + (f" {len(todo) - len(batch)} more still need a lookup - save this sheet and run "
                "‘Fill missing details’ again to continue with the rest." if len(todo) > len(batch) else ""))
+    job.say(f"All done – {sum(1 for r in rows if has_contact(r))} companies now have contact details.")
     job.phase, job.total, job.done = "done", len(rows), len(rows)
 
 
@@ -1124,8 +1253,52 @@ def _discover_websites(job: Job, rows: list[dict]):
         job.say(f"  Looked up the first {len(batch)} of {len(todo)} places. Run again with a smaller area for the rest.")
 
 
+def _run_places_names(job: Job):
+    """Stage 1 discovery for Places: map names only, no website lookup of any kind."""
+    from .config import DISCOVERY_COLUMNS
+
+    spec = job.spec
+    job.columns = list(DISCOVERY_COLUMNS)
+    job.say("Saving company names as we find them… You can stop anytime and continue later.")
+    job.activity = "Saving company names as we find them…"
+    job.total = len(spec["locations"])
+    known: set[str] = set()
+    for loc in spec["locations"]:
+        if job.cancelled.is_set():
+            break
+        job.say(f'Finding "{spec["category"]}" in {loc}…')
+        try:
+            found = places.search_places(spec["category"], loc, spec.get("name_filter", ""), spec["max_results"],
+                                         notify=lambda msg: setattr(job, "activity", msg), info=job.say)
+        except places.PlaceError as e:
+            job.say(f"  {e}")
+            job.problems.append(str(e))
+            found = []
+        except Exception as e:  # network problems with one location shouldn't stop the others
+            job.say(f"  failed: {type(e).__name__}: {e}")
+            job.problems.append(f"Could not reach the map service ({type(e).__name__}). Please try again.")
+            found = []
+        added = 0
+        for r in found:
+            name = (r.get("Name", "") or "").strip()
+            if len(name) < 2 or name.lower() in known:
+                continue
+            known.add(name.lower())
+            job.rows.append(_discovery_row(name, "Map", loc))
+            added += 1
+        job.say(f"  {added} new company name{'s' if added != 1 else ''} saved")
+        job.done += 1
+        time.sleep(1)
+    if job.cancelled.is_set():
+        job.say("Stopped by user. The names saved so far are kept.")
+    else:
+        job.say(f"Saved {len(job.rows)} company names. Open the sheet and use ‘Fill missing details’ when ready.")
+
+
 def _run_places(job: Job):
     spec = job.spec
+    if spec.get("names_only"):
+        return _run_places_names(job)
     job.columns = list(places.OUTPUT_COLUMNS) + (spec["custom_fields"] if spec.get("enrich") else [])
     all_rows = []
     job.total = len(spec["locations"])

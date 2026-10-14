@@ -25,6 +25,18 @@ FREE_SEARCH_ORDER = ["brave", "google_cse", "ddgs"]
 FREE_PLACES_ORDER = ["overpass", "photon", "nominatim", "wikidata"]
 SOCIAL_PROVIDER_ORDER = ["brightdata", "apify"]
 
+# Two-stage company discovery (plan docs/v2/two-stage-discovery-plan.md).
+# Stage 1 sheets always use these four columns, whichever mode found the names.
+DISCOVERY_COLUMNS = ["Company Name", "Source", "Location / Search", "Status"]
+NAME_ONLY_STATUS = "Name only"
+# A sheet being enriched may call its name column either of these.
+NAME_COLUMN_ALIASES = ("Name", "Company Name")
+DEFAULT_STATUS_COLUMN = "Status"
+# Status values written by enrichment, per attempted row.
+STATUS_ENRICHED = "Enriched"
+STATUS_PARTIAL = "Partial"
+STATUS_NO_WEBSITE = "No website found"
+
 # Unit economics (USD per successfully filled paid profile). Env-overridable.
 SOCIAL_UNIT_USD = {
     "brightdata": float(__import__("os").environ.get("SOCIAL_BRIGHTDATA_USD_PER_PROFILE", "0.0")),

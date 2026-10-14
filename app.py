@@ -520,7 +520,9 @@ def build_job_spec(d: dict, vault: dict, user_id: int, enforce_budget: bool = Tr
             return None, "Choose a category.", 400
         spec = {"mode": "places", "category": d["category"], "locations": locations[:30],
                 "name_filter": (d.get("name_filter") or "").strip() if isinstance(d.get("name_filter"), str) else "",
-                "enrich": bool(d.get("enrich")) or bool(custom), "find_websites": bool(d.get("find_websites", True)), **common}
+                "names_only": bool(d.get("names_only")),
+                "enrich": (bool(d.get("enrich")) or bool(custom)) and not d.get("names_only"),
+                "find_websites": bool(d.get("find_websites", True)), **common}
     elif mode == "enrich":
         # "Fill missing details" on an existing sheet - the sheet itself lives only in the person's own browser
         # (see README "Where data is stored"), so its current rows/columns are sent here as the job's starting
@@ -529,13 +531,25 @@ def build_job_spec(d: dict, vault: dict, user_id: int, enforce_budget: bool = Tr
         if not isinstance(in_columns, list) or not in_columns:
             return None, "No columns given.", 400
         columns = [str(c)[:200] for c in in_columns][:300]
-        if "Name" not in columns:
-            return None, "This sheet has no Name column, so there's nothing to look up by.", 400
+        name_col = d.get("name_column") if d.get("name_column") in columns else None
+        if not name_col:
+            name_col = next((c for c in ("Name", "Company Name") if c in columns), None)
+        if not name_col:
+            return None, "This sheet has no Name or Company Name column, so there's nothing to look up by.", 400
         if not isinstance(in_rows, list) or not in_rows:
             return None, "No rows to fill in - the sheet looks empty.", 400
         rows = [{c: ("" if r.get(c) is None else str(r.get(c))[:2000]) for c in columns}
                 for r in in_rows if isinstance(r, dict)][:2000]
-        spec = {"mode": "enrich", "rows": rows, "columns": columns, **common}
+        status_col = str(d.get("status_column") or "Status")[:200] or "Status"
+        row_ids = d.get("row_ids")
+        if not isinstance(row_ids, list):
+            row_ids = None
+        else:
+            row_ids = [i for i in row_ids if isinstance(i, int) and 0 <= i < len(rows)][:2000]
+            if not row_ids:
+                row_ids = None
+        spec = {"mode": "enrich", "rows": rows, "columns": columns, "name_column": name_col,
+                "status_column": status_col, "row_ids": row_ids, **common}
     elif mode == "social":
         items, plats, err = _parse_social_items(d)
         if err:
@@ -592,14 +606,19 @@ def build_job_spec(d: dict, vault: dict, user_id: int, enforce_budget: bool = Tr
                 source_rows.append(row)
         if not queries and not source_rows:
             return None, "Add at least one search, or pick one or more of your directory sources.", 400
-        fields = [f for f in (d.get("fields", []) or []) if f in extract.STANDARD_FIELDS]
-        if not fields and not custom:
-            return None, "Pick at least one detail to collect.", 400
+        names_only = bool(d.get("names_only"))
+        if not names_only:
+            fields = [f for f in (d.get("fields", []) or []) if f in extract.STANDARD_FIELDS]
+            if not fields and not custom:
+                return None, "Pick at least one detail to collect.", 400
+        else:
+            fields = []
         platforms = [p for p in (d.get("platforms") or ["web"])
                      if p in ("web", "linkedin.com", "facebook.com", "instagram.com", "twitter.com")] or ["web"]
         spec = {"mode": "web", "queries": queries,
                 "sources": [{"name": r.name, "config": r.config()} for r in source_rows],
                 "region": d.get("region") if d.get("region") in REGIONS else "wt-wt",
+                "names_only": names_only,
                 "fields": fields, "platforms": platforms,
                 "follow_contact": bool(d.get("follow_contact", True)), "one_per_site": bool(d.get("one_per_site")),
                 "require": d.get("require") if d.get("require") in ("emails", "phones", "any_contact") else "",
