@@ -361,12 +361,16 @@ def preflight(spec: dict) -> dict:
 
     notes: list[str] = []
     search_eff: list[str] = []
+    search_flaky: list[str] = []   # enabled and usable, but the last health probe failed
     for name in FREE_SEARCH_ORDER:
         if not is_enabled(name):
             notes.append(f"skipped {name} (disabled)")
             continue
         if _unhealthy(name):
             notes.append(f"skipped {name} (last check failed)")
+            if not (name == "brave" and not (spec.get("brave_key") or search.brave_key_set())) and not (
+                    name == "google_cse" and not (os.environ.get("GOOGLE_CSE_KEY") and os.environ.get("GOOGLE_CSE_CX"))):
+                search_flaky.append(name)
             continue
         if name == "brave" and not (spec.get("brave_key") or search.brave_key_set()):
             notes.append("skipped brave (no key)")
@@ -375,15 +379,24 @@ def preflight(spec: dict) -> dict:
             notes.append("skipped google_cse (no key)")
             continue
         search_eff.append(name)
+    if not search_eff and search_flaky:
+        # A failed probe is a hint, not proof: one blip must not leave a keyless install with no search for 30 minutes.
+        search_eff = search_flaky
+        notes.append("every search engine failed its last check; trying " + ", ".join(search_flaky) + " anyway")
     places_eff: list[str] = []
+    places_flaky: list[str] = []
     for name in FREE_PLACES_ORDER:
         if not is_enabled(name):
             notes.append(f"skipped {name} (disabled)")
             continue
         if _unhealthy(name):
             notes.append(f"skipped {name} (last check failed)")
+            places_flaky.append(name)
             continue
         places_eff.append(name)
+    if not places_eff and places_flaky:
+        places_eff = places_flaky
+        notes.append("every map source failed its last check; trying " + ", ".join(places_flaky) + " anyway")
     ai_ok = True
     if spec.get("custom_fields"):
         try:
