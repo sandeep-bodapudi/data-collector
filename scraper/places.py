@@ -78,17 +78,35 @@ CATEGORIES = {
     "Parks": ['[leisure=park]'],
     "Co-working spaces": ['[office=coworking]'],
     "Dry cleaners & laundry": ['[shop=laundry]'],
-    # Live-verified against Ameerpet, Hyderabad: the unfiltered tag also matches ordinary
-    # schools, so the name pattern keeps coaching/training institutes and drops them.
-    # amenity=training, amenity=coaching and shop=training were checked the same way and
-    # returned nothing - they are not real OSM tags in use here.
-    "Coaching & training centers": ['[office=educational_institution][name~"coach|train|tutor|tuition|academy|institute",i]'],
+    # Live-verified against Ameerpet, Hyderabad: amenity=training, amenity=coaching and shop=training return
+    # nothing (not real tags in use). office=educational_institution is where these are mapped - but a name
+    # regex on top of it ("coach|train|tutor|tuition|academy|institute") silently dropped most real centers: in an
+    # 8 km box around Ameerpet it matched 6 of 32 named entries and missed Naresh iT, Zoom Technologies, Omni
+    # Techmasters, Satya Technologies, Qkoncept Learning, Skill Kshetra... Those names say nothing about coaching.
+    # So the tag is queried unfiltered and ordinary schools are dropped by name afterwards (NAME_RULES below),
+    # the same shape as the engineering-colleges category.
+    "Coaching & training centers": ['[office=educational_institution]'],
 }
 
 # Names that say it is not an engineering college (unless the name also says engineering/technology).
 ENGINEERING_NOT = re.compile(r"junior|\bjr\b|intermediate|degree college|pharm|medical|dental|nursing|\blaw\b|b\.? ?ed\b|ayurved|homeo|"
                              r"agricultur|veterinar|physio|\bschool\b|commerce|arts and|hotel management|\bmba\b|\bpg college|coaching|tutorial", re.I)
 ENGINEERING_YES = re.compile(r"engineer|technolog|polytechnic|\btech\b|jntu|iiit|vjiet|griet|bvrit|cbit|mgit", re.I)
+
+# Ordinary schools and junior colleges are tagged office=educational_institution too (in the Ameerpet check, about
+# 10 of the 26 names a coaching search would otherwise have been missing were high schools). Dropped by name unless
+# the name also says it is coaching/training/an academy: "Brilliant Grammar High School" goes, "Brilliant Tutorials"
+# and "Sri Chaitanya IIT Academy" stay.
+COACHING_NOT = re.compile(r"\b(high ?school|school|junior college|jr\.? college|degree college|vidya\w*|vidyalaya|"
+                          r"public school|nursery|kids|montessori|convent|covent|play ?school|kindergarten|grammar|primary|secondary)\b", re.I)
+COACHING_YES = re.compile(r"coach|train|tutor|tuition|academ|institute|classes|study|learning|skill|career|exam|prep", re.I)
+
+# category -> (drop a name matching the first unless it also matches the second). One place for "this tag is
+# wider than the category", instead of an if per category.
+NAME_RULES = {
+    "Engineering colleges": (ENGINEERING_NOT, ENGINEERING_YES),
+    "Coaching & training centers": (COACHING_NOT, COACHING_YES),
+}
 
 # What the sheet shows: only real, useful data. Map coordinates, opening hours, internal notes and how each
 # value was found go to the run log, not the sheet.
@@ -464,7 +482,10 @@ def search_places(category: str, location: str, name_filter: str = "", limit: in
     prefix, area = _area_clause(geo)
     name_part = f'[name~"{name_filter.replace(chr(34), "")}",i]' if name_filter else "[name]"
     stmts = "".join(f"nwr{f}{name_part}{area};" for f in CATEGORIES[category])
-    query = f"[out:json][timeout:{SERVER_TIMEOUT}];{prefix}({stmts});out center tags {int(limit)};"
+    # A category with a name rule throws some of what the map returns away afterwards, so ask for more than the
+    # limit up front (still capped) - otherwise "500 max" could mean 500 entries of which 300 were schools.
+    fetch_limit = min(int(limit) * 3, 1500) if category in NAME_RULES else int(limit)
+    query = f"[out:json][timeout:{SERVER_TIMEOUT}];{prefix}({stmts});out center tags {fetch_limit};"
     overpass_allowed = _enabled("overpass")
     if not overpass_allowed and info:
         info("  skipped Overpass (disabled in Admin → Connections); trying other free map sources…")
@@ -505,7 +526,8 @@ def search_places(category: str, location: str, name_filter: str = "", limit: in
     for el in elements:
         tags = el.get("tags", {})
         nm = tags.get("name", "")
-        if category == "Engineering colleges" and ENGINEERING_NOT.search(nm) and not ENGINEERING_YES.search(nm):
+        rule = NAME_RULES.get(category)
+        if rule and rule[0].search(nm) and not rule[1].search(nm):
             continue
         lat = el.get("lat") or el.get("center", {}).get("lat")
         lon = el.get("lon") or el.get("center", {}).get("lon")
@@ -530,6 +552,8 @@ def search_places(category: str, location: str, name_filter: str = "", limit: in
             "Other Details": _other_details(tags),
             "_aliases": [a.strip() for k in ("short_name", "alt_name", "old_name") for a in tags.get(k, "").split(";") if a.strip()],
         })
+    if category in NAME_RULES:
+        rows = rows[:int(limit)]
     if not rows and info:
         info("  Nothing in the map data for this category here. Try the area name on its own, a bigger nearby area, "
              "a broader category, or the Web search option, which also finds places the map doesn't list.")

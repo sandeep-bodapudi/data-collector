@@ -8,6 +8,7 @@ os.environ["DATABASE_URL"] = "sqlite:///" + os.path.join(TMP, "t2s.db").replace(
 os.environ["APP_USER"] = "boss2s"
 os.environ["APP_PASSWORD"] = "adminpass123"
 os.environ["SECRET_KEY"] = "test-secret-key-two-stage-only"
+os.environ.setdefault("SKIP_STARTUP_PROBES", "1")  # tests must not depend on live network probes
 import sys
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))

@@ -10,6 +10,7 @@ os.environ["JOB_STORE_DIR"] = os.path.join(TMP, "jobs")  # durable-job payloads 
 os.environ["APP_USER"] = "boss2"
 os.environ["APP_PASSWORD"] = "adminpass123"
 os.environ["SECRET_KEY"] = "test-secret-key-phase2-only"
+os.environ.setdefault("SKIP_STARTUP_PROBES", "1")  # tests must not depend on live network probes
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import app as appmod  # noqa: E402

@@ -71,6 +71,13 @@ class TestFrontendContracts(unittest.TestCase):
         self.assertPresent("run.names_only", "names-only run flag")
         self.assertPresent("name_column", "name alias wiring")
 
+    def test_synonym_searches(self):
+        self.assertPresent('id="expand_synonyms"', "similar-wordings toggle")
+        self.assertPresent("Also search similar wordings", "toggle label")
+        self.assertPresent("expand_synonyms: $(\"#expand_synonyms\").checked", "toggle sent with the run")
+        self.assertPresent("#names_only, #expand_synonyms", "summary refreshes when toggled")
+        self.assertPresent("Also searched similar wordings", "shown on the run's Input tab")
+
 
 if __name__ == "__main__":
     unittest.main()

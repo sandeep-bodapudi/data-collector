@@ -10,6 +10,7 @@ os.environ["DATABASE_URL"] = "sqlite:///" + os.path.join(TMP, "t5b.db").replace(
 os.environ["APP_USER"] = "boss5b"
 os.environ["APP_PASSWORD"] = "adminpass123"
 os.environ["SECRET_KEY"] = "test-secret-key-phase5b-only"
+os.environ.setdefault("SKIP_STARTUP_PROBES", "1")  # tests must not depend on live network probes
 os.environ["JOB_STORE_BACKEND"] = "disk"
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 

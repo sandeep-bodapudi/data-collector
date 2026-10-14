@@ -136,7 +136,12 @@ def _upgrade_schema():
 
 
 def run_startup_probes():
-    """Background, time-boxed probe of keyless services. Never raises."""
+    """Background, time-boxed probe of keyless services. Never raises.
+    SKIP_STARTUP_PROBES=1 turns it off - the test suite sets it: the probes make real network calls, and one
+    failed DuckDuckGo probe marks that engine unhealthy for 30 minutes, which made unrelated tests that run a
+    keyless web job fail at random (preflight then finds no search service at all)."""
+    if os.environ.get("SKIP_STARTUP_PROBES") == "1":
+        return
     with app.app_context():
         try:
             from models import ConnectionHealth
@@ -619,6 +624,8 @@ def build_job_spec(d: dict, vault: dict, user_id: int, enforce_budget: bool = Tr
                 "sources": [{"name": r.name, "config": r.config()} for r in source_rows],
                 "region": d.get("region") if d.get("region") in REGIONS else "wt-wt",
                 "names_only": names_only,
+                # Opt-in: extra searches with the category word swapped for its usual equivalents (scraper/topic.py).
+                "expand_synonyms": bool(d.get("expand_synonyms")),
                 "fields": fields, "platforms": platforms,
                 "follow_contact": bool(d.get("follow_contact", True)), "one_per_site": bool(d.get("one_per_site")),
                 "require": d.get("require") if d.get("require") in ("emails", "phones", "any_contact") else "",

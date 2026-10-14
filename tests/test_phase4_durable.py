@@ -13,6 +13,7 @@ os.environ["DATABASE_URL"] = "sqlite:///" + os.path.join(TMP, "t4.db").replace("
 os.environ["APP_USER"] = "boss4"
 os.environ["APP_PASSWORD"] = "adminpass123"
 os.environ["SECRET_KEY"] = "test-secret-key-phase4-only"
+os.environ.setdefault("SKIP_STARTUP_PROBES", "1")  # tests must not depend on live network probes
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from scraper import job_store as JS  # noqa: E402

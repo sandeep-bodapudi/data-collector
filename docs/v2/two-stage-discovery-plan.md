@@ -202,9 +202,55 @@ have produced empty sheets — fixed and covered.
   no-guessed-parsers rule, neither was added — they stay visible as counted skipped
   directories, and their names still surface via official-site hits.
 - Coaching centers had no Places category at all. Added **Coaching & training
-  centers** (`office=educational_institution` + verified name pattern) after live
-  verification against Ameerpet (5 real institutes, schools excluded; the
-  `amenity=training`-family tags returned nothing and were not added).
+  centers** (`office=educational_institution`) after live verification against
+  Ameerpet; the `amenity=training`-family tags returned nothing and were not added.
+  *(Superseded - see "Recall fixes" below: the first version also put a name regex on
+  the tag, which turned out to hide most real centers.)*
+
+## 8b. Recall fixes: companies that were silently missing
+
+Reported on a live "coaching centres in Hyderabad" run: real centers were absent. Three
+separate causes, each checked against the code and live map data before changing anything:
+
+1. **Map path.** The Coaching category matched names containing
+   `coach|train|tutor|tuition|academy|institute`. In an 8 km box around Ameerpet that kept
+   6 of 32 named `office=educational_institution` entries and missed Naresh iT, Zoom
+   Technologies, Omni Techmasters, Satya Technologies, Qkoncept Learning, Skill Kshetra -
+   names that say nothing about coaching. Now the tag is queried with no name regex, and
+   ordinary schools/junior colleges (about 10 of the 26 previously-missed entries were high
+   schools) are dropped by name afterwards via `places.NAME_RULES` (a school word loses to a
+   coaching word: "Allen Coaching School" stays, "Brilliant Grammar High School" goes).
+   Engineering colleges use the same mechanism now. Because some of what the map returns is
+   thrown away, the query asks for up to 3x the limit (cap 1500) and trims back afterwards.
+2. **Web path - spelling and word forms.** Topic words were compared as exact whole words:
+   `centres` never equalled `centers`, `Coach` never equalled `coaching`, `Institutes` never
+   `institute`. `scraper/topic.py` now stems both sides (plurals, `-ing`, British/American
+   spellings). Spelling alone was a narrow cause (one matching topic word was always enough,
+   so any title containing "Coaching" passed either way); the missing word-form handling was
+   the larger one.
+3. **Web path - vocabulary.** A center titled "Naresh IT - Software Training Institute" shares
+   no word with "coaching centers". When only collecting names (`names_only`), a query's
+   category now also accepts its usual synonyms (`topic.SYNONYM_GROUPS`: coaching accepts
+   training, tuition, tutorial, academy, institute; likewise colleges, schools, hospitals,
+   restaurants, gyms, salons, temples, builders). Full runs keep the exact (stemmed) rule.
+   A topic word is still required - dropping it was considered and rejected: a wrong row is
+   not free even when only collecting names, because Stage 2 spends up to three searches
+   per name and the 80-lookup cap on it.
+
+Also found while doing this: filler words ("best", "top", "contact", "phone"...) counted as
+topic or place evidence, so "Best Biryani in Hyderabad" passed a "best coaching centers"
+query and any page saying "contact" passed the place check. They no longer count
+(`topic.NOISE`; if a query is made only of them they are kept rather than matching nothing).
+
+Opt-in: **"Also search similar wordings"** on the web form adds up to 4 extra searches per
+query ("training institutes in Hyderabad", "tuition centers in Hyderabad"...) capped at 40 per
+run (`topic.expand_query`, `jobs.MAX_EXPANDED_QUERIES`). It is a toggle because it multiplies
+search time (about 5x without a Brave key). Names-only runs now also log up to five titles
+they skipped per search, so a miss is visible instead of silent.
+
+Not shipped, deliberately: `amenity=prep_school` and `amenity=language_school`. The first
+timed out on every Overpass mirror, so it is unverified; the second returns mostly mis-tagged
+ordinary schools. Both stay out until a clean live check says otherwise.
 
 ## 9. Risks + rollback
 

@@ -9,6 +9,7 @@ os.environ["JOB_STORE_DIR"] = os.path.join(TMP, "jobs")  # durable-job payloads 
 os.environ["APP_USER"] = "boss3"
 os.environ["APP_PASSWORD"] = "adminpass123"
 os.environ["SECRET_KEY"] = "test-secret-key-phase3-only"
+os.environ.setdefault("SKIP_STARTUP_PROBES", "1")  # tests must not depend on live network probes
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from scraper.social_base import (  # noqa: E402

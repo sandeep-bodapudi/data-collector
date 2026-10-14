@@ -664,6 +664,7 @@ async function viewNewRun(mode) {
         <label class="switch"><input type="checkbox" id="follow_contact" checked><span class="sw"></span><span><b>Check “Contact us” and “About” pages</b><small>Finds many more emails and phone numbers.</small></span></label>
         <label class="switch mt-8"><input type="checkbox" id="one_per_site" checked><span class="sw"></span><span><b>One row per website</b><small>Skips duplicate pages from the same site.</small></span></label>
         <label class="switch mt-8"><input type="checkbox" id="names_only"><span class="sw"></span><span><b>Collect company names only (recommended for large searches)</b><small>We will save the names first. You can add websites and contact details later.</small></span></label>
+        <label class="switch mt-8"><input type="checkbox" id="expand_synonyms"><span class="sw"></span><span><b>Also search similar wordings</b><small>Searches “training institutes”, “tuition centers” and similar alongside “coaching centers”, so companies that word themselves differently turn up too. Takes noticeably longer.</small></span></label>
       </div>
     </div>`;
 
@@ -794,7 +795,7 @@ async function viewNewRun(mode) {
       // A rough estimate only - actual time also depends on how many pages need visiting and whether any
       // website lookups fall back to a search (see estimateWebSeconds below for exactly what this does and
       // doesn't count).
-      if (queries.items.length) rows.push(["Estimated time", "~" + fmtRoughDuration(estimateWebSeconds(queries.items.length, plats.length, hasBrave))]);
+      if (queries.items.length) rows.push(["Estimated time", "~" + fmtRoughDuration(estimateWebSeconds(queries.items.length * ($("#expand_synonyms").checked ? 5 : 1), plats.length, hasBrave))]);
       checks.push([queries.items.length > 0 || seedOn, "At least one search, or a directory source"], [fields.length > 0 || $("#names_only").checked, "At least one detail, or names only"], [plats.length > 0, "A place to search"]);
       renderSuggestion();
     } else if (mode === "places") {
@@ -861,7 +862,7 @@ async function viewNewRun(mode) {
     custom = TagInput($("#custom"), { placeholder: aiReady ? "e.g. founder name, services offered" : "Add your AI key in Settings first", disabled: !aiReady, onChange: update, format: formatCustomField });
     $("#max_results").oninput = () => { $("#max_out").textContent = $("#max_results").value; update(); };
     $$("#require button", v).forEach((b) => b.onclick = () => { $$("#require button", v).forEach((x) => x.classList.remove("active")); b.classList.add("active"); state.require = b.dataset.v; });
-    $$("input[name=field], input[name=platform], input[name=sources], #region, #names_only", v).forEach((c) => c.addEventListener("change", update));
+    $$("input[name=field], input[name=platform], input[name=sources], #region, #names_only, #expand_synonyms", v).forEach((c) => c.addEventListener("change", update));
     setTimeout(() => queries.input.focus(), 50);
   } else if (mode === "places") {
     locations = TagInput($("#locations"), { placeholder: "e.g. Bachupally, Hyderabad", onChange: update });
@@ -902,7 +903,7 @@ async function viewNewRun(mode) {
       Object.assign(body, {
         queries: queries.items.join("\n"), max_results: $("#max_results").value, region: $("#region").value,
         require: state.require, follow_contact: $("#follow_contact").checked, one_per_site: $("#one_per_site").checked,
-        names_only: $("#names_only").checked,
+        names_only: $("#names_only").checked, expand_synonyms: $("#expand_synonyms").checked,
         sources: sourceIds,
         fields: $$("input[name=field]:checked", v).map((c) => c.value), platforms: $$("input[name=platform]:checked", v).map((c) => c.value),
       });
@@ -1130,7 +1131,7 @@ async function viewRunDetail(id) {
   const INPUT_LABELS = { queries: "Searches", category: "Category", locations: "Locations", region: "Country", fields: "Details", custom_fields: "AI details",
     platforms: "Search on", max_results: "Max results", require: "Keep only rows with", follow_contact: "Check contact pages", one_per_site: "One row per website",
     enrich: "Check websites", name_filter: "Name contains", file_name: "Sheet name", source_sheet: "From sheet",
-    sourceNames: "Directory sources" };
+    sourceNames: "Directory sources", expand_synonyms: "Also searched similar wordings" };
   const spec = run.spec || {};
   $("#tab-input").innerHTML = `<ul class="summary-list">${Object.entries(spec).filter(([k, val]) => INPUT_LABELS[k] && val !== "" && val !== null && !(Array.isArray(val) && !val.length))
     .map(([k, val]) => `<li><span>${INPUT_LABELS[k]}</span><b>${esc(k === "region" ? CFG.regions[val] || val : Array.isArray(val) ? val.join("; ") : typeof val === "boolean" ? (val ? "Yes" : "No") : val)}</b></li>`).join("")}</ul>`;

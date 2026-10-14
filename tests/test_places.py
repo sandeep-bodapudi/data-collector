@@ -1081,29 +1081,51 @@ ok("the same key is spaced out: the 2nd and 3rd requests wait, the 1st does not"
 ok("a different key is not delayed by the first key's requests", len(waits) == 2)
 jobs.discover.find_website = real_find_for_parallel if 'real_find_for_parallel' in globals() else jobs.discover.find_website
 
-# ---- Coaching & training centers: a live-verified category, not a guessed tag -----------------
-# Verified live against Ameerpet, Hyderabad: [office=educational_institution] alone also matches
-# ordinary schools, while amenity=training / amenity=coaching / shop=training returned nothing
-# at all (not real tags in use). The name pattern keeps coaching institutes ("Mahendras
-# coaching center", "Race institute") and drops schools ("Brilliant Grammar High School").
-ok("coaching centers map to the verified tag + name filter",
-   places.CATEGORIES["Coaching & training centers"] == ['[office=educational_institution][name~"coach|train|tutor|tuition|academy|institute",i]'],
+# ---- Coaching & training centers: a live-verified tag, no name regex on top of it ------------------
+# Verified live against Ameerpet, Hyderabad: amenity=training / amenity=coaching / shop=training return nothing
+# (not real tags in use); office=educational_institution is where these are mapped. A name regex on top of it
+# ("coach|train|tutor|...") matched only 6 of 32 named entries in an 8 km box and missed Naresh iT, Zoom
+# Technologies, Omni Techmasters... - so the tag is now queried unfiltered and ordinary schools are dropped by name
+# afterwards (places.NAME_RULES), the same way the engineering category works.
+ok("coaching centers map to the verified tag with no name regex",
+   places.CATEGORIES["Coaching & training centers"] == ['[office=educational_institution]'],
    places.CATEGORIES["Coaching & training centers"])
 ok("coaching centers have a fallback hint word",
    places.FALLBACK_HINT["Coaching & training centers"][0] == "coaching center")
 _coaching_overpass = places._overpass
-places._overpass = lambda q, notify=None: [
-    {"type": "node", "lat": 17.43, "lon": 78.44,
-     "tags": {"name": "Mahendras coaching center", "addr:full": "Ameerpet"}},
-    {"type": "node", "lat": 17.44, "lon": 78.45,
-     "tags": {"name": "Race institute", "addr:full": "Ameerpet"}}]
+_coaching_sent = {}
+def _coaching_fake(q, notify=None):
+    _coaching_sent["q"] = q
+    n = lambda name, i: {"type": "node", "lat": 17.43 + i / 1000, "lon": 78.44, "tags": {"name": name, "addr:full": "Ameerpet"}}
+    return [n(x, i) for i, x in enumerate([
+        "Mahendras coaching center", "Race institute", "Naresh iT", "Zoom Technologies", "Qkoncept Learning",
+        "Brilliant Grammar High School", "NALANDA HIGH SCHOOL", "SVP junior college", "Brilliant Tutorials",
+        "Allen Coaching School"])]
+places._overpass = _coaching_fake
 try:
     coaching_rows = places.search_places("Coaching & training centers", "Ameerpet, Hyderabad", "", 50)
 finally:
     places._overpass = _coaching_overpass
-ok("coaching search flows end to end with map data kept",
-   [(r["Name"], r["Address"]) for r in coaching_rows] == [("Mahendras coaching center", "Ameerpet"),
-                                                          ("Race institute", "Ameerpet")], coaching_rows)
+_cnames = [r["Name"] for r in coaching_rows]
+ok("coaching search keeps centers whose names say nothing about coaching (Naresh iT, Zoom Technologies, ...)",
+   all(n in _cnames for n in ("Naresh iT", "Zoom Technologies", "Qkoncept Learning")), _cnames)
+ok("coaching search keeps centers that do say it, including 'Allen Coaching School' (a school word does not beat a coaching word)",
+   all(n in _cnames for n in ("Mahendras coaching center", "Race institute", "Brilliant Tutorials", "Allen Coaching School")), _cnames)
+ok("coaching search drops ordinary schools and junior colleges",
+   not any(n in _cnames for n in ("Brilliant Grammar High School", "NALANDA HIGH SCHOOL", "SVP junior college")), _cnames)
+ok("addresses from the map are still kept", [r["Address"] for r in coaching_rows if r["Name"] == "Race institute"] == ["Ameerpet"])
+ok("the query asks for more than the limit when a name rule will throw some away (capped at 1500), engineering included",
+   "out center tags 150;" in _coaching_sent["q"], _coaching_sent["q"][-60:])
+ok("the tag is queried with no name regex in it", "name~" not in _coaching_sent["q"] and "[office=educational_institution]" in _coaching_sent["q"])
+places._overpass = lambda q, notify=None: [{"type": "node", "lat": 17.4, "lon": 78.4 + i / 1000, "tags": {"name": f"Coaching Hub {i}"}} for i in range(30)]
+try:
+    trimmed = places.search_places("Coaching & training centers", "Ameerpet, Hyderabad", "", 10)
+finally:
+    places._overpass = _coaching_overpass
+ok("results are trimmed back to the limit after the name rule has run", len(trimmed) == 10, len(trimmed))
+ok("a category with no name rule is still asked for exactly the limit",
+   (lambda: (setattr(places, "_overpass", _coaching_fake), places.search_places("Hospitals", "Ameerpet, Hyderabad", "", 50),
+             setattr(places, "_overpass", _coaching_overpass), "out center tags 50;" in _coaching_sent["q"])[-1])())
 
 
 print(f"\n{len(failures)} failure(s)" if failures else "\nAll tests passed")

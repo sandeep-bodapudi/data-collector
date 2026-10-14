@@ -13,6 +13,7 @@ from datetime import datetime
 from urllib.parse import urlparse
 
 from . import ai_extract, discover, extract, listings, places, search, sources
+from . import topic as topic_words
 from .excel import SECRET_KEYS
 from .fetch import WORKERS, Fetcher, domain_of
 from .search import SearchBlocked, web_search
@@ -24,6 +25,7 @@ REGIONS = {
 
 JOBS: dict[str, "Job"] = {}
 RESULT_TTL = 2 * 3600  # seconds a finished job's rows are kept for the browser to collect
+MAX_EXPANDED_QUERIES = 40  # cap on extra synonym searches added to one run, however many queries it has
 
 
 def public_spec(spec: dict) -> dict:
@@ -589,12 +591,18 @@ def _is_aggregator_page(url: str) -> bool:
     return _AGGREGATOR_PATH_RE.search(path) is not None
 
 
-def _keep_hit(h: dict, url: str, query: str, area_confirmed: bool) -> bool:
+def _keep_hit(h: dict, url: str, query: str, area_confirmed: bool, wide: bool = False) -> bool:
     """The strict keep-rule for one search hit. Trusted academic/government domains always
     pass. Dictionary-definition titles never pass (unless asked for). Everything else must
     show a topic word in its title or domain - snippets echo the query too often to trust -
     plus either a place word anywhere or a directory hit confirming the engine got the area.
-    A query with no place part only needs the topic-in-title check."""
+    A query with no place part only needs the topic-in-title check.
+
+    Topic words are compared stemmed (centres = centers, Coach = coaching, Institutes = institute) and
+    filler words ("best", "contact", "phone"...) don't count as topic or place evidence - see scraper/topic.py.
+    `wide` (set when only collecting names) also accepts the category's synonyms (training, academy, institute
+    for a coaching query): a wrong extra name there is cheap to delete, a missed company is not coming back.
+    Junk classes stay out either way: definition titles above, directory/aggregator pages in _search."""
     if _is_trusted_domain(url):
         return True
     title = h.get("title", "") or ""
@@ -603,9 +611,10 @@ def _keep_hit(h: dict, url: str, query: str, area_confirmed: bool) -> bool:
     topic, place = _topic_place_words(query)
     if not topic and not place:
         return True  # nothing distinctive to check, same as _on_topic
-    title_zone = f"{title} {domain_of(url)}".lower()
-    topic_hits = sum(1 for t in dict.fromkeys(topic) if _word_in(t, title_zone))
-    if topic_hits == 0:
+    topic = topic_words.drop_noise(topic)                      # keeps them all if that would leave nothing
+    place = topic_words.drop_noise(place, keep_if_empty=False)  # a place made only of filler is no place
+    title_zone = f"{title} {domain_of(url)}"
+    if not topic_words.topic_hit(list(dict.fromkeys(topic)), title_zone, wide=wide):
         return False
     if not place:
         return True
@@ -640,6 +649,19 @@ def _search(job: Job) -> tuple[list[dict], list[dict]]:
             if p != "web":
                 expanded_queries.append(f"{q} site:{p}")
 
+    wide = bool(spec.get("names_only"))
+    if spec.get("expand_synonyms") and "web" in platforms:
+        # Opt-in: also search the category word's usual equivalents ("training institutes" for "coaching
+        # centers"). More searches means a longer run, which is why it is a toggle and not the default.
+        base = list(expanded_queries)
+        extra: list[str] = []
+        for q in spec["queries"]:
+            extra += topic_words.expand_query(q)
+        extra = [q for q in dict.fromkeys(extra) if q not in base][:MAX_EXPANDED_QUERIES]
+        if extra:
+            expanded_queries = base + extra
+            job.say(f"Also searching {len(extra)} similar wordings (training/institute/academy style synonyms)…")
+
     results, listing_hits, seen = [], [], set()
     for q in expanded_queries:
         if job.cancelled.is_set():
@@ -666,6 +688,7 @@ def _search(job: Job) -> tuple[list[dict], list[dict]]:
             return "site:" not in q and not discover._is_official_candidate(h.get("href", ""))
         area_confirmed = not signal or any(_on_topic(h, h.get("href", ""), signal) for h in hits if _is_directory(h))
         new, off_topic, directory, dup = 0, 0, 0, 0
+        dropped_titles: list[str] = []  # names-only runs show a few, so a missed company is visible, not silent
         for h in hits:
             url = h.get("href", "")
             if not url:
@@ -685,14 +708,18 @@ def _search(job: Job) -> tuple[list[dict], list[dict]]:
                 if domain_of(url) in listings.LISTING_PARSERS:
                     listing_hits.append({"url": url})
                 continue
-            if not _keep_hit(h, url, q, area_confirmed):
+            if not _keep_hit(h, url, q, area_confirmed, wide=wide):
                 off_topic += 1
+                if wide and len(dropped_titles) < 5:
+                    dropped_titles.append(f"“{(h.get('title', '') or '').strip()[:60]}” ({domain_of(url)})")
                 continue
             results.append({"query": q, "title": h.get("title", ""), "url": url, "snippet": h.get("body", "")})
             new += 1
         skipped = [f"{n} {label}" for n, label in ((off_topic, "unrelated"), (directory, "directory/listing"), (dup, "already seen"))
                    if n]
         job.say(f"  {new} new result{'s' if new != 1 else ''}" + (f" ({', '.join(skipped)} skipped)" if skipped else ""))
+        if dropped_titles:
+            job.say("  skipped as unrelated: " + "; ".join(dropped_titles) + (" …" if off_topic > len(dropped_titles) else ""))
         if q != expanded_queries[-1]:
             time.sleep(_current_gap())  # measured-safe pacing; shorter automatically once an official search key is set
     return results, listing_hits

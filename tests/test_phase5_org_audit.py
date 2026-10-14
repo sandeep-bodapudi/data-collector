@@ -9,6 +9,7 @@ os.environ["DATABASE_URL"] = "sqlite:///" + os.path.join(TMP, "t5d.db").replace(
 os.environ["APP_USER"] = "boss5d"
 os.environ["APP_PASSWORD"] = "adminpass123"
 os.environ["SECRET_KEY"] = "test-secret-key-phase5d-only"
+os.environ.setdefault("SKIP_STARTUP_PROBES", "1")  # tests must not depend on live network probes
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import app as appmod  # noqa: E402
