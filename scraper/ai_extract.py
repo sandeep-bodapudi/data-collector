@@ -136,8 +136,27 @@ def call(provider: str, key: str, model: str, base_url: str, prompt: str, fields
     return _parse_json(text)
 
 
+def ai_available(ai: dict) -> bool:
+    """True if AI extraction can run: global kill-switch on + a key (or custom URL)."""
+    try:
+        from .config import is_enabled
+
+        if not is_enabled("ai"):
+            return False
+    except Exception:
+        pass
+    if not isinstance(ai, dict):
+        return False
+    provider = ai.get("provider", "anthropic")
+    if provider == "custom":
+        return bool((ai.get("base_url", "") or "").strip() and (ai.get("model", "") or "").strip())
+    return bool((ai.get("key", "") or "").strip())
+
+
 def extract_fields(fields: list[str], page_text: str, url: str, topic: str, ai: dict) -> dict:
     """Return {field: value}. `ai` holds the user's provider, key, model and base_url."""
+    if not ai_available(ai):
+        return {f: "" for f in fields}
     try:
         data = call(ai.get("provider", "anthropic"), ai.get("key", ""), ai.get("model", ""),
                     ai.get("base_url", ""), _prompt(fields, page_text, url, topic), fields)

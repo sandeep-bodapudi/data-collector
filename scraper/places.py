@@ -169,7 +169,13 @@ def geocode(location: str) -> dict:
     parts = [x.strip() for x in query_text.split(",") if x.strip()]
     attempts = [query_text] + ([parts[0]] if len(parts) > 1 else [])
     first_match = None
+    nominatim_ok, photon_ok = _usable("nominatim"), _usable("photon")
+    if not nominatim_ok and not photon_ok:
+        raise PlaceError("All geocoders are disabled or unhealthy. "
+                         "Enable Nominatim or Photon in Admin → Connections.")
     for q in attempts:
+        if not nominatim_ok:
+            break
         try:
             cands = _nominatim(q)
         except requests.RequestException:
@@ -183,6 +189,12 @@ def geocode(location: str) -> dict:
                 return area
         if cands and first_match is None:
             first_match = cands[0]
+    if not photon_ok:
+        if first_match is not None:
+            lat, lon = float(first_match["lat"]), float(first_match["lon"])
+            return {"kind": "around", "lat": lat, "lon": lon, "radius": POINT_RADIUS, "bbox": _bbox_from_point(lat, lon, POINT_RADIUS),
+                    "label": first_match.get("display_name", location), "approx": True, "fallback": False}
+        raise PlaceError(f"Location not found: {location}. Try the area name with the city or country, e.g. 'Bachupally, Hyderabad, India'.")
     try:
         found = _geocode_photon(query_text)
     except requests.RequestException:
@@ -415,6 +427,30 @@ def _fallback_wikidata(category: str, geo: dict, name_filter: str, limit: int) -
     return out
 
 
+def _enabled(name: str) -> bool:
+    try:
+        from .config import is_enabled
+
+        return is_enabled(name)
+    except Exception:
+        return True
+
+
+def _cache_says_unhealthy(name: str) -> bool:
+    try:
+        from .connection_health import HEALTH_CACHE, _is_cache_fresh
+
+        if _is_cache_fresh(name):
+            return not bool(HEALTH_CACHE.get(name, {}).get("healthy", True))
+    except Exception:
+        pass
+    return False
+
+
+def _usable(name: str) -> bool:
+    return _enabled(name) and not _cache_says_unhealthy(name)
+
+
 def search_places(category: str, location: str, name_filter: str = "", limit: int = 500, notify=None, info=None) -> list[dict]:
     geo = geocode(location)
     if info:
@@ -423,7 +459,12 @@ def search_places(category: str, location: str, name_filter: str = "", limit: in
     name_part = f'[name~"{name_filter.replace(chr(34), "")}",i]' if name_filter else "[name]"
     stmts = "".join(f"nwr{f}{name_part}{area};" for f in CATEGORIES[category])
     query = f"[out:json][timeout:{SERVER_TIMEOUT}];{prefix}({stmts});out center tags {int(limit)};"
+    overpass_allowed = _enabled("overpass")
+    if not overpass_allowed and info:
+        info("  skipped Overpass (disabled in Admin → Connections); trying other free map sources…")
     try:
+        if not overpass_allowed:
+            raise PlaceError("Overpass disabled in Admin → Connections.")
         elements = _overpass(query, notify)
     except PlaceError as e:
         if info:
@@ -432,11 +473,17 @@ def search_places(category: str, location: str, name_filter: str = "", limit: in
         # Three independent services, tried in the order they're worth trusting: Photon can filter by the real
         # OSM category tag server-side (not just text), Nominatim can't but still searches real OSM data,
         # Wikidata is a different database entirely (last, since it only has famous places at all).
-        for fallback, label, caveat in (
-            (_fallback_photon, "Photon", "a separate OpenStreetMap search service - a real category match, not just a text search"),
-            (_fallback_nominatim, "Nominatim", "a plain text search, not an exact category match - please check these before relying on them"),
-            (_fallback_wikidata, "Wikidata", "a smaller, separate database - complete for famous places, not for most ordinary ones"),
+        # Admin can disable any of these; disabled ones are skipped with a note.
+        for fallback, label, caveat, svc in (
+            (_fallback_photon, "Photon", "a separate OpenStreetMap search service - a real category match, not just a text search", "photon"),
+            (_fallback_nominatim, "Nominatim", "a plain text search, not an exact category match - please check these before relying on them", "nominatim"),
+            (_fallback_wikidata, "Wikidata", "a smaller, separate database - complete for famous places, not for most ordinary ones", "wikidata"),
         ):
+            if not _usable(svc):
+                if info:
+                    reason = "disabled" if not _enabled(svc) else "last check failed"
+                    info(f"  skipped {label} ({reason} — see Admin → Connections)")
+                continue
             try:
                 elements = fallback(category, geo, name_filter, limit)
             except requests.RequestException:

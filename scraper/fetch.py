@@ -63,6 +63,17 @@ class Fetcher:
         self.spec = spec or {}
         self.session = requests.Session()
         self.session.headers.update(_SESSION_HEADERS)
+        # Phase 5E: managed proxy for page fetching (env URL, admin enable + cap).
+        try:
+            from .proxy import account as _proxy_account
+            from .proxy import proxy_for as _proxy_for
+
+            self._proxy = _proxy_for("fetch") or ""
+            self._proxy_account = _proxy_account
+        except Exception:
+            self._proxy, self._proxy_account = "", lambda n: None
+        if self._proxy:
+            self.session.proxies.update({"http": self._proxy, "https": self._proxy})
         
         # Logged-in social scraping: only when an admin enabled restricted connectors.
         self.restricted = bool(self.spec.get("allow_restricted"))
@@ -134,6 +145,10 @@ class Fetcher:
                 if "html" not in ctype and "xml" not in ctype:
                     return None, f"not a web page ({ctype.split(';')[0] or 'unknown'})"
                 content = r.raw.read(MAX_BYTES, decode_content=True)
+                try:
+                    self._proxy_account(len(content or b""))
+                except Exception:
+                    pass
                 declared = [r.encoding] if "charset" in ctype.lower() and r.encoding else []
                 text = UnicodeDammit(content, declared, is_html=True).unicode_markup or content.decode("utf-8", errors="replace")
                 if "<" not in text[:5000] or text[:5000].count("\ufffd") > 25:  # compressed or binary data, not a web page

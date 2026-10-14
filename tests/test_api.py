@@ -9,6 +9,7 @@ import time
 
 TMP = tempfile.mkdtemp()
 os.environ["DATABASE_URL"] = "sqlite:///" + os.path.join(TMP, "t.db").replace("\\", "/")
+os.environ["JOB_STORE_DIR"] = os.path.join(TMP, "jobs")  # durable-job payloads stay in the throwaway dir
 os.environ["APP_USER"] = "boss"
 os.environ["APP_PASSWORD"] = "adminpass123"
 os.environ["SECRET_KEY"] = "test-secret-key-for-unit-tests-only"

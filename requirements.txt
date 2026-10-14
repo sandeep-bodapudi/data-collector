@@ -12,3 +12,6 @@ ddgs>=9.0
 anthropic>=1.0
 openai>=1.0
 gunicorn>=22.0; platform_system != "Windows"
+# Phase 5A worker hosts only (web + tests never import these):
+# rq>=1.0
+# redis>=5.0

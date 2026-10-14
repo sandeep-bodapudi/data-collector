@@ -54,6 +54,8 @@ class Job:
         self.activity = "Getting ready…"
         self.cancelled = threading.Event()
         self.problems: list[str] = []  # service errors; shown when a run ends with no rows
+        self.effective: dict = {}  # preflight result: what will actually be used
+        self.remote = False  # True when a queue worker (not this process) runs the job
 
     def say(self, msg: str):
         self.log.append(f"{datetime.now():%H:%M:%S}  {msg}")
@@ -78,7 +80,7 @@ class Job:
             "elapsed": int((end - self.started).total_seconds()), **self.stats(),
             "count": len(self.rows), "columns": self.columns,
             "preview": [{c: _short(r.get(c)) for c in self.columns} for r in self.rows[-preview_rows:]],
-            "log": self.log[-60:], "error": self.error,
+            "log": self.log[-60:], "error": self.error, "effective": self.effective,
         }
 
     def result(self) -> dict:
@@ -97,14 +99,233 @@ def purge_jobs():
     for jid, j in list(JOBS.items()):
         if j.finished and (now - j.finished).total_seconds() > RESULT_TTL:
             JOBS.pop(jid, None)
+    try:
+        from . import job_store
+
+        job_store.clean(RESULT_TTL)
+    except Exception:
+        pass
+
+
+def _persist_job(job: "Job", status: str, finished: bool = True) -> None:
+    """Save a job snapshot to disk (public spec only, never secrets).
+
+    finished=False writes a running snapshot with no finish time, so the TTL purge
+    (which falls back to file age) can never delete a still-running job's snapshot.
+    """
+    try:
+        from . import job_store
+
+        end = job.finished or datetime.now()
+        try:
+            stats = job.stats()
+        except Exception:
+            stats = {"with_email": 0, "with_phone": 0}
+        job_store.persist(job.id, {
+            "owner_id": job.owner_id,
+            "mode": job.spec.get("mode", "web"),
+            "spec_public": public_spec(job.spec),
+            "effective": job.effective if isinstance(job.effective, dict) else {},
+            "columns": job.columns,
+            "rows": [{c: _text(r.get(c)) for c in job.columns} for r in job.rows],
+            "status": status,
+            "error": job.error,
+            "log_tail": job.log[-60:],
+            "phase": job.phase,
+            "activity": job.activity,
+            "total": job.total,
+            "done": job.done,
+            "elapsed": int((end - job.started).total_seconds()) if finished else 0,
+            "with_email": stats.get("with_email", 0),
+            "with_phone": stats.get("with_phone", 0),
+            "finished_at": time.time() if finished else 0,
+        })
+    except Exception:
+        pass
+
+
+class StoredJob:
+    """A finished job rehydrated from disk. Read-only: collect, then delete."""
+
+    def __init__(self, job_id: str, payload: dict):
+        import threading as _th
+
+        self.id = job_id
+        self.owner_id = payload.get("owner_id")
+        self.status = payload.get("status", "done")
+        self.mode = payload.get("mode", "web")
+        self.columns = payload.get("columns", [])
+        self._rows = payload.get("rows", [])
+        self.error = payload.get("error")
+        self.log = payload.get("log_tail", [])
+        self.effective = payload.get("effective", {})
+        self.elapsed = payload.get("elapsed", 0)
+        self.with_email = payload.get("with_email", 0)
+        self.with_phone = payload.get("with_phone", 0)
+        self.total = payload.get("total", len(self._rows))
+        self.done = payload.get("done", len(self._rows))
+        try:
+            self.total, self.done = int(self.total), int(self.done)
+        except (TypeError, ValueError):
+            self.total = self.done = len(self._rows)
+        self.phase = payload.get("phase") or ("done" if self.status != "running" else "search")
+        self.activity = payload.get("activity") or (
+            {"done": "All done!",
+             "cancelled": "Stopped. The rows collected so far are kept.",
+             "error": "Something went wrong."}.get(self.status, "All done!")
+            if self.status != "running" else "Still going…")
+        self.cancelled = _th.Event()
+
+    def to_dict(self, preview_rows=25):
+        preview = [{c: _short(r.get(c)) for c in self.columns} for r in self._rows[-preview_rows:]]
+        return {"id": self.id, "status": self.status, "total": self.total, "done": self.done,
+                "phase": self.phase, "activity": self.activity,
+                "mode": self.mode,
+                "elapsed": self.elapsed, "with_email": self.with_email, "with_phone": self.with_phone,
+                "count": len(self._rows), "columns": self.columns,
+                "preview": preview, "log": self.log[-60:], "error": self.error,
+                "effective": self.effective, "stored": True}
+
+    def result(self) -> dict:
+        return {"columns": self.columns,
+                "rows": [{c: _text(r.get(c)) for c in self.columns} for r in self._rows]}
+
+
+def load_stored_job(job_id: str, allow_running: bool = False):
+    """Return a StoredJob from the store, or None. No secrets ever leave the payload."""
+    try:
+        from . import job_store
+
+        payload = job_store.retrieve(job_id)
+    except Exception:
+        return None
+    if not isinstance(payload, dict):
+        return None
+    if payload.get("status") in ("queued", "running") and not allow_running:
+        return None
+    try:
+        return StoredJob(job_id, payload)
+    except Exception:
+        return None
+
+
+def rehydrate_jobs() -> dict:
+    """Boot recovery: running markers become error records; expired payloads purged."""
+    converted, kept, now = 0, 0, time.time()
+    try:
+        from . import job_store
+
+        for jid in job_store.all_ids():
+            payload = job_store.retrieve(jid)
+            if not isinstance(payload, dict):
+                continue
+            if payload.get("status") in ("queued", "running"):
+                payload["status"] = "error"
+                payload["error"] = ("Server restarted while this run was going. "
+                                    "Start again — nothing was collected.")
+                payload["finished_at"] = now
+                job_store.persist(jid, payload)
+                converted += 1
+            else:
+                kept += 1
+        purged = job_store.clean(RESULT_TTL)
+    except Exception:
+        return {"converted": 0, "kept": 0, "purged": 0}
+    return {"converted": converted, "kept": kept, "purged": purged}
+
+
+def _watch_remote(job: Job, interval: float = 2.0, snapshot_every: float = 15.0) -> None:
+    """Worker-side loop: honour the disk cancel flag and persist running snapshots
+    so the web process (which only sees disk) can report progress. Exits on finish."""
+    import time as _t
+
+    try:
+        from . import job_store
+
+        job_store.clear_cancel(job.id)
+    except Exception:
+        pass
+    elapsed = 0.0
+    while not job.finished:
+        _t.sleep(interval)
+        elapsed += interval
+        try:
+            from . import job_store
+
+            if job_store.cancel_requested(job.id):
+                job.cancelled.set()
+        except Exception:
+            pass
+        if elapsed >= snapshot_every and not job.finished:
+            elapsed = 0.0
+            _persist_job(job, "running", finished=False)
+    try:
+        from . import job_store
+
+        job_store.cancel_clear(job.id)
+    except Exception:
+        pass
+
+
+def run_queued_job(job_id: str, spec: dict, user_id: int) -> str:
+    """RQ worker entrypoint. Must stay importable as 'scraper.jobs.run_queued_job'.
+    Rebuilds the job with its original id, runs it, persists progress + result."""
+    job = Job(spec, user_id)
+    job.id = job_id
+    job.remote = True
+    JOBS[job_id] = job
+    watcher = threading.Thread(target=_watch_remote, args=(job,), daemon=True)
+    watcher.start()
+    try:
+        _run_with_context(job)
+    finally:
+        watcher.join(timeout=30)
+    return job.status
 
 
 def start_job(spec: dict, user_id: int) -> Job:
     purge_jobs()
     job = Job(spec, user_id)
+    job.remote = False
     JOBS[job.id] = job
-    threading.Thread(target=_run, args=(job,), daemon=True).start()
+    try:
+        from . import job_store
+
+        # Crash marker: finished_at stays 0 while running, so the TTL purge (which
+        # falls back to file age) can never delete a still-running job's marker.
+        job_store.persist(job.id, {"owner_id": user_id, "mode": spec.get("mode", "web"),
+                                "spec_public": public_spec(spec), "effective": {},
+                                "columns": [], "rows": [], "status": "running",
+                                "error": None, "log_tail": [], "finished_at": 0,
+                                "started_at": time.time()})
+    except Exception:
+        pass
+    try:
+        from . import queue as _queue
+
+        if _queue.worker_mode() == "rq":
+            if _queue.enqueue_job(job.id, spec, user_id) is not None:
+                job.remote = True
+                return job
+    except Exception:
+        pass
+    threading.Thread(target=_run_with_context, args=(job,), daemon=True).start()
     return job
+
+
+def _run_with_context(job: Job) -> None:
+    """Run a job with a Flask app context so DB-backed helpers (toggles, budgets,
+    spend tracking) work in the worker thread. Falls back to context-free run rather
+    than killing the job if context setup itself fails."""
+    try:
+        import app as appmod  # deferred: app imports this module at load time
+
+        with appmod.app.app_context():
+            _run(job)
+            return
+    except Exception:
+        pass
+    _run(job)
 
 
 def _keyed(job: Job, fn):
@@ -117,14 +338,125 @@ def _keyed(job: Job, fn):
     return run
 
 
+def preflight(spec: dict) -> dict:
+    """Compute effective services for this job. Pure + fast. O(n) services.
+
+    Returns {"search": [...], "places": [...], "ai_ok": bool, "notes": [...]dio}.
+    Respects admin conn_* flags and cache health (fresh-unhealthy skipped).
+    """
+    from .config import FREE_PLACES_ORDER, FREE_SEARCH_ORDER, is_enabled
+
+    def _unhealthy(name: str) -> bool:
+        try:
+            from .connection_health import HEALTH_CACHE, _is_cache_fresh
+
+            if _is_cache_fresh(name):
+                return not bool(HEALTH_CACHE.get(name, {}).get("healthy", True))
+        except Exception:
+            pass
+        return False
+
+    notes: list[str] = []
+    search_eff: list[str] = []
+    for name in FREE_SEARCH_ORDER:
+        if not is_enabled(name):
+            notes.append(f"skipped {name} (disabled)")
+            continue
+        if _unhealthy(name):
+            notes.append(f"skipped {name} (last check failed)")
+            continue
+        if name == "brave" and not (spec.get("brave_key") or search.brave_key_set()):
+            notes.append("skipped brave (no key)")
+            continue
+        if name == "google_cse" and not (os.environ.get("GOOGLE_CSE_KEY") and os.environ.get("GOOGLE_CSE_CX")):
+            notes.append("skipped google_cse (no key)")
+            continue
+        search_eff.append(name)
+    places_eff: list[str] = []
+    for name in FREE_PLACES_ORDER:
+        if not is_enabled(name):
+            notes.append(f"skipped {name} (disabled)")
+            continue
+        if _unhealthy(name):
+            notes.append(f"skipped {name} (last check failed)")
+            continue
+        places_eff.append(name)
+    ai_ok = True
+    if spec.get("custom_fields"):
+        try:
+            from .ai_extract import ai_available
+
+            ai_ok = ai_available(spec.get("ai", {}))
+        except Exception:
+            ai_ok = bool(spec.get("ai", {}).get("key"))
+        if not ai_ok:
+            notes.append("AI off (no key or disabled); continuing without custom fields")
+    social_providers: list[str] = []
+    estimate_usd, estimate_inr = 0.0, 0.0
+    if spec.get("mode") == "social":
+        from .config import SOCIAL_PROVIDER_ORDER
+
+        if not is_enabled("social"):
+            notes.append("skipped social (master disabled in Admin → Connections)")
+        else:
+            for name in SOCIAL_PROVIDER_ORDER:
+                if not is_enabled(name):
+                    notes.append(f"skipped {name} (disabled)")
+                    continue
+                if _unhealthy(name):
+                    notes.append(f"skipped {name} (last check failed)")
+                    continue
+                if name == "brightdata" and not (spec.get("brightdata_key") or ""):
+                    notes.append("skipped brightdata (no key)")
+                    continue
+                if name == "apify" and not (spec.get("apify_key") or ""):
+                    notes.append("skipped apify (no key)")
+                    continue
+                social_providers.append(name)
+        try:
+            from .social_base import estimate_cost
+
+            n_items = len(spec.get("items", [])) or 0
+            estimate_usd, estimate_inr = estimate_cost(n_items, social_providers) if social_providers else (0.0, 0.0)
+        except Exception:
+            pass
+        if social_providers and not spec.get("free_only"):
+            lim_usd, lim_inr = _social_limits()
+            if lim_usd <= 0 and lim_inr <= 0:
+                notes.append("no monthly social budget is set; paid enrichment stays off until an admin sets one")
+    return {"search": search_eff, "places": places_eff, "ai_ok": ai_ok, "notes": notes,
+            "social": social_providers, "estimate_usd": estimate_usd, "estimate_inr": estimate_inr}
+
+
 def _run(job: Job):
     job.status = "running"
     try:
+        eff = preflight(job.spec)
+        job.effective = eff
+        for n in eff.get("notes", []):
+            job.say(f"  {n}")
+        mode = job.spec.get("mode", "web")
+        if mode == "web" and not eff.get("search"):
+            raise SearchBlocked("All search options are disabled or unavailable. "
+                                "Enable Brave, Google CSE or free engines in Admin → Connections.")
+        if mode == "places" and not eff.get("places"):
+            from .places import PlaceError
+
+            raise PlaceError("All map services are disabled. Enable Overpass, Photon, "
+                             "Nominatim or Wikidata in Admin → Connections.")
+        if mode == "enrich" and not eff.get("search"):
+            job.say("  continuing with guess-only website lookup (web search disabled or unavailable); "
+                    "website discovery may find fewer sites")
+        if mode == "social" and not eff.get("social"):
+            job.say("  social providers unavailable (disabled, no key, or last check failed); "
+                    "running free lookup only")
         with search.search_keys(job.spec.get("brave_key", "")):
             if job.spec["mode"] == "places":
                 _run_places(job)
             elif job.spec["mode"] == "enrich":
                 _run_enrich(job)
+            elif job.spec["mode"] == "social":
+                _run_social(job)
             else:
                 _run_web(job)
         final = "cancelled" if job.cancelled.is_set() else "done"
@@ -138,6 +470,22 @@ def _run(job: Job):
     job.activity = {"done": "All done!", "cancelled": "Stopped. The rows collected so far are kept.",
                     "error": "Something went wrong."}[final]
     job.status = final
+    if final in ("done", "cancelled", "error"):
+        _persist_job(job, final)  # every terminal state lands on disk; empty ones too, so a
+        # restart never turns a finished run into a mysterious 404
+    try:
+        from models import log_audit
+
+        log_audit(job.owner_id, "job.finished",
+                  f"{job.spec.get('mode', 'web')} run {job.id}: {final} ({len(job.rows)} rows)")
+    except Exception:
+        pass
+    try:
+        from . import job_store
+
+        job_store.cancel_clear(job.id)  # a finished job must never look stoppable later
+    except Exception:
+        pass
 
 
 # ---------------------------------------------------------------- web search mode
@@ -616,10 +964,40 @@ THROTTLE_WAIT = float(os.environ.get("DISCOVER_RETRY_WAIT", "25.0"))  # pause be
 KEYED_GAP = float(os.environ.get("DISCOVER_KEYED_GAP_SECONDS", "1.1"))
 
 
+PACING_PRESETS = {"conservative": (8.0, 2.0), "standard": None, "fast": (2.0, 0.6)}
+
+
+def _gaps() -> tuple[float, float]:
+    """(search_gap, keyed_gap). Admin preset wins when set to conservative/fast;
+    standard (default) keeps the env-derived constants, so untouched deployments
+    behave exactly as before."""
+    try:
+        from models import AppSetting
+
+        preset = (AppSetting.get("pacing_preset", "standard") or "standard").lower()
+    except Exception:
+        preset = "standard"
+    pair = PACING_PRESETS.get(preset)
+    if pair is None:
+        return SEARCH_GAP, KEYED_GAP
+    return pair
+
+
 def _current_gap() -> float:
+    # Dynamic: short gap when an official keyed path is usable, long gap for free engines.
+    search_gap, keyed_gap = _gaps()
+    try:
+        from .config import is_enabled
+
+        brave_ok = is_enabled("brave") and (search.brave_key_set())
+        cse_ok = is_enabled("google_cse") and (os.environ.get("GOOGLE_CSE_KEY") and os.environ.get("GOOGLE_CSE_CX"))
+        if brave_ok or cse_ok:
+            return min(search_gap, keyed_gap)  # never slower than the no-key pacing, only ever faster
+    except Exception:
+        pass
     if search.brave_key_set() or (os.environ.get("GOOGLE_CSE_KEY") and os.environ.get("GOOGLE_CSE_CX")):
-        return min(SEARCH_GAP, KEYED_GAP)  # never slower than the no-key pacing, only ever faster
-    return SEARCH_GAP
+        return min(search_gap, keyed_gap)  # never slower than the no-key pacing, only ever faster
+    return search_gap
 
 
 def _guess_websites(job: Job, fetcher: Fetcher, rows: list[dict]):
@@ -701,9 +1079,10 @@ def _discover_websites(job: Job, rows: list[dict]):
     if search.brave_key_set():
         return _discover_parallel(job, batch)
     gap = _current_gap()
+    base_gap, _ = _gaps()
     job.phase, job.total, job.done = "visit", len(batch), 0
     job.say(f"Looking for the websites of {len(batch)} places that the map doesn't give one for "
-            f"(about {gap:g} seconds each{', using your search key' if gap < SEARCH_GAP else ', to keep the search engines happy'})…")
+            f"(about {gap:g} seconds each{', using your search key' if gap < base_gap else ', to keep the search engines happy'})…")
     seen: dict[str, str | None] = {}  # the same name (several branches) is searched once
     for r in batch:
         if job.cancelled.is_set():
@@ -716,7 +1095,7 @@ def _discover_websites(job: Job, rows: list[dict]):
                 # Zero results is only treated as throttling (worth a wait-and-retry) on the free, unpaced-by-quota
                 # path. With an official key, a quota problem already surfaced as an error inside web_search() and
                 # fell through to the free engines, so zero hits here just means this place genuinely had none.
-                if n_hits == 0 and gap >= SEARCH_GAP:
+                if n_hits == 0 and gap >= base_gap:
                     job.activity = "The search engines are limiting requests, waiting a moment…"
                     job.say(f"  no search results for {r['Name']}; waiting {THROTTLE_WAIT:g} s and trying once more")
                     time.sleep(THROTTLE_WAIT)
@@ -814,3 +1193,224 @@ def _run_places(job: Job):
                 job.say(f"  website failed: {e}")
                 job.rows.append(futures[fut])
     job.rows.sort(key=lambda r: not (r.get("Email") or r.get("Phone")))  # places with contact details first
+
+
+# ---------------------------------------------------------------- social mode (Phase 3, controlled spend)
+
+def _budget_pct(spent_usd: float, spent_inr: float, limit_usd: float, limit_inr: float) -> float:
+    """Highest consumed fraction across both currencies. 0 when no budget set."""
+    pct = 0.0
+    if limit_usd > 0:
+        pct = max(pct, spent_usd / limit_usd)
+    if limit_inr > 0:
+        pct = max(pct, spent_inr / limit_inr)
+    return pct
+
+
+def _budget_over(spent_usd: float, spent_inr: float, limit_usd: float, limit_inr: float) -> bool:
+    return (limit_usd > 0 and spent_usd >= limit_usd) or (limit_inr > 0 and spent_inr >= limit_inr)
+
+
+def _added_data(before: dict, after: dict) -> bool:
+    """True if the merge filled at least one previously blank data column."""
+    for k in ("Name", "Headline", "Current Company", "Location", "About",
+              "Experience summary", "Website"):
+        if not (before.get(k) or "").strip() and (after.get(k) or "").strip():
+            return True
+    return False
+
+
+def _social_limits() -> tuple[float, float]:
+    """Return (limit_usd, limit_inr) for social. (0,0) means no budget set: paid calls stay blocked."""
+    try:
+        from models import AppSetting
+
+        inr = float(AppSetting.get("social_budget_inr", "0") or 0)
+        usd = float(AppSetting.get("social_budget_usd", "0") or 0)
+        if inr <= 0 and usd <= 0:
+            return (0.0, 0.0)  # 0 = no budget set: paid enrichment stays off until an admin sets one
+        from .config import USD_TO_INR
+
+        if inr <= 0:
+            inr = round(usd * USD_TO_INR, 2)
+        if usd <= 0:
+            usd = round(inr / USD_TO_INR, 4)
+        return (usd, inr)
+    except Exception:
+        return (0.0, 0.0)
+
+
+def _social_spend(owner_id: int | None) -> tuple[float, float]:
+    """Return (spent_usd, spent_inr), resetting on month rollover. (0,0) when DB unavailable."""
+    try:
+        from models import MonthlyBudget, db
+
+        row = MonthlyBudget.query.filter_by(user_id=owner_id, service="social").first()
+        if not row:
+            return (0.0, 0.0)
+        start = row.month_start
+        now = datetime.now()
+        if start and (start.year, start.month) != (now.year, now.month):
+            row.spent_inr, row.spent_usd, row.month_start = 0, 0.0, now
+            db.session.commit()
+            return (0.0, 0.0)
+        return (float(row.spent_usd or 0.0), int(row.spent_inr or 0))
+    except Exception:
+        return (0.0, 0.0)
+
+
+def _add_social_spend(owner_id: int | None, usd: float, inr: float) -> None:
+    try:
+        from models import MonthlyBudget, db
+
+        row = MonthlyBudget.query.filter_by(user_id=owner_id, service="social").first()
+        if not row:
+            row = MonthlyBudget(user_id=owner_id, service="social")
+            db.session.add(row)
+        row.spent_usd = float(row.spent_usd or 0.0) + float(usd)
+        row.spent_inr = int(row.spent_inr or 0) + int(round(inr))
+        db.session.commit()
+        if usd or inr:
+            from models import log_audit
+
+            log_audit(owner_id, "social.spend", f"+${float(usd):.4f} / ₹{float(inr):.2f}")
+    except Exception:
+        try:
+            from models import db as _db
+
+            _db.session.rollback()
+        except Exception:
+            pass
+
+
+def _free_social_lookup(item: dict, say) -> dict:
+    """Best-effort ₹0 lookup: public search snippet only, never login-walled fetch."""
+    from .social_base import blank_record
+
+    url, name, platform = item.get("url", ""), item.get("name", ""), item.get("platform", "")
+    rec = blank_record(name=name, url=url, platform=platform)
+    query = url if url else f"{name} site:{platform or 'linkedin.com/in'}"
+    try:
+        hits = web_search(query, "wt-wt", 3, lambda m: None)
+    except Exception:
+        return rec
+    if not hits:
+        return rec
+    top = hits[0]
+    rec["Name"] = rec["Name"] or top.get("title", "")[:150]
+    rec["About"] = (top.get("body", "") or "")[:2000]
+    rec["Profile URL"] = rec["Profile URL"] or top.get("href", "")
+    return rec
+
+
+def _run_social(job: Job, free_lookup=None, bd_fill=None, ap_fill=None, spend_tracker=None):
+    """Enrich social profiles. Hybrid ON: paid only for free misses, within budget."""
+    from .config import MAX_SOCIAL_PER_RUN, SOCIAL_UNIT_USD
+    from .social_base import SOCIAL_COLUMNS, is_filled_enough, merge_records, normalize_url
+
+    spec = job.spec
+    job.columns = list(SOCIAL_COLUMNS)
+    items = (spec.get("items") or [])[:MAX_SOCIAL_PER_RUN]
+    if len(spec.get("items") or []) > len(items):
+        job.say(f"  capped at the first {len(items)} profiles this run (monthly guardrail)")
+    providers = (job.effective.get("social") if isinstance(job.effective, dict) else None) or []
+    hybrid = spec.get("hybrid", True)
+    limit_usd, limit_inr = _social_limits()
+    if spend_tracker is not None:
+        spent_usd, spent_inr = spend_tracker.get("spent", (0.0, 0))
+        tracker_limits = spend_tracker.get("limits")
+        if tracker_limits is not None:
+            limit_usd, limit_inr = tracker_limits
+    else:
+        spent_usd, spent_inr = _social_spend(job.owner_id)
+    budget_set = limit_usd > 0 or limit_inr > 0
+    if not budget_set and providers and spend_tracker is None:
+        job.say("  no monthly social budget is set; paid enrichment stays off until an admin sets one "
+                "(free lookup only)")
+        providers = []
+    if budget_set:
+        pct = _budget_pct(spent_usd, spent_inr, limit_usd, limit_inr)
+        job.say(f"  social budget: ${spent_usd:.2f} / ${limit_usd:.2f} spent "
+                f"(₹{spent_inr} / ₹{limit_inr}, {pct * 100:.0f}% used)")
+        if pct >= 0.8 and not _budget_over(spent_usd, spent_inr, limit_usd, limit_inr):
+            job.say("  monthly social budget is over 80% used; remaining paid fills are limited")
+    free_fn = free_lookup or (lambda it: _free_social_lookup(it, job.say))
+    job.total, job.done = len(items), 0
+    job.phase, job.activity = "visit", f"Enriching {len(items)} profiles (public fields only)…"
+    seen: set[str] = set()
+    paid_fills, free_fills, warned_80 = 0, 0, False
+    for it in items:
+        if job.cancelled.is_set():
+            job.say("Stopped by user.")
+            break
+        url = normalize_url(it.get("url", ""))
+        key = url or (it.get("name", "").strip().lower() + "|" + it.get("platform", ""))
+        if key in seen:
+            job.done += 1
+            continue
+        seen.add(key)
+        rec = free_fn({**it, "url": url})
+        rec["Profile URL"] = rec.get("Profile URL") or url
+        if hybrid and is_filled_enough(rec):
+            job.say(f"  {rec.get('Name') or url}: free lookup sufficient, no paid call")
+            free_fills += 1
+        elif providers:
+            if not (url or rec.get("Profile URL", "")):
+                job.say(f"  {rec.get('Name') or 'profile'}: no profile link to enrich; paid lookup skipped")
+                free_fills += 1
+            elif _budget_over(spent_usd, spent_inr, limit_usd, limit_inr):
+                job.say("  monthly social budget reached; remaining profiles use free lookup only")
+                providers = []
+                free_fills += 1
+            else:
+                row_paid = False
+                for p in list(providers):
+                    try:
+                        if p == "brightdata":
+                            fill = (bd_fill or __import__("scraper.social_brightdata",
+                                                          fromlist=["fill_profile"]).fill_profile)
+                            got = fill(url or rec.get("Profile URL", ""), spec.get("brightdata_key", ""))
+                        elif p == "apify":
+                            fill = (ap_fill or __import__("scraper.social_apify",
+                                                          fromlist=["fill_profile"]).fill_profile)
+                            got = fill(url or rec.get("Profile URL", ""), spec.get("apify_key", ""),
+                                       spec.get("apify_actor", ""))
+                        else:
+                            continue
+                    except Exception as e:
+                        job.say(f"  {p} failed for {url or rec.get('Name')}: {type(e).__name__}")
+                        continue
+                    before = dict(rec)
+                    rec = merge_records(rec, got)
+                    if _added_data(before, rec):
+                        row_paid = True
+                        paid_fills += 1
+                        unit_usd = SOCIAL_UNIT_USD.get(p, 0.0)
+                        from .config import USD_TO_INR
+
+                        unit_inr = round(unit_usd * USD_TO_INR, 2)
+                        if spend_tracker is not None:
+                            s_usd, s_inr = spend_tracker.get("spent", (0.0, 0))
+                            spend_tracker["spent"] = (s_usd + unit_usd, s_inr + unit_inr)
+                            spent_usd, spent_inr = spend_tracker["spent"]
+                        else:
+                            _add_social_spend(job.owner_id, unit_usd, unit_inr)
+                            spent_usd, spent_inr = _social_spend(job.owner_id)
+                        job.say(f"  {rec.get('Name') or url}: filled via {p} "
+                                f"(+${unit_usd:.4f} / ₹{unit_inr:.2f})")
+                        if budget_set and not warned_80 and _budget_pct(spent_usd, spent_inr, limit_usd, limit_inr) >= 0.8:
+                            warned_80 = True
+                            job.say("  monthly social budget is now over 80% used")
+                    else:
+                        job.say(f"  {p} returned no new data for {url or rec.get('Name')}; not counted as spend")
+                    if is_filled_enough(rec):
+                        break
+                if not row_paid:
+                    free_fills += 1
+        else:
+            free_fills += 1
+        row = {c: _text(rec.get(c)) for c in SOCIAL_COLUMNS}
+        job.rows.append(row)
+        job.done += 1
+    job.say(f"Filled {len(job.rows)} profiles ({free_fills} free, {paid_fills} paid fills). "
+            f"Public fields only; coverage varies, no guaranteed contacts.")

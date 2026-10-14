@@ -407,7 +407,7 @@ async function refreshNavCounts() {
 
 const ROUTES = [
   [/^#\/home$/, () => viewHome()],
-  [/^#\/new\/(web|places)$/, (m) => viewNewRun(m[1])],
+  [/^#\/new\/(web|places|social)$/, (m) => viewNewRun(m[1])],
   [/^#\/runs$/, () => viewRuns()],
   [/^#\/runs\/([\w-]+)$/, (m) => viewRunDetail(m[1])],
   [/^#\/sheets$/, () => viewSheets()],
@@ -491,7 +491,7 @@ async function viewHome() {
   ].map(([ic, label, val, sub]) => `<div class="card kpi"><small><span class="kpi-ico">${icon(ic)}</span>${label}</small><b>${val}</b><div class="sub">${sub}</div></div>`).join("");
   let aiReady = true;
   if (!IS_VIEWER) {
-    try { aiReady = !!(await api("/api/settings")).ai_key_mask; } catch { /* offline: skip the hint */ }
+    try { const st = await api("/api/settings"); aiReady = !!st.ai_key_mask || (st.org_keys || []).includes("ai_api_key"); } catch { /* offline: skip the hint */ }
     if (stale(tk)) return;
   }
   if (!aiReady && !IS_VIEWER) {
@@ -555,7 +555,8 @@ async function viewNewRun(mode) {
   let settings = { ai_key_mask: "", ai_provider: "anthropic" };
   try { settings = await api("/api/settings"); } catch {}
   if (stale(tk)) return;
-  const aiReady = !!settings.ai_key_mask || (settings.ai_provider === "custom" && settings.ai_base_url);
+  const aiReady = !!settings.ai_key_mask || (settings.org_keys || []).includes("ai_api_key") || (settings.ai_provider === "custom" && settings.ai_base_url);
+  const hasBrave = !!settings.brave_key_mask || (settings.org_keys || []).includes("brave_api_key");
   const providerLabel = (CFG.providers[settings.ai_provider] || {}).label || "your AI provider";
 
   const aiBlock = (id, suggest) => `
@@ -571,7 +572,7 @@ async function viewNewRun(mode) {
     <div class="form-section">
       <div class="section-title"><div class="step-num">1</div><div><h3>What should we search for?</h3><p>Write it like a Google search. Add as many as you like.</p></div></div>
       <div class="section-body">
-        ${settings.brave_key_mask ? "" : `<div class="callout info">${icon("info")}<div class="grow"><b>Searching for the right website for each name will be slower without a search key.</b> Fetching the pages themselves is unaffected - this is specifically about finding which site to fetch, which without a key falls back to free search engines that cloud servers often get refused by. <a href="#/settings">Add a free Brave key in Settings</a> - it's optional, the run still works without it, just slower.</div></div>`}
+        ${hasBrave ? "" : `<div class="callout info">${icon("info")}<div class="grow"><b>Searching for the right website for each name will be slower without a search key.</b> Fetching the pages themselves is unaffected - this is specifically about finding which site to fetch, which without a key falls back to free search engines that cloud servers often get refused by. <a href="#/settings">Add a free Brave key in Settings</a> - it's optional, the run still works without it, just slower.</div></div>`}
         <div class="tags" id="queries"></div>
         <div class="hint">Press <kbd>Enter</kbd> after each search. Paste a list to add many at once.</div>
         <div class="chips"><small>Try</small>
@@ -658,35 +659,65 @@ async function viewNewRun(mode) {
         </div>
         <label class="switch"><input type="checkbox" id="enrich" checked><span class="sw"></span><span><b>Find emails &amp; phone numbers</b><small>Reads each place's website for contact details. The map itself rarely has them, so leave this on if you need contacts. Slower.</small></span></label>
         <label class="switch mt-8" id="find-sites-row"><input type="checkbox" id="find_sites" checked><span class="sw"></span><span><b>Look up websites the map doesn't list</b><small>Searches the web for each place's own site first (about 2 seconds per place, up to 80 per run). Without this, only places with a website on the map get contacts.</small></span></label>
-        ${settings.brave_key_mask ? "" : `<div class="callout info mt-8" id="places-brave-nudge" hidden>${icon("info")}<div class="grow">Without a search key, this website lookup falls back to free search engines, which cloud servers often get refused by, and paces itself much more slowly. <a href="#/settings">Add a free Brave key in Settings</a> to speed it up - optional, this still works without it.</div></div>`}
+        ${hasBrave ? "" : `<div class="callout info mt-8" id="places-brave-nudge" hidden>${icon("info")}<div class="grow">Without a search key, this website lookup falls back to free search engines, which cloud servers often get refused by, and paces itself much more slowly. <a href="#/settings">Add a free Brave key in Settings</a> to speed it up - optional, this still works without it.</div></div>`}
         ${aiBlock("custom-places", true)}
         <div class="callout info mt-16">${icon("info")}<div>Places come from OpenStreetMap, a free public map. Well-known places are almost always listed; very small ones may be missing.</div></div>
       </div>
     </div>`;
 
+  const socialForm = `
+    <div class="form-section">
+      <div class="section-title"><div class="step-num">1</div><div><h3>Which profiles?</h3><p>LinkedIn, Instagram or Facebook URLs — or names to look up. One per line.</p></div></div>
+      <div class="section-body">
+        <div class="callout info">${icon("info")}<div class="grow"><b>Public profile fields only.</b> Coverage varies; no guaranteed contacts. Free lookup runs first — paid enrichment only fills what free lookup missed, within your admin's monthly budget.</div></div>
+        <div class="tags" id="profiles"></div>
+        <div class="hint">Paste profile links or names. Duplicates are removed automatically.</div>
+        <div class="field mt-16"><label class="label">Platforms</label>
+          <div class="option-grid">${[["linkedin.com", "LinkedIn"], ["instagram.com", "Instagram"], ["facebook.com", "Facebook"]].map(([val, label]) => `
+            <label class="option"><input type="checkbox" name="social-platform" value="${val}" checked><span><b>${label}</b></span><span class="box"></span></label>`).join("")}
+          </div></div>
+        <label class="switch mt-8"><input type="checkbox" id="hybrid" checked><span class="sw"></span><span><b>Free lookup first, paid only on miss</b><small>Recommended. Turn off only if you want paid enrichment for every profile.</small></span></label>
+        <label class="switch mt-8"><input type="checkbox" id="free_only"><span class="sw"></span><span><b>Free lookup only</b><small>No paid spend on this run, whatever the budget.</small></span></label>
+      </div>
+    </div>`;
+
+  const stdDate = (() => { const d = new Date(); return `${d.getFullYear()}${String(d.getMonth() + 1).padStart(2, "0")}${String(d.getDate()).padStart(2, "0")}`; })();
+  const stdName = `Client_Vertical_Geo_${stdDate}`;
   v.innerHTML = `
     <div class="page-head"><div><h1>New run</h1><p>Tell us what to collect. You'll get a sheet you can open, merge and download.</p></div>
       <div class="seg" role="tablist" aria-label="Run type">
         <button type="button" class="${mode === "web" ? "active" : ""}" data-mode="web">${icon("globe")} Web search</button>
         <button type="button" class="${mode === "places" ? "active" : ""}" data-mode="places">${icon("pin")} Places</button>
+        <button type="button" class="${mode === "social" ? "active" : ""}" data-mode="social">${icon("users")} Social</button>
       </div></div>
+    <div class="callout info" id="conn-banner" hidden></div>
     <div class="split">
-      <div class="card">${mode === "web" ? webForm : placesForm}</div>
+      <div class="card">${mode === "web" ? webForm : mode === "places" ? placesForm : socialForm}</div>
       <aside class="card summary-panel">
         <div class="card-head"><h3>Run summary</h3></div>
         <div class="card-body">
           <ul class="summary-list" id="summary"></ul>
           <ul class="checklist" id="checks"></ul>
-          <div class="field mt-16"><label class="label" for="file_name">Sheet name <span class="opt">(optional)</span></label><input class="input" id="file_name" placeholder="e.g. Hyderabad IT leads" maxlength="80"></div>
+          <div class="field mt-16"><label class="label" for="file_name">Sheet name <span class="opt">(optional)</span></label><input class="input" id="file_name" value="${esc(stdName)}" maxlength="80"><div class="hint">Standard: Client_Vertical_Geo_YYYYMMDD — replace each part, e.g. Acme_Colleges_Hyderabad_${esc(stdDate)}.</div></div>
           <button class="btn btn-primary btn-lg btn-block" id="start">${icon("play")}Start run</button>
           <p class="hint" style="text-align:center">Respects each site's robots.txt and waits between visits.</p>
         </div>
       </aside>
     </div>`;
   $$("[data-mode]", v).forEach((b) => b.onclick = () => { location.hash = `#/new/${b.dataset.mode}`; });
+  api("/api/connections/status").then((cs) => {
+    const banner = $("#conn-banner");
+    if (banner && cs && cs.status_string) {
+      let extra = "";
+      const ss = cs.social_spend;
+      if (ss && ss.budget_set) extra = ` <b>Social:</b> ₹${esc(String(ss.spent_inr))} / ₹${esc(String(ss.limit_inr))} (${esc(String(ss.pct))}%)`;
+      else if (ss && !ss.budget_set) extra = ` <b>Social:</b> no monthly budget set — paid enrichment stays off`;
+      banner.hidden = false; banner.innerHTML = `${icon("info")}<div class="grow"><b>Connections:</b> ${esc(cs.status_string)}${extra}</div>`;
+    }
+  }).catch(() => {});
 
   const state = { require: "", category: "" };
-  let queries, locations, custom, dismissedSuggestion = "";
+  let queries, locations, profiles, custom, dismissedSuggestion = "";
   // Which of FIELD_SUGGESTIONS, if any, matches what's typed so far - the searches themselves, and any ticked
   // directory source's own category (set when that source was added in Settings), not guessed from nothing.
   const matchedSuggestion = () => {
@@ -729,10 +760,10 @@ async function viewNewRun(mode) {
       // A rough estimate only - actual time also depends on how many pages need visiting and whether any
       // website lookups fall back to a search (see estimateWebSeconds below for exactly what this does and
       // doesn't count).
-      if (queries.items.length) rows.push(["Estimated time", "~" + fmtRoughDuration(estimateWebSeconds(queries.items.length, plats.length, !!settings.brave_key_mask))]);
+      if (queries.items.length) rows.push(["Estimated time", "~" + fmtRoughDuration(estimateWebSeconds(queries.items.length, plats.length, hasBrave))]);
       checks.push([queries.items.length > 0 || seedOn, "At least one search, or a directory source"], [fields.length > 0, "At least one detail"], [plats.length > 0, "A place to search"]);
       renderSuggestion();
-    } else {
+    } else if (mode === "places") {
       rows.push(["Category", state.category], ["Locations", locations.items.length ? locations.items.slice(0, 2).join("; ") + (locations.items.length > 2 ? ` +${locations.items.length - 2}` : "") : "—"],
         ["Max per location", fmtNum($("#max_places").value)], ["Website check", $("#enrich").checked || custom.items.length ? "Yes" : "No"]);
       // Also rough: each location is one map query (a few seconds), plus - only if "Check websites" is on -
@@ -749,6 +780,22 @@ async function viewNewRun(mode) {
       if (placesNudge) placesNudge.hidden = !$("#find_sites").checked;
       checks.push([!!state.category, "A category"], [locations.items.length > 0, "At least one location"]);
       renderSuggestion();
+    } else {
+      const plats = $$("input[name=social-platform]:checked", v).map((c) => c.value);
+      rows.push(["Profiles", profiles.items.length || "—"], ["Platforms", plats.join(", ") || "—"],
+        ["Mode", $("#free_only").checked ? "Free lookup only" : ($("#hybrid").checked ? "Free first, paid on miss" : "Paid for every profile")]);
+      checks.push([profiles.items.length > 0, "At least one profile"], [plats.length > 0, "A platform"]);
+      rows.push(["Est. paid cost", "—"]);
+      const mySeq = (update._seq = (update._seq || 0) + 1);
+      if (profiles.items.length && plats.length) {
+        api("/api/social/estimate", { method: "POST", body: { profiles: profiles.items.join("\n"), platforms: plats, hybrid: $("#hybrid").checked, free_only: $("#free_only").checked } })
+          .then((e) => {
+            if (mySeq !== update._seq || stale(tk)) return;
+            const cost = !e.providers.length || e.free_only ? "₹0 (free lookup only)"
+              : `worst case $${e.estimate_usd.toFixed(2)} / ₹${e.estimate_inr.toFixed(0)} via ${e.providers.join(", ")}${e.blocked ? " — over budget" : ""}`;
+            $("#summary").innerHTML = rows.map(([k, val]) => `<li><span>${esc(k)}</span><b>${esc(k === "Est. paid cost" ? cost : val)}</b></li>`).join("");
+          }).catch(() => {});
+      }
     }
     if (custom.items.length) { rows.push(["AI details", custom.items.length]); checks.push([aiReady, "Your AI key is set"]); }
     $("#summary").innerHTML = rows.map(([k, val]) => `<li><span>${esc(k)}</span><b>${esc(val)}</b></li>`).join("");
@@ -782,7 +829,7 @@ async function viewNewRun(mode) {
     $$("#require button", v).forEach((b) => b.onclick = () => { $$("#require button", v).forEach((x) => x.classList.remove("active")); b.classList.add("active"); state.require = b.dataset.v; });
     $$("input[name=field], input[name=platform], input[name=sources], #region", v).forEach((c) => c.addEventListener("change", update));
     setTimeout(() => queries.input.focus(), 50);
-  } else {
+  } else if (mode === "places") {
     locations = TagInput($("#locations"), { placeholder: "e.g. Bachupally, Hyderabad", onChange: update });
     $$("[data-l]", v).forEach((b) => b.onclick = () => locations.add(b.dataset.l));
     custom = TagInput($("#custom-places"), { placeholder: aiReady ? "e.g. main deity, temple timings" : "Add your AI key in Settings first", disabled: !aiReady, onChange: update, format: formatCustomField });
@@ -804,6 +851,10 @@ async function viewNewRun(mode) {
     $("#enrich").onchange = () => { syncSites(); update(); };
     $("#find_sites").onchange = update;  // previously had no listener at all - toggling it never refreshed anything
     syncSites();
+  } else {
+    profiles = TagInput($("#profiles"), { placeholder: "e.g. https://www.linkedin.com/in/...", onChange: update });
+    custom = { items: [], flush() {} };
+    $$("input[name=social-platform], #hybrid, #free_only", v).forEach((c) => c.addEventListener("change", update));
   }
   update();
 
@@ -822,12 +873,18 @@ async function viewNewRun(mode) {
       if (!queries.items.length && !body.sources.length) { toast("Add at least one search in step 1, or pick one or more of your directory sources.", "err"); return queries.input.focus(); }
       if (!body.platforms.length) return toast("Choose at least one place to search.", "err");
       if (!body.fields.length && !custom.items.length) return toast("Pick at least one detail in step 2.", "err");
-    } else {
+    } else if (mode === "places") {
       locations.flush();
       if (!state.category) { toast("Choose a category in step 1.", "err"); return $("#cat-filter").focus(); }
       Object.assign(body, { category: state.category, locations: locations.items.join("\n"), name_filter: $("#name_filter").value,
         max_results: $("#max_places").value, enrich: $("#enrich").checked, find_websites: $("#find_sites").checked });
       if (!locations.items.length) { toast("Add at least one location in step 2.", "err"); return locations.input.focus(); }
+    } else {
+      profiles.flush();
+      Object.assign(body, { profiles: profiles.items.join("\n"), hybrid: $("#hybrid").checked, free_only: $("#free_only").checked,
+        platforms: $$("input[name=social-platform]:checked", v).map((c) => c.value) });
+      if (!profiles.items.length) { toast("Add at least one profile link or name.", "err"); return profiles.input.focus(); }
+      if (!body.platforms.length) return toast("Choose at least one platform.", "err");
     }
     if (!navigator.onLine) return toast("You're offline. Connect to the internet to start a run.", "err");
     if (!Store.state.available) return toast(Store.state.error || "Local storage is not available, so results could not be kept.", "err");
@@ -840,8 +897,9 @@ async function viewNewRun(mode) {
       const spec = { ...body, queries: lines(body.queries), locations: lines(body.locations), sourceNames,
         custom_fields: String(body.custom_fields || "").split(",").map((x) => x.trim()).filter(Boolean) };
       const name = body.file_name || (mode === "places" ? `${body.category} in ${spec.locations.slice(0, 2).join(", ")}`
+        : mode === "social" ? `Social enrichment (${profiles.items.length} profiles)`
         : spec.queries[0] || sourceNames.join(", ") || "Web search");
-      await Store.runs.put({ id: r.id, name, mode, spec, status: "running", started: nowIso(), rows: 0, with_email: 0, with_phone: 0,
+      await Store.runs.put({ id: r.id, name, mode, spec, body, status: "running", started: nowIso(), rows: 0, with_email: 0, with_phone: 0,
         duration: 0, error: "", sheet_id: null });
       Tracker.watch(r.id);
       location.hash = `#/runs/${r.id}`;
@@ -878,7 +936,11 @@ async function viewRuns() {
         <div class="seg" id="status">${[["all", "All"], ["running", "Running"], ["done", "Succeeded"], ["cancelled", "Cancelled"], ["error", "Failed"]].map(([k, l], i) => `<button data-s="${k}" class="${i ? "" : "active"}">${l}</button>`).join("")}</div>
       </div>
       <div class="table-wrap" id="list">${skeletonRows(6, 6)}</div>
-    </div>`;
+    </div>
+    ${IS_VIEWER ? "" : `<div class="card mt-16">
+      <div class="card-head"><div><h3>${icon("clock")} Schedules</h3><p>Saved runs that repeat on their own. Budgets and caps apply as usual.</p></div></div>
+      <div class="table-wrap" id="sched-list"><div class="card-body muted">Loading…</div></div>
+    </div>`}`;
   let runs = [];
   const load = async () => { const r = await Store.runs.list(); if (stale(tk)) return; runs = r.map(effectiveRun); render(); };
   const render = () => {
@@ -888,7 +950,7 @@ async function viewRuns() {
       : !list.length ? emptyState("search", "No matching runs", "Try a different search or filter.")
       : `<table class="tbl"><thead><tr><th>Run</th><th>Status</th><th>Started</th><th class="num">Duration</th><th class="num">Rows</th><th></th></tr></thead><tbody>
         ${list.map((r) => `<tr class="clickable" data-id="${r.id}">
-          <td><div class="name-cell"><div class="kpi-ico">${icon(r.mode === "places" ? "pin" : "globe")}</div><div><b>${esc(r.name || "Untitled")}</b><small>${runSubtitle(r)}</small></div></div></td>
+          <td><div class="name-cell"><div class="kpi-ico">${icon(r.mode === "places" ? "pin" : r.mode === "social" ? "users" : "globe")}</div><div><b>${esc(r.name || "Untitled")}</b><small>${runSubtitle(r)}</small></div></div></td>
           <td>${runBadge(r)}</td>
           <td class="nowrap" title="${esc(fmtDate(r.started))}">${timeAgo(r.started)}</td>
           <td class="num">${fmtDuration(r.duration)}</td><td class="num">${fmtNum(r.rows)}</td>
@@ -920,6 +982,32 @@ async function viewRuns() {
   });
   await load();
   const off = Tracker.on(() => load().catch(() => {}));
+  if (!IS_VIEWER) {
+    const paintSched = (items) => {
+      const el = $("#sched-list");
+      if (!el || stale(tk)) return;
+      el.innerHTML = !items.length ? `<div class="card-body muted">No schedules yet. Open a finished run and choose “Repeat on schedule”.</div>`
+        : `<table class="tbl"><thead><tr><th>Schedule</th><th>Repeats</th><th>Last run</th><th></th></tr></thead><tbody>
+          ${items.map((x) => `<tr><td><b>${esc(x.name)}</b></td><td>${esc(x.when)}</td>
+            <td>${x.last_triggered ? `${esc(fmtDate(x.last_triggered))} — ${esc(x.last_status || "")}` : '<span class="muted">Not yet</span>'}</td>
+            <td class="actions"><label class="switch"><input type="checkbox" data-sched="${x.id}" ${x.enabled ? "checked" : ""} aria-label="Enabled"><span class="sw"></span></label>
+              <button class="btn btn-sm btn-danger" data-sched-del="${x.id}">Delete</button></td></tr>`).join("")}</tbody></table>`;
+      $$("[data-sched]", v).forEach((t) => t.onchange = async (e) => {
+        try { paintSched(await api("/api/schedules", { method: "POST", body: { id: +e.target.dataset.sched, enabled: e.target.checked } }).then((r) => schedCache.map((y) => y.id === r.id ? r : y))); }
+        catch (err) { toast(err.message, "err"); e.target.checked = !e.target.checked; }
+      });
+      $$("[data-sched-del]", v).forEach((b) => b.onclick = async () => {
+        if (!await confirmDialog("Delete this schedule?", "It will stop repeating. Past runs and sheets stay.")) return;
+        try { await api(`/api/schedules/${b.dataset.schedDel}`, { method: "DELETE" }); paintSched(schedCache.filter((y) => y.id !== +b.dataset.schedDel)); }
+        catch (err) { toast(err.message, "err"); }
+      });
+    };
+    let schedCache = [];
+    api("/api/schedules").then((r) => { schedCache = r.schedules || []; paintSched(schedCache); }).catch(() => {
+      const el = $("#sched-list");
+      if (el) el.innerHTML = `<div class="card-body muted">Couldn't load schedules.</div>`;
+    });
+  }
   return off;
 }
 function runSubtitle(r) {
@@ -930,6 +1018,38 @@ function runSubtitle(r) {
 }
 
 /* ================================================================ RUN DETAIL */
+function repeatBody(run) {
+  if (run.body && run.body.mode) return { ...run.body };
+  const s = run.spec || {};
+  if ((s.sourceNames || []).length) return { error: "Runs using directory sources can't be repeated on a schedule — start a new run instead." };
+  const join = (a) => (a || []).join("\n");
+  const custom = (s.custom_fields || []).join(",");
+  if (run.mode === "places") return { mode: "places", category: s.category, locations: join(s.locations), name_filter: s.name_filter || "", max_results: s.max_results, enrich: !!s.enrich, find_websites: s.find_websites !== false, custom_fields: custom, file_name: run.name };
+  if (run.mode === "social") return { mode: "social", profiles: s.profiles || "", hybrid: s.hybrid !== false, free_only: !!s.free_only, platforms: s.platforms, file_name: run.name };
+  if (run.mode === "enrich") return null;  // sheet-bound: the rows only live in this browser, so no schedule can replay it later
+  return { mode: "web", queries: join(s.queries), fields: s.fields, platforms: s.platforms, region: s.region, max_results: s.max_results, require: s.require, follow_contact: s.follow_contact !== false, one_per_site: !!s.one_per_site, custom_fields: custom, file_name: run.name };
+}
+
+function scheduleRepeatDialog(run) {
+  const body = repeatBody(run);
+  if (!body) return toast("Fill-missing runs need their sheet, which only lives on this device — they can't run on a schedule.", "err");
+  if (body.error) return toast(body.error, "err");
+  return modal({
+    title: `Repeat “${run.name}” on a schedule`, confirm: "Save schedule",
+    body: `<div class="field"><label class="label" for="sc-name">Schedule name</label><input class="input" id="sc-name" value="${esc(run.name)}" maxlength="120"></div>
+      <div class="field"><label class="label" for="sc-cron">How often</label><select class="input" id="sc-cron"><option value="daily">Daily 9:00</option><option value="weekly">Weekly, Monday 9:00</option><option value="hourly">Hourly</option><option value="monthly">Monthly (1st) 9:00</option><option value="custom">Custom cron…</option></select></div>
+      <div class="field" id="sc-custom-row" hidden><label class="label" for="sc-custom">Cron (minute hour day month weekday)</label><input class="input mono" id="sc-custom" placeholder="0 9 * * 1" autocomplete="off"></div>
+      <div class="hint">Runs automatically with the same settings. Budgets and spending caps apply as usual — a run that would go over budget is skipped, never charged.</div>`,
+    onOpen: (ov) => { $("#sc-cron", ov).onchange = (e) => { $("#sc-custom-row", ov).hidden = e.target.value !== "custom"; }; },
+    onConfirm: async (ov) => {
+      const sel = $("#sc-cron", ov).value;
+      const cron = sel === "custom" ? $("#sc-custom", ov).value.trim() : sel;
+      await api("/api/schedules", { method: "POST", body: { name: $("#sc-name", ov).value, cron, body } });
+      toast("Schedule saved — see Runs for its next run", "ok");
+    },
+  });
+}
+
 async function viewRunDetail(id) {
   const tk = routeToken();
   setCrumbs({ label: "Runs", href: "#/runs" }, "Run");
@@ -1013,7 +1133,8 @@ async function viewRunDetail(id) {
     $("#run-actions").innerHTML = (!finished && job && !jobDone ? `<button class="btn btn-danger" id="stop">${icon("stop")}Stop &amp; keep results</button>` : "")
       + (run.unsaved ? `<button class="btn btn-primary" id="retry">Try saving again</button>` : "")
       + (sheetId ? `<span class="menu-wrap"><button class="btn" id="dl">${icon("download")}Download</button></span><a class="btn btn-primary" href="#/sheets/${sheetId}">${icon("sheet")}Open sheet</a>` : "")
-      + (finished && !IS_VIEWER ? `<a class="btn" href="#/new/${isPlaces ? "places" : "web"}">${icon("plus")}New run</a>` : "");
+      + (finished && !IS_VIEWER ? `<a class="btn" href="#/new/${isPlaces ? "places" : "web"}">${icon("plus")}New run</a>` : "")
+      + (finished && !IS_VIEWER && run.mode !== "enrich" ? `<button class="btn" id="sched">${icon("clock")}Repeat on schedule</button>` : "");
     $("#stop")?.addEventListener("click", async () => {
       $("#stop").disabled = true; $("#activity").textContent = "Stopping… finishing the pages already open.";
       try { await api(`/api/jobs/${id}/stop`, { method: "POST" }); } catch (e) { toast(e.message, "err"); }
@@ -1023,6 +1144,7 @@ async function viewRunDetail(id) {
       try { await Tracker.retry(id); } catch (e) { toast(e.status === 404 ? "The rows are no longer on the server. Please run it again." : e.message, "err"); $("#retry") && ($("#retry").disabled = false); }
     });
     $("#dl")?.addEventListener("click", (e) => { e.stopPropagation(); openMenu($("#dl"), exportMenu(sheetId)); });
+    $("#sched")?.addEventListener("click", () => scheduleRepeatDialog(run));
     if (finished) {
       const rows = run.rows;
       $("#result").innerHTML = status === "error" ? `<div class="callout err mt-16">${icon("alert")}<div><b>The run stopped because of an error.</b> ${esc(run.error || "")} ${rows && !run.unsaved ? "The rows collected before the error were saved." : ""}</div></div>`
@@ -1265,6 +1387,7 @@ async function viewSheet(id) {
     try {
       const r = await api("/api/jobs", { method: "POST", body: { mode: "enrich", columns: data.columns, rows: data.rows, custom_fields: "" } });
       await Store.runs.put({ id: r.id, name: meta.name, mode: "enrich", spec: { mode: "enrich", columns: data.columns, source_sheet: meta.name },
+        body: { mode: "enrich", columns: data.columns, rows: data.rows, custom_fields: "" },
         status: "running", started: nowIso(), rows: 0, with_email: 0, with_phone: 0, duration: 0, error: "", sheet_id: null });
       Tracker.watch(r.id);
       location.hash = `#/runs/${r.id}`;
@@ -1363,11 +1486,26 @@ async function shareDialog(meta) {
   try { mode = localStorage.getItem("shareMode") === "colleagues" ? "colleagues" : "customer"; } catch {}
   const canFiles = !!(navigator.canShare && navigator.canShare({ files: [new File(["x"], "x.csv", { type: "text/csv" })] }));
   let created = null, createdOpts = {};
+  const emailCols = data.columns.filter((c) => /e-?mail/i.test(c));
+  const phoneCols = data.columns.filter((c) => /phone|mobile|\btel\b/i.test(c));
+  const contactCols = [...emailCols, ...phoneCols];
+  const withContact = contactCols.length ? data.rows.filter((r) => contactCols.some((c) => String(r[c] ?? "").trim())).length : 0;
+  const contactPct = data.rows.length ? Math.round((withContact / data.rows.length) * 100) : 0;
+  const nameCol = data.columns.includes("Name") ? "Name" : data.columns[0];
+  const seenNames = new Set(), dupes = new Set();
+  if (nameCol) for (const r of data.rows) {
+    const n = String(r[nameCol] ?? "").trim().toLowerCase();
+    if (!n) continue;
+    if (seenNames.has(n)) dupes.add(n); else seenNames.add(n);
+  }
   const body = `
     <div class="seg" id="sh-mode" style="margin-bottom:18px">
       <button type="button" data-m="customer">Customer outside the company</button>
       <button type="button" data-m="colleagues">Colleagues</button>
     </div>
+    <div class="callout info" id="sh-checklist"><div><b>Before you send:</b> ${data.rows.length} rows
+      · ${contactCols.length ? `${contactPct}% have contact details` : "no email/phone column to check"}
+      · ${dupes.size ? `${dupes.size} duplicate name${dupes.size > 1 ? "s" : ""} to merge first` : "no duplicate names"}.</div></div>
 
     <div id="sh-customer">
       <div class="field"><label class="label" for="sh-cname">Customer or company name</label>
@@ -1384,6 +1522,7 @@ async function shareDialog(meta) {
       <div class="field"><label class="label" for="sh-cdays">Link works for</label>
         <select class="input" id="sh-cdays"><option value="1">1 day</option><option value="7" selected>7 days</option><option value="30">30 days</option></select></div>
       <label class="switch"><input type="checkbox" id="sh-ack"><span class="sw"></span><span><b>I confirm we are allowed to share this data with this customer</b><small>This sheet may contain personal details. Check your agreement and the privacy rules that apply (including for people abroad) before sending.</small></span></label>
+      <label class="switch mt-8"><input type="checkbox" id="sh-qa"><span class="sw"></span><span><b>I checked a sample of these rows</b><small>Open a few websites and phone numbers above and confirm they belong to the listed places before the customer sees them.</small></span></label>
     </div>
 
     <div id="sh-colleagues" hidden>
@@ -1442,6 +1581,7 @@ async function shareDialog(meta) {
         if (!customer) { toast("Enter the customer's name.", "err"); $("#sh-cname", ov).focus(); return false; }
         if (passOn && (pass.length < 4 || pass.length > 40)) { toast("A passcode needs 4 to 40 characters.", "err"); $("#sh-pass", ov).focus(); return false; }
         if (!$("#sh-ack", ov).checked) { toast("Please confirm that you're allowed to share this data with the customer.", "err"); return false; }
+        if (!$("#sh-qa", ov).checked) { toast("Please check a sample of the rows first — the checklist above shows what to look at.", "err"); return false; }
         payload = { kind: "external", customer, message: $("#sh-cmsg", ov).value, passcode: passOn ? pass : "", acknowledged: true, expires_days: +$("#sh-cdays", ov).value };
         createdOpts = { to: $("#sh-cmail", ov).value.trim(), passcode: passOn ? pass : "" };
       } else {
@@ -1788,6 +1928,7 @@ async function viewSettings() {
             <div class="provider-grid" id="providers">${PROVIDER_ORDER.filter((k) => CFG.providers[k]).map((k) => [k, CFG.providers[k]]).map(([k, p]) => `
               <label class="option radio"><input type="radio" name="provider" value="${k}" ${k === st.provider ? "checked" : ""}><span><b>${esc(p.label)}</b><small>${p.model ? `Default: ${esc(p.model)}` : "Any OpenAI-compatible API"}</small></span><span class="box"></span></label>`).join("")}</div></div>
           <div class="field" id="key-field"></div>
+          <div class="callout info mt-8" id="org-note" hidden>${icon("info")}<div class="grow">Your company shares an AI key — your runs will use it unless you add your own key above.</div></div>
           <div class="grid grid-2">
             <div class="field"><label class="label" for="model">Model <span class="opt">(optional)</span></label><input class="input mono" id="model" value="${esc(s.ai_model)}" autocomplete="off"><div class="hint" id="model-hint"></div></div>
             <div class="field" id="url-field"><label class="label" for="base_url">API URL</label><input class="input mono" id="base_url" value="${esc(s.ai_base_url)}" placeholder="e.g. http://localhost:11434/v1" autocomplete="off"><div class="hint">For Ollama, LM Studio, Together, DeepSeek or any OpenAI-compatible service.</div></div>
@@ -1896,7 +2037,10 @@ async function viewSettings() {
     $("#url-field").hidden = st.provider !== "custom";
   };
   const renderStatus = () => {
-    $("#ai-status").innerHTML = s.ai_key_mask || (s.ai_provider === "custom" && s.ai_base_url) ? '<span class="badge done">Ready</span>' : '<span class="badge plain">Not set up</span>';
+    const orgAi = (s.org_keys || []).includes("ai_api_key");
+    $("#ai-status").innerHTML = s.ai_key_mask || orgAi || (s.ai_provider === "custom" && s.ai_base_url) ? '<span class="badge done">Ready</span>' : '<span class="badge plain">Not set up</span>';
+    const orgNote = $("#org-note");
+    if (orgNote) orgNote.hidden = !(!s.ai_key_mask && orgAi);
   };
   $("#providers").addEventListener("change", (e) => { if (e.target.name === "provider") { st.provider = e.target.value; renderKey(); } });
   renderKey(); renderStatus();
@@ -1964,10 +2108,12 @@ async function viewSettings() {
     catch (e) { toast(e.message, "err"); }
   }));
   const renderBrave = () => {
-    $("#brave-status").innerHTML = s.brave_key_mask ? '<span class="badge done">Connected</span>' : '<span class="badge plain">Not set up</span>';
+    const orgBrave = (s.org_keys || []).includes("brave_api_key");
+    $("#brave-status").innerHTML = s.brave_key_mask || orgBrave ? '<span class="badge done">Connected</span>' : '<span class="badge plain">Not set up</span>';
     $("#brave-field").innerHTML = s.brave_key_mask
       ? `<span class="label">Brave API key</span><div class="saved-key">${icon("key")}<span class="grow">${esc(s.brave_key_mask)}</span><button class="btn btn-sm btn-danger" id="remove-brave">Remove</button></div>`
-      : `<label class="label" for="brave-key">Brave API key</label><input class="input mono" id="brave-key" type="password" autocomplete="off" placeholder="Paste your Brave Search API key">`;
+      : `<label class="label" for="brave-key">Brave API key</label><input class="input mono" id="brave-key" type="password" autocomplete="off" placeholder="Paste your Brave Search API key">`
+        + (!s.brave_key_mask && orgBrave ? `<div class="hint">Your company shares a Brave key — lookups will use it unless you add your own.</div>` : "");
     $("#remove-brave")?.addEventListener("click", async () => {
       if (!await confirmDialog("Remove your Brave key?", "Website lookups will fall back to the free search engines until you add a key again.", "Remove")) return;
       await api("/api/settings", { method: "POST", body: { brave_api_key: "" } });
@@ -2077,7 +2223,7 @@ async function viewAdmin() {
   setCrumbs("Admin");
   const v = $("#view");
   const tk = routeToken();
-  const [users, settings, allShares] = await Promise.all([api("/api/admin/users"), api("/api/admin/settings"), api("/api/admin/shares")]);
+  const [users, settings, allShares, conns, budgets, orgkeys, audit] = await Promise.all([api("/api/admin/users"), api("/api/admin/settings"), api("/api/admin/shares"), api("/api/admin/connections").catch(() => null), api("/api/admin/budgets").catch(() => null), api("/api/admin/org-keys").catch(() => null), api("/api/admin/audit?limit=50").catch(() => null)]);
   let shares = allShares;
   if (stale(tk)) return;
   const render = (list) => {
@@ -2118,6 +2264,62 @@ async function viewAdmin() {
             <span><b>Allow logged-in LinkedIn / Facebook collection</b><small>When on, people can save session cookies in Settings and the collector opens those pages as them. When off, only public search results are used.</small></span></label>
           <div class="callout warn mt-16">${icon("alert")}<div>These platforms' terms forbid automated collection and can suspend the accounts used. Personal data is covered by India's DPDP Act. Turn this on only after legal review.</div></div>
         </div>
+      </div>
+      <div class="card mt-16">
+        <div class="card-head"><div><h3>${icon("info")} Connections</h3><p>Each source can be enabled or tested individually. Jobs only try enabled services.</p></div><div class="actions"><button class="btn btn-sm" id="conns-test-all">Test all</button></div></div>
+        <div class="card-body">
+          <div class="muted small" id="conns-status">${conns ? esc(conns.status_string || "") : "Connection status unavailable."}</div>
+          <div class="grid grid-2 mt-8">
+            <div class="field"><label class="label" for="social-budget-inr">Monthly social budget (₹)</label><input class="input" id="social-budget-inr" type="number" min="0" placeholder="e.g. 2500"></div>
+            <div class="field"><label class="label" for="social-budget-usd">Monthly social budget ($)</label><input class="input" id="social-budget-usd" type="number" min="0" step="0.01" placeholder="e.g. 26"></div>
+          </div>
+          <div class="row-flex"><button class="btn btn-sm" id="budgets-save">Save budget</button><span class="muted small">Paid enrichment stays off until a budget is set. 1,000 profiles ≈ $1.40–$3.50 ≈ ₹135–₹340.</span></div>
+          <div class="field mt-8"><label class="label" for="pacing">Search pacing</label>
+            <select class="input" id="pacing" style="max-width:320px"><option value="conservative">Conservative — slowest, kindest to free engines</option><option value="standard">Standard</option><option value="fast">Fast — only with a search key</option></select>
+            <div class="hint">Changes how long runs wait between searches. Takes effect on the next run, no redeploy.</div></div>
+          <div class="field mt-8"><span class="label">Company proxy <span class="opt">(optional, metered)</span></span>
+            <label class="switch"><input type="checkbox" id="proxy-on"><span class="sw"></span><span><b>Route traffic through the proxy</b><small>The proxy address itself stays in the server's environment, never here. Only takes effect while a monthly cap below is set.</small></span></label>
+            <div class="row-flex mt-8" style="gap:16px;flex-wrap:wrap">
+              <label class="switch"><input type="checkbox" id="proxy-search"><span class="sw"></span><span><b>Search engines</b></span></label>
+              <label class="switch"><input type="checkbox" id="proxy-fetch"><span class="sw"></span><span><b>Page fetching</b></span></label>
+            </div>
+            <div class="grid grid-2 mt-8">
+              <div class="field"><label class="label" for="proxy-cap">Monthly cap (MB)</label><input class="input" id="proxy-cap" type="number" min="0" step="1" placeholder="e.g. 500"></div>
+              <div class="field"><span class="label">Used this month</span><div class="muted" id="proxy-used">—</div></div>
+            </div>
+            <div class="row-flex"><button class="btn btn-sm" id="proxy-save">Save proxy settings</button></div>
+          </div>
+          <div class="muted small mt-8" id="spend-line">${(() => { const u = (budgets && budgets.users) || {}; const rows = Object.entries(u); return rows.length ? "Spend this month: " + rows.map(([n, b]) => `${esc(n)} (${esc(b.service || "")}): ₹${esc(String(b.spent_inr || 0))} / $${esc(String(b.spent_usd || 0))}`).join("; ") : "No spend recorded this month."; })()}</div>
+          <div class="table-wrap"><table class="tbl"><thead><tr><th>Service</th><th>Kind</th><th>Enabled</th><th>Health</th><th></th></tr></thead><tbody id="conns-body">
+            ${(conns ? Object.entries(conns.services) : []).map(([name, s]) => `<tr><td><b>${esc(s.label || name)}</b></td><td>${esc(s.kind || "")}</td>
+              <td><label class="switch"><input type="checkbox" data-conn="${esc(name)}" ${s.enabled ? "checked" : ""}><span class="sw"></span></label></td>
+              <td>${s.enabled ? (s.healthy ? '<span class="badge done">OK</span>' : `<span class="badge plain">FAIL</span> <small class="muted">${esc(s.error || "")}</small>`) : '<span class="badge cancelled plain">OFF</span>'}</td>
+              <td class="actions"><button class="btn btn-sm" data-conn-test="${esc(name)}">Test</button></td></tr>`).join("")}
+          </tbody></table></div>
+        </div>
+      </div>
+      <div class="card mt-16">
+        <div class="card-head"><div><h3>${icon("key")} Shared keys</h3><p>Company keys members use when they haven't added their own. A person's own key always wins. Values are never shown.</p></div></div>
+        <div class="card-body">
+          <div class="table-wrap"><table class="tbl"><thead><tr><th>Key</th><th>For roles</th><th>Saved value</th><th></th></tr></thead><tbody id="org-body">
+            ${((orgkeys && orgkeys.keys) || []).map((k) => `<tr><td><b>${esc(k.name)}</b><small>${esc(k.platform || "")}</small></td>
+              <td><select class="input" style="height:34px;width:auto" data-org-roles="${esc(k.name)}" aria-label="Roles for ${esc(k.name)}">
+                ${[["admin,member", "Admins + members"], ["admin,member,viewer", "Everyone"], ["admin", "Admins only"]].map(([v, l]) => `<option value="${v}" ${(k.roles || []).join(",") === v ? "selected" : ""}>${l}</option>`).join("")}</select></td>
+              <td class="mono">${esc(k.masked || "")}</td>
+              <td class="actions"><button class="btn btn-sm btn-danger" data-org-del="${esc(k.name)}">Remove</button></td></tr>`).join("") || ""}
+          </tbody></table></div>
+          <div class="grid grid-2 mt-8">
+            <div class="field"><label class="label" for="org-name">Key to share</label><select class="input" id="org-name">${((orgkeys && orgkeys.shareable) || ["ai_api_key", "brave_api_key", "brightdata_api_key", "apify_api_key"]).map((n) => `<option value="${esc(n)}">${esc(n)}</option>`).join("")}</select></div>
+            <div class="field"><label class="label" for="org-value">Value</label><input class="input mono" id="org-value" autocomplete="off" placeholder="Paste the key"></div>
+          </div>
+          <div class="row-flex"><button class="btn btn-sm btn-primary" id="org-save">Share key</button><span class="muted small">Members without their own key will use it automatically.</span></div>
+        </div>
+      </div>
+      <div class="card mt-16">
+        <div class="card-head"><div><h3>${icon("clock")} Recent activity</h3><p>Runs started and finished, shares, schedules and spending — newest first.</p></div></div>
+        <div class="table-wrap" id="audit-list">${(audit && audit.length) ? `<table class="tbl"><thead><tr><th>When</th><th>Who</th><th>What</th></tr></thead><tbody>
+          ${audit.map((a) => `<tr><td class="nowrap">${esc(fmtDate(a.at))}</td><td>${esc(a.user || "—")}</td><td><b>${esc(a.action)}</b> <span class="muted">${esc(a.detail || "")}</span></td></tr>`).join("")}</tbody></table>`
+          : `<div class="card-body muted">Nothing recorded yet.</div>`}</div>
       </div>`;
     $("#add-user").onclick = () => addUser(list, render);
     $$("[data-admin-stop]", v).forEach((b) => b.onclick = async () => {
@@ -2153,6 +2355,69 @@ async function viewAdmin() {
       try { await api("/api/admin/settings", { method: "POST", body: { allow_restricted: on } }); CFG.restricted = on; toast(on ? "Restricted connectors allowed" : "Restricted connectors turned off", "ok"); }
       catch (err) { toast(err.message, "err"); e.target.checked = !on; }
     };
+    $$("[data-conn]", v).forEach((t) => t.onchange = async (e) => {
+      const name = e.target.dataset.conn, on = e.target.checked;
+      try { await api(`/api/admin/connections/${name}`, { method: "POST", body: { enabled: on } }); toast(`${name} ${on ? "enabled" : "disabled"}`, "ok"); route(); }
+      catch (err) { toast(err.message, "err"); e.target.checked = !on; }
+    });
+    $$("[data-conn-test]", v).forEach((b) => b.onclick = async () => {
+      const name = b.dataset.connTest;
+      try { const r = await api("/api/admin/connections/test", { method: "POST", body: { name } }); toast(`${name}: ${r.result && r.result.healthy ? "OK" : ((r.result || {}).error || "checked")}`, r.result && r.result.healthy ? "ok" : "err"); route(); }
+      catch (err) { toast(err.message, "err"); }
+    });
+    const tAll = $("#conns-test-all");
+    if (tAll) tAll.onclick = async () => {
+      try { await api("/api/admin/connections/test-all", { method: "POST" }); toast("Background check started", "ok"); }
+      catch (err) { toast(err.message, "err"); }
+    };
+    const bSave = $("#budgets-save");
+    if (bSave) bSave.onclick = async () => {
+      const inr = $("#social-budget-inr").value, usd = $("#social-budget-usd").value;
+      try { await api("/api/admin/budgets", { method: "POST", body: { social_budget_inr: inr, social_budget_usd: usd } }); toast("Budget saved", "ok"); }
+      catch (err) { toast(err.message, "err"); }
+    };
+    try {
+      const lim = (budgets && budgets.limits) || {};
+      if (lim.social_budget_inr && $("#social-budget-inr")) $("#social-budget-inr").value = lim.social_budget_inr;
+      if (lim.social_budget_usd && $("#social-budget-usd")) $("#social-budget-usd").value = lim.social_budget_usd;
+    } catch {}
+    api("/api/admin/settings").then((s) => { if ($("#pacing") && s.pacing_preset) $("#pacing").value = s.pacing_preset; }).catch(() => {});
+    api("/api/admin/settings").then((s) => {
+      if ($("#proxy-on")) $("#proxy-on").checked = !!s.proxy_enabled;
+      if ($("#proxy-search")) $("#proxy-search").checked = !!s.proxy_search;
+      if ($("#proxy-fetch")) $("#proxy-fetch").checked = !!s.proxy_fetch;
+      if ($("#proxy-cap") && s.proxy_cap_mb) $("#proxy-cap").value = s.proxy_cap_mb;
+      const used = $("#proxy-used"), ps = s.proxy_status || {};
+      if (used) used.textContent = s.proxy_cap_mb && +s.proxy_cap_mb > 0 ? `${ps.used_mb || 0} of ${s.proxy_cap_mb} MB (${ps.pct || 0}%)` : "No cap set — proxy stays off.";
+    }).catch(() => {});
+    const pSave = $("#proxy-save");
+    if (pSave) pSave.onclick = async () => {
+      try {
+        await api("/api/admin/settings", { method: "POST", body: { proxy_enabled: $("#proxy-on").checked, proxy_search: $("#proxy-search").checked, proxy_fetch: $("#proxy-fetch").checked, proxy_cap_mb: $("#proxy-cap").value } });
+        toast("Proxy settings saved", "ok"); route();
+      } catch (err) { toast(err.message, "err"); }
+    };
+    const pacing = $("#pacing");
+    if (pacing) pacing.onchange = async (e) => {
+      try { await api("/api/admin/settings", { method: "POST", body: { pacing_preset: e.target.value } }); toast(`Pacing: ${e.target.value}`, "ok"); }
+      catch (err) { toast(err.message, "err"); route(); }
+    };
+    const orgSave = $("#org-save");
+    if (orgSave) orgSave.onclick = async () => {
+      const name = $("#org-name").value, value = $("#org-value").value.trim();
+      if (!value) { toast("Paste the key first.", "err"); return; }
+      try { await api("/api/admin/org-keys", { method: "POST", body: { name, value } }); toast("Shared key saved", "ok"); route(); }
+      catch (err) { toast(err.message, "err"); }
+    };
+    $$("[data-org-del]", v).forEach((b) => b.onclick = async () => {
+      if (!await confirmDialog(`Remove the shared ${b.dataset.orgDel} key?`, "Members will fall back to their own keys, or to no key.")) return;
+      try { await api(`/api/admin/org-keys/${b.dataset.orgDel}`, { method: "DELETE" }); toast("Shared key removed", "ok"); route(); }
+      catch (err) { toast(err.message, "err"); }
+    });
+    $$("[data-org-roles]", v).forEach((sel) => sel.onchange = async () => {
+      try { await api("/api/admin/org-keys", { method: "POST", body: { name: sel.dataset.orgRoles, value: "__keep__", roles: sel.value.split(",") } }); toast("Roles updated", "ok"); }
+      catch (err) { toast(err.message, "err"); route(); }
+    });
   };
   render(users);
 }

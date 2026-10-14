@@ -52,6 +52,7 @@ from scraper import ai_extract, extract, listings, places, search, sheets, sourc
 from scraper.fetch import Fetcher  # noqa: E402
 from scraper.excel import write_workbook  # noqa: E402
 from scraper.jobs import JOBS, REGIONS, purge_jobs, start_job  # noqa: E402
+from scraper.connection_health import run_all_checks, status_string  # noqa: E402
 
 def _database_url() -> str:
     url = os.environ.get("DATABASE_URL", "").strip()
@@ -134,6 +135,27 @@ def _upgrade_schema():
                     conn.execute(text(f"ALTER TABLE {table.name} ADD COLUMN {col.name} {ddl}"))
 
 
+def run_startup_probes():
+    """Background, time-boxed probe of keyless services. Never raises."""
+    with app.app_context():
+        try:
+            from models import ConnectionHealth
+            from scraper.connection_health import (
+                check_ddgs, check_nominatim, check_overpass, check_photon, check_wikidata,
+            )
+            for _name, _fn in (("overpass", check_overpass), ("photon", check_photon),
+                               ("nominatim", check_nominatim), ("wikidata", check_wikidata),
+                               ("ddgs", check_ddgs)):
+                try:
+                    _r = _fn()
+                    ConnectionHealth.upsert(_name, bool(_r.get("healthy")), _r.get("error", ""))
+                    db.session.commit()
+                except Exception:
+                    db.session.rollback()
+        except Exception:
+            pass
+
+
 with app.app_context():
     db.create_all()
     _upgrade_schema()
@@ -143,6 +165,26 @@ with app.app_context():
         admin.set_password(os.environ["APP_PASSWORD"])
         db.session.add(admin)
         db.session.commit()
+    # Phase 4: recover durable jobs. Running markers become error records so a restart
+    # never silently drops a run the browser is still waiting on.
+    try:
+        from scraper.jobs import rehydrate_jobs
+
+        rehydrate_jobs()
+    except Exception:
+        pass
+    # Phase 2: background probes. Never blocks boot.
+    import threading as _th
+
+    _th.Thread(target=run_startup_probes, daemon=True).start()
+    # Phase 5C: schedule loop (single-host default; set SCHEDULER_ENABLED=0 on extra
+    # web replicas). Never blocks boot; a dead loop only pauses schedules.
+    try:
+        from scraper.scheduler import start_scheduler_thread
+
+        start_scheduler_thread(app)
+    except Exception:
+        pass
 
 
 # ---------------------------------------------------------------- helpers
@@ -163,6 +205,41 @@ def _vault(user_id: int) -> dict:
     return {c.name: c.value() for c in VaultCredential.query.filter_by(owner_id=user_id).all()}
 
 
+# Company-shared keys (Phase 5D). Only key material, never provider/model choices.
+ORG_SHAREABLE = {"ai_api_key", "brave_api_key", "brightdata_api_key", "apify_api_key"}
+
+
+def _effective_vault(user_id: int, role: str = "member") -> dict:
+    """Personal vault overlaid on org-shared keys the role may use. Personal wins."""
+    from models import OrgCredential
+
+    merged: dict[str, str] = {}
+    try:
+        for cred in OrgCredential.query.all():
+            if cred.name in ORG_SHAREABLE and role in cred.roles():
+                value = cred.value()
+                if value:
+                    merged[cred.name] = value
+    except Exception:
+        pass
+    try:
+        merged.update(_vault(user_id))
+    except Exception:
+        pass
+    return merged
+
+
+def _org_key_names(role: str = "member") -> list[str]:
+    """Shared key names visible to a role (names only, never values)."""
+    from models import OrgCredential
+
+    try:
+        return sorted(c.name for c in OrgCredential.query.all()
+                      if c.name in ORG_SHAREABLE and role in c.roles() and c.value())
+    except Exception:
+        return []
+
+
 def _restricted_enabled() -> bool:
     return AppSetting.get("allow_restricted", "0") == "1"
 
@@ -173,9 +250,25 @@ def _mask(v: str) -> str:
 
 def _own_job(job_id: str):
     job = JOBS.get(job_id)
-    if not job or (job.owner_id != current_user.id and not current_user.is_admin):
+    if job and (job.owner_id == current_user.id or current_user.is_admin):
+        if getattr(job, "remote", False):
+            # A queue worker owns the truth for this run; this process only has
+            # a queued placeholder, so prefer whatever the worker persisted.
+            from scraper.jobs import load_stored_job
+
+            stored = load_stored_job(job_id, allow_running=True)
+            if stored and (stored.owner_id == current_user.id or current_user.is_admin):
+                return stored
+        return job
+    if job:
         abort(404)
-    return job
+    # Finished jobs survive a restart on disk; rehydrate on demand.
+    from scraper.jobs import load_stored_job
+
+    stored = load_stored_job(job_id)
+    if stored and (stored.owner_id == current_user.id or current_user.is_admin):
+        return stored
+    abort(404)
 
 
 def _clean_name(name: str, default: str) -> str:
@@ -187,6 +280,41 @@ def _list(text: str) -> list[str]:
     text = (text or "").strip()
     sep = "\n" if "\n" in text else ","
     return list(dict.fromkeys(p.strip() for p in text.split(sep) if p.strip()))
+
+
+def _parse_social_items(d: dict) -> tuple[list[dict], list[str], str | None]:
+    """Parse social input into (items, platforms, cap_error). Items: {url, platform, name}."""
+    from scraper.social_base import PLATFORMS, normalize_url, platform_of
+
+    try:
+        from scraper.config import MAX_SOCIAL_PER_RUN
+
+        cap = MAX_SOCIAL_PER_RUN
+    except Exception:
+        cap = 50
+    raw = d.get("items") if isinstance(d.get("items"), list) else (d.get("profiles") or "")
+    if isinstance(raw, str):
+        raw = [p.strip() for p in raw.splitlines() if p.strip()]
+    plats = [p for p in (d.get("platforms") or list(PLATFORMS)) if p in PLATFORMS] or list(PLATFORMS)
+    items, seen_urls = [], set()
+    for entry in (raw or [])[:500]:
+        entry = str(entry).strip()[:500]
+        if not entry:
+            continue
+        if "://" in entry or entry.lower().startswith("www.") or platform_of(entry):
+            url = normalize_url(entry)
+            if not url or url.lower() in seen_urls:
+                continue
+            if platform_of(url) not in plats:
+                continue
+            seen_urls.add(url.lower())
+            items.append({"url": url, "platform": platform_of(url), "name": ""})
+        else:
+            items.append({"url": "", "platform": "", "name": entry[:150]})
+    if len(items) > cap:
+        return [], plats, (f"Social runs are capped at {cap} profiles per run to protect the monthly budget. "
+                           f"Split the list and run again.")
+    return items, plats, None
 
 
 # ---------------------------------------------------------------- login
@@ -348,24 +476,33 @@ def offline_page():
 
 # ---------------------------------------------------------------- runs (live only; results go to the browser)
 
-@app.post("/api/jobs")
-@roles_required("admin", "member")
-def create_job():
-    d = request.get_json(force=True)
+def _lines(v) -> list[str]:
+    """Newline-string, comma-string or list → cleaned list. Schedule bodies mirror POST
+    bodies but may carry already-split lists (e.g. repeated from a saved run spec).
+    Strings keep the exact historical rule: split on newlines when present, else commas."""
+    if isinstance(v, list):
+        return [str(x).strip() for x in v if str(x).strip()]
+    return _list(v)
+
+
+def build_job_spec(d: dict, vault: dict, user_id: int, enforce_budget: bool = True):
+    """Validate a job-creation body into a run spec. Shared by POST /api/jobs and the
+    Phase 5C scheduler so manual and scheduled runs pass the identical gate
+    (validation, budgets, caps). Returns (spec, error, status)."""
+    d = d if isinstance(d, dict) else {}
     mode = d.get("mode", "web")
     # Capped per-field, not just by count: a custom field name goes straight into the AI prompt for every page the
     # run visits, so one accidentally-pasted paragraph (no comma/newline to split it) would otherwise be repeated,
     # uncapped, into every single one of those calls - a cost and token-bloat problem, not just a display one.
-    custom = [f[:100] for f in _list(d.get("custom_fields", ""))[:15]]
-    vault = _vault(current_user.id)
+    custom = [f[:100] for f in _lines(d.get("custom_fields", ""))[:15]]
     ai = {"provider": vault.get("ai_provider", "anthropic"), "key": vault.get("ai_api_key", ""),
           "model": vault.get("ai_model", ""), "base_url": vault.get("ai_base_url", "")}
     if custom and not ai["key"] and ai["provider"] != "custom":
-        return jsonify(error="AI details need your own AI key. Add it in Settings → AI provider."), 400
+        return None, "AI details need your own AI key. Add it in Settings → AI provider.", 400
     try:
         max_results = max(1, min(int(d.get("max_results") or 30), 500))
-    except ValueError:
-        return jsonify(error="Max results must be a number."), 400
+    except (TypeError, ValueError):
+        return None, "Max results must be a number.", 400
 
     restricted = _restricted_enabled()
     common = {
@@ -376,13 +513,13 @@ def create_job():
         "fb_cookie": vault.get("fb_cookie", "") if restricted else "",
     }
     if mode == "places":
-        locations = list(dict.fromkeys(l.strip() for l in (d.get("locations") or "").splitlines() if l.strip()))
+        locations = list(dict.fromkeys(_lines(d.get("locations") or "")))
         if not locations:
-            return jsonify(error="Add at least one location."), 400
+            return None, "Add at least one location.", 400
         if d.get("category") not in places.CATEGORIES:
-            return jsonify(error="Choose a category."), 400
+            return None, "Choose a category.", 400
         spec = {"mode": "places", "category": d["category"], "locations": locations[:30],
-                "name_filter": (d.get("name_filter") or "").strip(),
+                "name_filter": (d.get("name_filter") or "").strip() if isinstance(d.get("name_filter"), str) else "",
                 "enrich": bool(d.get("enrich")) or bool(custom), "find_websites": bool(d.get("find_websites", True)), **common}
     elif mode == "enrich":
         # "Fill missing details" on an existing sheet - the sheet itself lives only in the person's own browser
@@ -390,19 +527,55 @@ def create_job():
         # point, not read from anywhere on the server.
         in_columns, in_rows = d.get("columns"), d.get("rows")
         if not isinstance(in_columns, list) or not in_columns:
-            return jsonify(error="No columns given."), 400
+            return None, "No columns given.", 400
         columns = [str(c)[:200] for c in in_columns][:300]
         if "Name" not in columns:
-            return jsonify(error="This sheet has no Name column, so there's nothing to look up by."), 400
+            return None, "This sheet has no Name column, so there's nothing to look up by.", 400
         if not isinstance(in_rows, list) or not in_rows:
-            return jsonify(error="No rows to fill in - the sheet looks empty."), 400
+            return None, "No rows to fill in - the sheet looks empty.", 400
         rows = [{c: ("" if r.get(c) is None else str(r.get(c))[:2000]) for c in columns}
                 for r in in_rows if isinstance(r, dict)][:2000]
         spec = {"mode": "enrich", "rows": rows, "columns": columns, **common}
+    elif mode == "social":
+        items, plats, err = _parse_social_items(d)
+        if err:
+            return None, err, 400
+        if not items:
+            return None, "Add at least one LinkedIn / Instagram / Facebook URL or name.", 400
+        social_spec = {"mode": "social", "items": items, "platforms": plats,
+                       "hybrid": bool(d.get("hybrid", True)), "free_only": bool(d.get("free_only", False)),
+                       "brightdata_key": vault.get("brightdata_api_key", ""),
+                       "apify_key": vault.get("apify_api_key", ""),
+                       "apify_actor": vault.get("apify_actor", ""), **common}
+        if not social_spec["free_only"] and enforce_budget:
+            from scraper.jobs import preflight as _pre
+            from scraper.social_base import estimate_cost
+
+            eff = _pre(social_spec)
+            n = len(items)
+            est_usd, est_inr = estimate_cost(n, eff.get("social", []))
+            social_spec["estimate_usd"], social_spec["estimate_inr"] = est_usd, est_inr
+            if eff.get("social"):
+                from scraper.jobs import _social_limits, _social_spend
+
+                lim_usd, lim_inr = _social_limits()
+                sp_usd, sp_inr = _social_spend(user_id)
+                if lim_usd <= 0 and lim_inr <= 0:
+                    return None, ("Paid social enrichment needs a monthly budget first. Ask your admin to set one "
+                                  "in Admin → Connections, or run again with free lookup only."), 402
+                over = (lim_usd > 0 and sp_usd + est_usd > lim_usd) or (lim_inr > 0 and sp_inr + est_inr > lim_inr)
+                if over:
+                    return None, (f"This run would cost about ${est_usd:.2f} / ₹{est_inr:.0f} but only "
+                                  f"${max(lim_usd - sp_usd, 0):.2f} / ₹{max(lim_inr - sp_inr, 0):.0f} of the monthly social budget is left. "
+                                  f"Run fewer profiles, set free_only, or ask your admin to raise the budget."), 402
+        elif social_spec["free_only"]:
+            social_spec["brightdata_key"] = ""
+            social_spec["apify_key"] = ""
+        spec = social_spec
     else:
         # 300 is generous on purpose - for breadth across "100-200 websites" the limit that actually matters is how
         # fast search engines can be queried without being refused (see scraper/search.py), not this count.
-        queries = list(dict.fromkeys(q.strip() for q in (d.get("queries") or "").splitlines() if q.strip()))[:300]
+        queries = list(dict.fromkeys(_lines(d.get("queries") or "")))[:300]
         # Several of a person's directory sources can be combined into one run - the same college, say, might be
         # missing from one directory and present in another, and listing expansion already dedupes by name across
         # every list it reads, so combining sources only ever adds coverage, never doubles a name up.
@@ -412,16 +585,16 @@ def create_job():
         source_rows = []
         for sid in raw_ids[:10]:
             try:
-                row = DirectorySource.query.filter_by(id=int(sid), owner_id=current_user.id).first()
+                row = DirectorySource.query.filter_by(id=int(sid), owner_id=user_id).first()
             except (TypeError, ValueError):
                 row = None
             if row:
                 source_rows.append(row)
         if not queries and not source_rows:
-            return jsonify(error="Add at least one search, or pick one or more of your directory sources."), 400
-        fields = [f for f in d.get("fields", []) if f in extract.STANDARD_FIELDS]
+            return None, "Add at least one search, or pick one or more of your directory sources.", 400
+        fields = [f for f in (d.get("fields", []) or []) if f in extract.STANDARD_FIELDS]
         if not fields and not custom:
-            return jsonify(error="Pick at least one detail to collect."), 400
+            return None, "Pick at least one detail to collect.", 400
         platforms = [p for p in (d.get("platforms") or ["web"])
                      if p in ("web", "linkedin.com", "facebook.com", "instagram.com", "twitter.com")] or ["web"]
         spec = {"mode": "web", "queries": queries,
@@ -431,7 +604,21 @@ def create_job():
                 "follow_contact": bool(d.get("follow_contact", True)), "one_per_site": bool(d.get("one_per_site")),
                 "require": d.get("require") if d.get("require") in ("emails", "phones", "any_contact") else "",
                 **common}
+    return spec, None, 200
+
+
+@app.post("/api/jobs")
+@roles_required("admin", "member")
+def create_job():
+    d = request.get_json(force=True)
+    vault = _effective_vault(current_user.id, current_user.role)
+    spec, err, code = build_job_spec(d, vault, current_user.id)
+    if err:
+        return jsonify(error=err), code
     job = start_job(spec, current_user.id)
+    from models import log_audit
+
+    log_audit(current_user.id, "job.started", f"{spec.get('mode', 'web')} run {job.id}")
     return jsonify(id=job.id)
 
 
@@ -445,7 +632,11 @@ def job_status(job_id):
 @app.post("/api/jobs/<job_id>/stop")
 @login_required
 def stop_job(job_id):
-    _own_job(job_id).cancelled.set()
+    job = _own_job(job_id)
+    job.cancelled.set()
+    from scraper import queue as _queue
+
+    _queue.request_cancel(job_id)  # reaches queue workers; harmless for thread runs
     return jsonify(ok=True)
 
 
@@ -467,6 +658,109 @@ def forget_job(job_id):
     if job.status in ("queued", "running"):
         return jsonify(error="Stop the run first."), 409
     JOBS.pop(job_id, None)
+    from scraper import job_store
+
+    job_store.discard(job_id)
+    return jsonify(ok=True)
+
+
+# ---------------------------------------------------------------- schedules (Phase 5C)
+
+MAX_SCHEDULES_PER_USER = 20
+
+
+def _schedule_json(row) -> dict:
+    from scraper.scheduler import describe_cron
+
+    return {"id": row.id, "name": row.name, "cron": row.cron,
+            "when": describe_cron(row.cron), "enabled": bool(row.enabled),
+            "last_triggered": row.last_triggered_at.strftime("%Y-%m-%dT%H:%M:%SZ") if row.last_triggered_at else "",
+            "last_status": row.last_status or "",
+            "created": row.created_at.strftime("%Y-%m-%dT%H:%M:%SZ") if row.created_at else ""}
+
+
+@app.get("/api/schedules")
+@login_required
+def list_schedules():
+    from models import Schedule
+
+    rows = Schedule.query.filter_by(owner_id=current_user.id).order_by(Schedule.name).all()
+    return jsonify(schedules=[_schedule_json(r) for r in rows])
+
+
+@app.post("/api/schedules")
+@roles_required("admin", "member")
+def save_schedule():
+    from models import Schedule
+    from scraper.scheduler import CronError, parse_cron
+
+    d = request.get_json(force=True, silent=True) or {}
+    row = None
+    if d.get("id"):
+        try:
+            row = Schedule.query.filter_by(id=int(d["id"]), owner_id=current_user.id).first()
+        except (TypeError, ValueError):
+            row = None
+        if not row:
+            return jsonify(error="That schedule was not found."), 404
+        # Update: every field is optional and keeps its current value when absent.
+        if "name" in d:
+            name = (d.get("name") or "").strip()[:120]
+            if not name:
+                return jsonify(error="Give this schedule a name."), 400
+            row.name = name
+        if "cron" in d:
+            try:
+                parse_cron(d.get("cron") or "")
+            except CronError as e:
+                return jsonify(error=f"That schedule doesn't read as a time: {e}"), 400
+            row.cron = (d.get("cron") or "").strip()[:20]
+        if isinstance(d.get("body"), dict) and d.get("body"):
+            vault = _effective_vault(current_user.id, current_user.role)
+            _spec, err, _code = build_job_spec(d["body"], vault, current_user.id, enforce_budget=False)
+            if err:
+                return jsonify(error=f"That run can't be repeated as-is: {err}"), 400
+            row.body_json = json.dumps(d["body"], ensure_ascii=False)
+        if "enabled" in d:
+            row.enabled = bool(d["enabled"])
+        db.session.commit()
+        return jsonify(_schedule_json(row))
+    if Schedule.query.filter_by(owner_id=current_user.id).count() >= MAX_SCHEDULES_PER_USER:
+        return jsonify(error=f"You can keep up to {MAX_SCHEDULES_PER_USER} schedules. Remove one first."), 400
+    name = (d.get("name") or "").strip()[:120]
+    if not name:
+        return jsonify(error="Give this schedule a name."), 400
+    try:
+        parse_cron(d.get("cron") or "")
+    except CronError as e:
+        return jsonify(error=f"That schedule doesn't read as a time: {e}"), 400
+    body = d.get("body")
+    if not isinstance(body, dict) or not body:
+        return jsonify(error="Nothing to repeat: pick a run first."), 400
+    vault = _effective_vault(current_user.id, current_user.role)
+    _spec, err, _code = build_job_spec(body, vault, current_user.id, enforce_budget=False)
+    if err:
+        return jsonify(error=f"That run can't be repeated as-is: {err}"), 400
+    row = Schedule(owner_id=current_user.id)
+    db.session.add(row)
+    row.name, row.cron = name, (d.get("cron") or "").strip()[:20]
+    row.body_json = json.dumps(body, ensure_ascii=False)
+    if "enabled" in d:
+        row.enabled = bool(d["enabled"])
+    db.session.commit()
+    return jsonify(_schedule_json(row))
+
+
+@app.delete("/api/schedules/<int:sid>")
+@roles_required("admin", "member")
+def delete_schedule(sid):
+    from models import Schedule
+
+    row = Schedule.query.filter_by(id=sid, owner_id=current_user.id).first()
+    if not row:
+        return jsonify(error="That schedule was not found."), 404
+    db.session.delete(row)
+    db.session.commit()
     return jsonify(ok=True)
 
 
@@ -517,6 +811,9 @@ def get_settings():
         ai_provider=v.get("ai_provider", "anthropic"), ai_model=v.get("ai_model", ""), ai_base_url=v.get("ai_base_url", ""),
         ai_key_mask=_mask(v.get("ai_api_key", "")),
         brave_key_mask=_mask(v.get("brave_api_key", "")),
+        brightdata_key_mask=_mask(v.get("brightdata_api_key", "")),
+        apify_key_mask=_mask(v.get("apify_api_key", "")),
+        org_keys=_org_key_names(current_user.role),
         restricted=_restricted_enabled(),
         li_cookie_mask=_mask(v.get("li_at_cookie", "")), fb_cookie_mask=_mask(v.get("fb_cookie", "")),
     )
@@ -640,7 +937,8 @@ def test_brave_key():
 @login_required
 def save_settings():
     d = request.get_json(force=True)
-    allowed = {"ai_provider", "ai_model", "ai_base_url", "ai_api_key", "brave_api_key"}
+    allowed = {"ai_provider", "ai_model", "ai_base_url", "ai_api_key", "brave_api_key",
+               "brightdata_api_key", "apify_api_key", "apify_actor"}
     if _restricted_enabled():
         allowed |= {"li_at_cookie", "fb_cookie"}
     for key, value in d.items():
@@ -649,7 +947,8 @@ def save_settings():
         value = (value or "").strip()
         if key == "ai_provider" and value not in ai_extract.PROVIDERS:
             continue
-        if key in ("ai_api_key", "brave_api_key", "li_at_cookie", "fb_cookie") and value == "__keep__":
+        if key in ("ai_api_key", "brave_api_key", "li_at_cookie", "fb_cookie",
+                   "brightdata_api_key", "apify_api_key") and value == "__keep__":
             continue  # the browser never sees the saved secret; "__keep__" means "leave it unchanged"
         cred = VaultCredential.query.filter_by(owner_id=current_user.id, name=key).first()
         if not value:
@@ -659,7 +958,8 @@ def save_settings():
         if not cred:
             cred = VaultCredential(owner_id=current_user.id, name=key,
                                    platform="ai" if key.startswith("ai_") else ("search" if key == "brave_api_key" else "social"),
-                                   credential_type="api_key" if key in ("ai_api_key", "brave_api_key") else "setting")
+                                   credential_type="api_key" if key in ("ai_api_key", "brave_api_key",
+                                                                        "brightdata_api_key", "apify_api_key") else "setting")
             db.session.add(cred)
         cred.encrypted_value = encrypt(value)
     db.session.commit()
@@ -774,6 +1074,11 @@ def create_share():
                passcode_enc=encrypt(passcode) if passcode else None, acknowledged=external, views=0, downloads=0)
     db.session.add(sh)
     db.session.commit()
+    from models import log_audit
+
+    log_audit(current_user.id, "share.created",
+              f"{'customer link for ' + (customer or '') if external else 'colleague share'} "
+              f"'{sh.name}' ({sh.row_count} rows)")
     return jsonify(_share_meta(sh, _user_names()))
 
 
@@ -830,8 +1135,13 @@ def stop_share(share_id):
     sh = db.session.get(Share, share_id)
     if not sh or (sh.owner_id != current_user.id and not current_user.is_admin):
         abort(404)
+    kind = "customer link" if sh.is_external else "colleague share"
+    name = sh.name
     db.session.delete(sh)
     db.session.commit()
+    from models import log_audit
+
+    log_audit(current_user.id, "share.stopped", f"{kind} '{name}'")
     return jsonify(ok=True)
 
 
@@ -999,7 +1309,15 @@ def admin_edit_user(user_id):
 @app.get("/api/admin/settings")
 @roles_required("admin")
 def admin_get_settings():
+    from scraper.proxy import status as _proxy_status
+
     return jsonify(allow_restricted=_restricted_enabled(),
+                   pacing_preset=AppSetting.get("pacing_preset", "standard"),
+                   proxy_enabled=AppSetting.get("proxy_enabled", "0") == "1",
+                   proxy_search=AppSetting.get("proxy_search", "0") == "1",
+                   proxy_fetch=AppSetting.get("proxy_fetch", "0") == "1",
+                   proxy_cap_mb=AppSetting.get("proxy_cap_mb", "0"),
+                   proxy_status=_proxy_status(),
                    database={**DB_STATE, "persistent": DB_STATE["kind"] != "sqlite", "on_server": ON_SERVER})
 
 
@@ -1009,8 +1327,424 @@ def admin_save_settings():
     d = request.get_json(force=True)
     if "allow_restricted" in d:
         AppSetting.set("allow_restricted", "1" if d["allow_restricted"] else "0")
+    if str(d.get("pacing_preset", "")).lower() in ("conservative", "standard", "fast"):
+        AppSetting.set("pacing_preset", str(d["pacing_preset"]).lower())
+    for flag in ("proxy_enabled", "proxy_search", "proxy_fetch"):
+        if flag in d:
+            AppSetting.set(flag, "1" if d[flag] else "0")
+    if "proxy_cap_mb" in d:
+        try:
+            cap = max(0.0, float(d["proxy_cap_mb"] or 0))
+        except (TypeError, ValueError):
+            return jsonify(error="The proxy cap must be a number of megabytes."), 400
+        AppSetting.set("proxy_cap_mb", str(cap))
     db.session.commit()
     return jsonify(ok=True)
+
+
+# ----------------------------------------------------------------
+# Connection health & budget management (Phase 2)
+# ----------------------------------------------------------------
+
+
+@app.get("/api/connections/status")
+@login_required
+def connections_status():
+    """Member-visible connection summary. No keys or secrets, only flags + health + own spend."""
+    from scraper.config import SERVICES
+    from scraper.connection_health import HEALTH_CACHE, status_string
+
+    enabled = _enabled_map()
+    services = {}
+    for name, meta in SERVICES.items():
+        entry = HEALTH_CACHE.get(name, {})
+        services[name] = {
+            "label": meta["label"],
+            "kind": meta["kind"],
+            "enabled": enabled.get(name, True),
+            "healthy": bool(entry.get("healthy", False)),
+            "error": (entry.get("error", "") or "")[:100],
+        }
+    social_spend = None
+    try:
+        from scraper.jobs import _budget_pct, _social_limits, _social_spend
+
+        lim_usd, lim_inr = _social_limits()
+        sp_usd, sp_inr = _social_spend(current_user.id)
+        social_spend = {"spent_usd": round(sp_usd, 2), "spent_inr": sp_inr,
+                        "limit_usd": lim_usd, "limit_inr": lim_inr,
+                        "pct": round(_budget_pct(sp_usd, sp_inr, lim_usd, lim_inr) * 100),
+                        "budget_set": bool(lim_usd > 0 or lim_inr > 0)}
+    except Exception:
+        pass
+    return jsonify(
+        services=services,
+        status_string=status_string(
+            {k: {"healthy": v["healthy"], "error": v["error"]} for k, v in services.items()},
+            enabled,
+        ),
+        social_spend=social_spend,
+    )
+
+
+@app.post("/api/social/estimate")
+@roles_required("admin", "member")
+def social_estimate():
+    """Worst-case paid estimate for a social list, before starting. No job created, no spend."""
+    d = request.get_json(force=True, silent=True) or {}
+    items, _plats, err = _parse_social_items(d)
+    if err:
+        return jsonify(error=err), 400
+    if not items:
+        return jsonify(error="Add at least one profile first."), 400
+    vault = _effective_vault(current_user.id, current_user.role)
+    probe = {"mode": "social", "items": items, "custom_fields": [],
+             "brightdata_key": vault.get("brightdata_api_key", ""),
+             "apify_key": vault.get("apify_api_key", ""),
+             "apify_actor": vault.get("apify_actor", "")}
+    from scraper.jobs import _budget_pct, _social_limits, _social_spend, preflight as _pre
+    from scraper.social_base import estimate_cost
+
+    eff = _pre(probe)
+    providers = eff.get("social", [])
+    free_only = bool(d.get("free_only", False))
+    if free_only:
+        providers = []
+    est_usd, est_inr = estimate_cost(len(items), providers)
+    lim_usd, lim_inr = _social_limits()
+    sp_usd, sp_inr = _social_spend(current_user.id)
+    budget_set = bool(lim_usd > 0 or lim_inr > 0)
+    over = budget_set and ((lim_usd > 0 and sp_usd + est_usd > lim_usd) or (lim_inr > 0 and sp_inr + est_inr > lim_inr))
+    blocked = bool(providers) and (not budget_set or over)
+    return jsonify(items=len(items), providers=providers, free_only=free_only,
+                   estimate_usd=est_usd, estimate_inr=est_inr,
+                   spent_usd=round(sp_usd, 2), spent_inr=sp_inr,
+                   limit_usd=lim_usd, limit_inr=lim_inr, budget_set=budget_set,
+                   pct=round(_budget_pct(sp_usd, sp_inr, lim_usd, lim_inr) * 100),
+                   blocked=blocked,
+                   note=("Paid enrichment needs a monthly budget first." if providers and not budget_set
+                         else ("This list would exceed the remaining budget." if over else "")))
+
+
+def _enabled_map() -> dict[str, bool]:
+    from scraper.config import SERVICES
+
+    return {name: (AppSetting.get(f"conn_{name}", meta.get("default", "1")) == "1")
+            for name, meta in SERVICES.items()}
+
+
+@app.get("/api/admin/connections")
+@roles_required("admin")
+def admin_get_connections():
+    """Health + enable state for every registered service. Never probes network inline."""
+    from scraper.config import SERVICES
+    from scraper.connection_health import HEALTH_CACHE, status_string
+
+    enabled = _enabled_map()
+    services = {}
+    for name, meta in SERVICES.items():
+        entry = HEALTH_CACHE.get(name, {})
+        services[name] = {
+            "label": meta["label"],
+            "kind": meta["kind"],
+            "needs_key": meta["needs_key"],
+            "enabled": enabled.get(name, True),
+            "healthy": bool(entry.get("healthy", False)),
+            "error": (entry.get("error", "") or "")[:100],
+            "last_checked": entry.get("checked_at", 0),
+        }
+    return jsonify(
+        services=services,
+        status_string=status_string(
+            {k: {"healthy": v["healthy"], "error": v["error"]} for k, v in services.items()},
+            enabled,
+        ),
+    )
+
+
+@app.post("/api/admin/connections/<svc_name>")
+@roles_required("admin")
+def admin_toggle_connection(svc_name: str):
+    """Flip or set enable flag. Non-blocking: never runs network probes."""
+    from scraper.config import SERVICES
+    from scraper.connection_health import HEALTH_CACHE, status_string
+
+    if svc_name not in SERVICES:
+        return jsonify(error=f"Unknown service: {svc_name}"), 400
+    d = request.get_json(force=True, silent=True) or {}
+    enabled = d.get("enabled", None)
+    key = f"conn_{svc_name}"
+    if enabled is None:
+        new_value = "0" if AppSetting.get(key, "1") == "1" else "1"
+    else:
+        new_value = "1" if enabled else "0"
+    AppSetting.set(key, new_value)
+    db.session.commit()
+    enabled_map = _enabled_map()
+    services = {
+        n: {"healthy": bool(HEALTH_CACHE.get(n, {}).get("healthy", False)),
+            "error": HEALTH_CACHE.get(n, {}).get("error", "")} for n in SERVICES
+    }
+    return jsonify(ok=True, service=svc_name, enabled=new_value,
+                   status_string=status_string(services, enabled_map))
+
+
+@app.post("/api/admin/connections/test")
+@roles_required("admin")
+def admin_test_connection():
+    """Probe a single service on demand and persist result."""
+    from models import ConnectionHealth
+    from scraper.connection_health import HEALTH_CACHE, refresh_single, status_string
+
+    d = request.get_json(force=True, silent=True) or {}
+    name = (d.get("name") or "").strip()
+    if not name:
+        return jsonify(error="Give a service name."), 400
+    result = refresh_single(name)
+    try:
+        ConnectionHealth.upsert(name, bool(result.get("healthy")), result.get("error", ""))
+        db.session.commit()
+    except Exception:
+        db.session.rollback()
+    enabled_map = _enabled_map()
+    services = {
+        n: {"healthy": bool(HEALTH_CACHE.get(n, {}).get("healthy", False)),
+            "error": HEALTH_CACHE.get(n, {}).get("error", "")} for n in enabled_map
+    }
+    return jsonify(ok=True, service=name, result=result,
+                   status_string=status_string(services, enabled_map))
+
+
+@app.post("/api/admin/connections/test-all")
+@roles_required("admin")
+def admin_test_all_connections():
+    """Kick off background refresh of keyless services. Returns immediately."""
+    import threading
+
+    def _bg():
+        with app.app_context():
+            from models import ConnectionHealth
+            from scraper.connection_health import (
+                HEALTH_CACHE, check_ddgs, check_nominatim, check_overpass,
+                check_photon, check_wikidata,
+            )
+            for name, fn in (("overpass", check_overpass), ("photon", check_photon),
+                             ("nominatim", check_nominatim), ("wikidata", check_wikidata),
+                             ("ddgs", check_ddgs)):
+                try:
+                    r = fn()
+                    ConnectionHealth.upsert(name, bool(r.get("healthy")), r.get("error", ""))
+                    db.session.commit()
+                except Exception:
+                    db.session.rollback()
+
+    threading.Thread(target=_bg, daemon=True).start()
+    return jsonify(ok=True, started=True)
+
+
+@app.get("/api/admin/budgets")
+@roles_required("admin")
+def admin_get_budgets():
+    """Return monthly budget usage across all users (or global row)."""
+    from models import MonthlyBudget
+
+    # If global row exists (user_id=NULL), use it; otherwise create one on the fly
+    global_budget = MonthlyBudget.query.filter_by(user_id=None).first()
+    if not global_budget:
+        global_budget = MonthlyBudget(user_id=None, service="global")
+        db.session.add(global_budget)
+        db.session.commit()
+
+    # Also fetch per-user budgets for active users
+    users_budgets = {}
+    for user in User.query.filter_by(is_active_user=True).all():
+        ub = MonthlyBudget.query.filter_by(user_id=user.id).first()
+        if ub:
+            users_budgets[user.username] = {
+                "service": ub.service,
+                "spent_inr": ub.spent_inr,
+                "spent_usd": ub.spent_usd,
+                "reset_on": ub.reset_on,
+            }
+
+    return jsonify(
+        global_budget={
+            "service": global_budget.service,
+            "spent_inr": global_budget.spent_inr,
+            "spent_usd": global_budget.spent_usd,
+            "reset_on": global_budget.reset_on,
+        },
+        users=users_budgets,
+        limits={
+            "social_budget_inr": AppSetting.get("social_budget_inr", "0"),
+            "social_budget_usd": AppSetting.get("social_budget_usd", "0"),
+            "ai_budget_inr": AppSetting.get("ai_budget_inr", "0"),
+            "ai_budget_usd": AppSetting.get("ai_budget_usd", "0"),
+        },
+    )
+
+
+@app.post("/api/admin/budgets")
+@roles_required("admin")
+def admin_save_budgets():
+    """Save monthly budget limits (stored as AppSetting for now, with MonthlyBudget row tracking spend)."""
+    d = request.get_json(force=True) or {}
+
+    # Store budget targets in AppSetting (admin-configurable thresholds)
+    for key in ("social_budget_inr", "social_budget_usd", "ai_budget_inr", "ai_budget_usd"):
+        if key in d:
+            AppSetting.set(key, str(d[key]))
+
+    db.session.commit()
+    return jsonify(ok=True)
+
+
+# ---------------------------------------------------------------- org keys + audit (Phase 5D)
+
+ORG_KEY_ROLES = ("admin", "member", "viewer")
+
+
+def _org_json(row) -> dict:
+    return {"name": row.name, "platform": row.platform, "roles": row.roles(),
+            "masked": _mask(row.value()),
+            "updated": row.updated_at.strftime("%Y-%m-%dT%H:%M:%SZ") if row.updated_at else ""}
+
+
+@app.get("/api/admin/org-keys")
+@roles_required("admin")
+def admin_org_keys():
+    """Shared keys: names + masked values only. Values never leave the server."""
+    from models import OrgCredential
+
+    return jsonify(keys=[_org_json(c) for c in OrgCredential.query.order_by(OrgCredential.name).all()],
+                   shareable=sorted(ORG_SHAREABLE))
+
+
+@app.post("/api/admin/org-keys")
+@roles_required("admin")
+def admin_save_org_key():
+    from models import OrgCredential, log_audit
+
+    d = request.get_json(force=True, silent=True) or {}
+    name = (d.get("name") or "").strip()
+    if name not in ORG_SHAREABLE:
+        return jsonify(error=f"Only these keys can be shared: {', '.join(sorted(ORG_SHAREABLE))}."), 400
+    value = (d.get("value") or "").strip()
+    if value == "__keep__":
+        if not cred:
+            return jsonify(error="Nothing to save."), 400
+        if "roles" in d:  # roles-only update; the saved value is untouched
+            roles = d.get("roles", ["admin", "member"])
+            if not isinstance(roles, list) or not roles:
+                return jsonify(error="Pick at least one role."), 400
+            roles = sorted({r for r in roles if r in ORG_KEY_ROLES})
+            if not roles:
+                return jsonify(error="Pick at least one role."), 400
+            cred.roles_json = json.dumps(roles)
+            db.session.commit()
+            return jsonify(ok=True, key=_org_json(cred))
+        return jsonify(error="Nothing to save."), 400
+    roles = d.get("roles", ["admin", "member"])
+    if not isinstance(roles, list) or not roles:
+        return jsonify(error="Pick at least one role."), 400
+    roles = sorted({r for r in roles if r in ORG_KEY_ROLES})
+    if not roles:
+        return jsonify(error="Pick at least one role."), 400
+    cred = OrgCredential.query.filter_by(name=name).first()
+    if not value:
+        if cred:
+            db.session.delete(cred)
+            db.session.commit()
+            log_audit(current_user.id, "org_key.deleted", name)
+        return jsonify(ok=True, deleted=True)
+    if not cred:
+        cred = OrgCredential(name=name, platform="social" if "brightdata" in name or "apify" in name
+                             else ("search" if name == "brave_api_key" else "ai"),
+                             credential_type="api_key")
+        db.session.add(cred)
+    from models import encrypt as _enc
+
+    cred.encrypted_value = _enc(value)
+    cred.roles_json = json.dumps(roles)
+    db.session.commit()
+    log_audit(current_user.id, "org_key.saved", f"{name} for {', '.join(roles)}")
+    return jsonify(ok=True, key=_org_json(cred))
+
+
+@app.delete("/api/admin/org-keys/<name>")
+@roles_required("admin")
+def admin_delete_org_key(name):
+    from models import OrgCredential, log_audit
+
+    cred = OrgCredential.query.filter_by(name=name).first()
+    if not cred:
+        return jsonify(error="That shared key was not found."), 404
+    db.session.delete(cred)
+    db.session.commit()
+    log_audit(current_user.id, "org_key.deleted", name)
+    return jsonify(ok=True)
+
+
+@app.get("/api/admin/audit")
+@roles_required("admin")
+def admin_audit():
+    """Newest-first ops trail. `limit` capped at 500, optional `?user=<id>` filter."""
+    from models import AuditLog
+
+    try:
+        limit = max(1, min(int(request.args.get("limit") or 100), 500))
+    except (TypeError, ValueError):
+        limit = 100
+    q = AuditLog.query.order_by(AuditLog.id.desc())
+    if (request.args.get("user") or "").strip().isdigit():
+        q = q.filter_by(user_id=int(request.args["user"]))
+    rows = q.limit(limit).all()
+    return jsonify([{"id": r.id, "user": r.username, "user_id": r.user_id, "action": r.action,
+                     "detail": r.detail or "",
+                     "at": r.created_at.strftime("%Y-%m-%dT%H:%M:%SZ") if r.created_at else ""}
+                    for r in rows])
+
+
+# ----------------------------------------------------------------
+# End Phase 3 admin APIs
+# ----------------------------------------------------------------
+
+
+@app.get("/healthz")
+def healthz():
+    """Load-balancer health: database, job store, and Redis when in worker mode.
+    Public and secret-free by design."""
+    from sqlalchemy import text as _text
+
+    parts = {}
+    try:
+        db.session.execute(_text("SELECT 1"))
+        parts["database"] = "ok"
+    except Exception as e:
+        parts["database"] = type(e).__name__
+    try:
+        from scraper import job_store as _js
+
+        _js.job_dir()
+        parts["store"] = "ok"
+    except Exception as e:
+        parts["store"] = type(e).__name__
+    try:
+        from scraper import queue as _queue
+
+        if _queue.worker_mode() == "rq":
+            from redis import Redis
+
+            Redis.from_url(_queue.REDIS_URL, socket_timeout=2).ping()
+            parts["redis"] = "ok"
+        else:
+            parts["redis"] = "skipped"
+    except ImportError:
+        parts["redis"] = "skipped"
+    except Exception as e:
+        parts["redis"] = type(e).__name__
+    ok = all(v in ("ok", "skipped") for v in parts.values())
+    return jsonify(ok=ok, **parts), (200 if ok else 503)
 
 
 @app.errorhandler(413)

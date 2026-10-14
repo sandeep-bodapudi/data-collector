@@ -12,6 +12,7 @@
    which engine actually answered.
 """
 import hashlib
+import json
 import os
 import threading
 import time
@@ -155,10 +156,35 @@ def _google_cse(query: str, region: str, max_results: int, api_key: str, cx: str
     return out[:max_results]
 
 
+def _enabled(name: str) -> bool:
+    try:
+        from .config import is_enabled
+
+        return is_enabled(name)
+    except Exception:
+        return True
+
+
+def _cache_says_unhealthy(name: str) -> bool:
+    try:
+        from .connection_health import HEALTH_CACHE, _is_cache_fresh
+
+        if _is_cache_fresh(name):
+            return not bool(HEALTH_CACHE.get(name, {}).get("healthy", True))
+    except Exception:
+        pass
+    return False
+
+
 def web_search(query: str, region: str, max_results: int, say, engines=None) -> list[dict]:
     """`engines` (optional) chooses which free engines to try, in order. The default order is FREE_ENGINES."""
     key = _brave_key()
-    if key and not brave_exhausted(key):
+    brave_allowed = _enabled("brave") and not _cache_says_unhealthy("brave")
+    if not _enabled("brave"):
+        say("  skipped Brave (disabled in Admin → Connections)")
+    elif _cache_says_unhealthy("brave"):
+        say("  skipped Brave (last health check failed)")
+    if key and not brave_exhausted(key) and brave_allowed:
         try:
             hits = _brave(query, region, max_results, key)
             if hits:
@@ -171,9 +197,14 @@ def web_search(query: str, region: str, max_results: int, say, engines=None) -> 
                     f"the rest of this run, which will take longer than usual - nothing has failed.")
         except requests.RequestException as e:
             say(f"  Brave API failed ({e}); trying other options")
+    elif key and brave_exhausted(key):
+        say("  skipped Brave (quota exhausted earlier this run); trying other options")
 
+    g_allowed = _enabled("google_cse")
+    if not g_allowed:
+        say("  skipped Google CSE (disabled in Admin → Connections)")
     g_key, g_cx = os.environ.get("GOOGLE_CSE_KEY"), os.environ.get("GOOGLE_CSE_CX")
-    if g_key and g_cx:
+    if g_key and g_cx and g_allowed:
         try:
             hits = _google_cse(query, region, max_results, g_key, g_cx)
             if hits:
@@ -187,8 +218,20 @@ def web_search(query: str, region: str, max_results: int, say, engines=None) -> 
     # engine that returned *anything* (the old behaviour) is why a "200 results" run could come back with 9 rows.
     # So: keep querying further engines and merge their results (by URL) until max_results is reached or every
     # engine has been tried.
+    if not _enabled("ddgs"):
+        say("  skipped free engines (disabled in Admin → Connections)")
+        raise SearchBlocked("All search options are disabled. Enable Brave, Google CSE or free engines in Admin → Connections.")
     merged, seen_href, failed, used = [], set(), [], []
-    with DDGS(timeout=FREE_ENGINE_TIMEOUT) as ddgs:
+    try:
+        from .proxy import account as _proxy_account
+        from .proxy import proxy_for as _proxy_for
+
+        _search_proxy = _proxy_for("search") or ""
+    except Exception:
+        _search_proxy, _proxy_account = "", lambda n: None
+    if _search_proxy:
+        say("  searching through the company proxy")
+    with DDGS(timeout=FREE_ENGINE_TIMEOUT, **({"proxy": _search_proxy} if _search_proxy else {})) as ddgs:
         for i, engine in enumerate(engines or FREE_ENGINES):
             remaining = max_results - len(merged)
             if remaining <= 0:
@@ -197,6 +240,11 @@ def web_search(query: str, region: str, max_results: int, say, engines=None) -> 
                 time.sleep(FREE_ENGINE_GAP)
             try:
                 hits = ddgs.text(query, region=region, max_results=remaining, backend=engine) or []
+                if _search_proxy:
+                    try:
+                        _proxy_account(len(json.dumps(hits, ensure_ascii=False).encode("utf-8")))
+                    except Exception:
+                        pass
             except Exception as e:  # each engine fails in its own way (blocked, rate limited, no results)
                 failed.append(f"{engine}: no results" if "no results" in str(e).lower() else f"{engine}: {str(e)[:60]}")
                 continue
