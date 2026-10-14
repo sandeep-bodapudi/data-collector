@@ -707,6 +707,36 @@ j_junk.spec = {"queries": [junk_query], "platforms": ["web"], "max_results": 50,
 rows_junk, _ = jobs._search(j_junk)
 ok("end to end: an all-junk answer yields no rows (honest empty, not junk rows)", rows_junk == [], rows_junk)
 ok("the log still explains the skips", any("unrelated" in m and "skipped" in m for m in j_junk.log), j_junk.log)
+
+# ---- aggregator-shaped pages are directories, never company rows ---------------------------
+# Real failure, live: a GitHub Topics hub (github.com/topics/digital-marketing) was kept as
+# a company row for "digital marketing coaching centers in Ameerpet, Hyderabad" on the
+# strength of one shared word in its title. Hub/tag/search/list pages list many things;
+# none of them IS one company, so they join the directory bucket instead.
+ok("a topics hub is an aggregator page", jobs._is_aggregator_page("https://github.com/topics/digital-marketing") is True)
+ok("an on-site search page is an aggregator page", jobs._is_aggregator_page("https://example.com/?s=digital") is True)
+ok("a numbered top-N list is an aggregator page", jobs._is_aggregator_page("https://blog.example/top-10-institutes-hyderabad") is True)
+ok("a company's own services page is not", jobs._is_aggregator_page("https://abc-digital.example/best-services") is False)
+ok("a homepage is not", jobs._is_aggregator_page("https://abc-digital.example/") is False)
+ok("a profile page is not", jobs._is_aggregator_page("https://linkedin.com/in/some-person") is False)
+agg_hits = [
+    {"title": "digital-marketing · GitHub Topics · GitHub", "body": "repositories about digital marketing",
+     "href": "https://github.com/topics/digital-marketing"},
+    {"title": "Digital Marketing Courses in Ameerpet - Justdial", "body": "listings in Ameerpet, Hyderabad",
+     "href": "https://www.justdial.com/Hyderabad/Digital-Marketing-Courses-in-Ameerpet/nct-123"},
+    {"title": "ABC Digital Marketing Institute, Ameerpet", "body": "courses in Ameerpet, Hyderabad",
+     "href": "https://abc-digital.example/"},
+]
+jobs.web_search = lambda q, region, n, say: agg_hits
+j_agg = FakeJob2()
+j_agg.spec = {"queries": ["digital marketing coaching centers in Ameerpet, Hyderabad"], "platforms": ["web"],
+              "max_results": 50, "one_per_site": False, "region": "in-en"}
+rows_agg, _ = jobs._search(j_agg)
+ok("end to end: the hub is bucketed as directory, the real institute is the only row",
+   [r["url"] for r in rows_agg] == ["https://abc-digital.example/"], rows_agg)
+ok("the log counts hub + directory as directory (the hub would otherwise pass on area confirmation)",
+   any("2 directory/listing" in m for m in j_agg.log), j_agg.log)
+jobs.web_search = real_jobs_web_search
 jobs.web_search = real_jobs_web_search
 
 # ---- _keep(): the "Keep only rows that have" filter, exercised directly - had no test at all until now -----------
@@ -1050,6 +1080,30 @@ ok("the same key is spaced out: the 2nd and 3rd requests wait, the 1st does not"
    len(waits) == 2 and all(w > 0 for w in waits), waits)
 ok("a different key is not delayed by the first key's requests", len(waits) == 2)
 jobs.discover.find_website = real_find_for_parallel if 'real_find_for_parallel' in globals() else jobs.discover.find_website
+
+# ---- Coaching & training centers: a live-verified category, not a guessed tag -----------------
+# Verified live against Ameerpet, Hyderabad: [office=educational_institution] alone also matches
+# ordinary schools, while amenity=training / amenity=coaching / shop=training returned nothing
+# at all (not real tags in use). The name pattern keeps coaching institutes ("Mahendras
+# coaching center", "Race institute") and drops schools ("Brilliant Grammar High School").
+ok("coaching centers map to the verified tag + name filter",
+   places.CATEGORIES["Coaching & training centers"] == ['[office=educational_institution][name~"coach|train|tutor|tuition|academy|institute",i]'],
+   places.CATEGORIES["Coaching & training centers"])
+ok("coaching centers have a fallback hint word",
+   places.FALLBACK_HINT["Coaching & training centers"][0] == "coaching center")
+_coaching_overpass = places._overpass
+places._overpass = lambda q, notify=None: [
+    {"type": "node", "lat": 17.43, "lon": 78.44,
+     "tags": {"name": "Mahendras coaching center", "addr:full": "Ameerpet"}},
+    {"type": "node", "lat": 17.44, "lon": 78.45,
+     "tags": {"name": "Race institute", "addr:full": "Ameerpet"}}]
+try:
+    coaching_rows = places.search_places("Coaching & training centers", "Ameerpet, Hyderabad", "", 50)
+finally:
+    places._overpass = _coaching_overpass
+ok("coaching search flows end to end with map data kept",
+   [(r["Name"], r["Address"]) for r in coaching_rows] == [("Mahendras coaching center", "Ameerpet"),
+                                                          ("Race institute", "Ameerpet")], coaching_rows)
 
 
 print(f"\n{len(failures)} failure(s)" if failures else "\nAll tests passed")

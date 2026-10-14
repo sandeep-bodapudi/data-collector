@@ -78,6 +78,11 @@ CATEGORIES = {
     "Parks": ['[leisure=park]'],
     "Co-working spaces": ['[office=coworking]'],
     "Dry cleaners & laundry": ['[shop=laundry]'],
+    # Live-verified against Ameerpet, Hyderabad: the unfiltered tag also matches ordinary
+    # schools, so the name pattern keeps coaching/training institutes and drops them.
+    # amenity=training, amenity=coaching and shop=training were checked the same way and
+    # returned nothing - they are not real OSM tags in use here.
+    "Coaching & training centers": ['[office=educational_institution][name~"coach|train|tutor|tuition|academy|institute",i]'],
 }
 
 # Names that say it is not an engineering college (unless the name also says engineering/technology).
@@ -298,6 +303,7 @@ FALLBACK_HINT = {
     "Railway stations": ("railway station", None), "Accountants": ("accountant", None),
     "Car wash": ("car wash", None), "Courthouses": ("courthouse", None), "Parks": ("park", None),
     "Co-working spaces": ("co-working space", None), "Dry cleaners & laundry": ("dry cleaner", None),
+    "Coaching & training centers": ("coaching center", None),
 }
 
 

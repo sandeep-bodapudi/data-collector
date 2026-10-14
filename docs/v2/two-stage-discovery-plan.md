@@ -186,6 +186,26 @@ have produced empty sheets — fixed and covered.
 - Two prior enrich tests were updated to the approved two-stage semantics (rows
   missing a website count as needing work; Status column appended).
 
+## Relevance follow-up, part 2 (user report: aggregator hub kept as a company row)
+
+- A GitHub Topics hub passed on one shared title word plus directory-area
+  confirmation. Fix: aggregator-shaped URLs (tag/topic hubs, on-site search, numbered
+  top-N lists, list indexes) join the directory bucket in `_search` — expanded when a
+  parser exists, otherwise counted and dropped, never kept as rows. Company service
+  pages, homepages and profile URLs are explicitly not matched. Covered by 8 new
+  tests; every prior relevance test still passes unchanged.
+
+## Directory reality check (same report: "100s of companies in a single website")
+
+- JustDial serves an empty bot-wall shell (`<HTML></HTML>`) to server-side fetches,
+  so no JustDial parser can work from here; a guessed Sulekha URL 404'd. Per the
+  no-guessed-parsers rule, neither was added — they stay visible as counted skipped
+  directories, and their names still surface via official-site hits.
+- Coaching centers had no Places category at all. Added **Coaching & training
+  centers** (`office=educational_institution` + verified name pattern) after live
+  verification against Ameerpet (5 real institutes, schools excluded; the
+  `amenity=training`-family tags returned nothing and were not added).
+
 ## 9. Risks + rollback
 
 - Discovery reuses listing/search paths, so odd queries yield odd names — same as

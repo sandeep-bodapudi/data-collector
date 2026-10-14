@@ -10,6 +10,7 @@ import time
 import uuid
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
+from urllib.parse import urlparse
 
 from . import ai_extract, discover, extract, listings, places, search, sources
 from .excel import SECRET_KEYS
@@ -562,6 +563,32 @@ def _topic_place_words(query: str) -> tuple[list[str], list[str]]:
     return topic, place
 
 
+# URL shapes that say "this page lists many things" rather than "this page IS one
+# company" - tag/topic hubs, on-site search results, top-N listicles and list indexes.
+# Seen live: a GitHub Topics page (github.com/topics/digital-marketing) kept as a company
+# row for a coaching-centers query, on the strength of one shared word in its title.
+# These join the directory bucket: expanded when a parser exists for the domain,
+# otherwise counted and dropped - never kept as a row. Kept conservative on purpose:
+# /best-services style company pages (no number, no list noun) are NOT matched, and
+# platform-targeted site: searches skip this entirely.
+_AGGREGATOR_PATH_RE = re.compile(
+    r"/(topics?|tags?|search|results?|explore)(/|$|\?)"
+    r"|/(top|best)[-/]\d"
+    r"|/(lists?|listings?|directories?|companies|businesses)[-/]"
+    r"|[?&](q|s|search|query|keyword|keywords)=", re.I)
+
+
+def _is_aggregator_page(url: str) -> bool:
+    try:
+        path = urlparse(url).path.lower()
+        qs = urlparse(url).query.lower()
+    except Exception:
+        return False
+    if re.search(r"[?&](q|s|search|query|keyword|keywords)=", "?" + qs):
+        return True
+    return _AGGREGATOR_PATH_RE.search(path) is not None
+
+
 def _keep_hit(h: dict, url: str, query: str, area_confirmed: bool) -> bool:
     """The strict keep-rule for one search hit. Trusted academic/government domains always
     pass. Dictionary-definition titles never pass (unless asked for). Everything else must
@@ -648,8 +675,10 @@ def _search(job: Job) -> tuple[list[dict], list[dict]]:
                 dup += 1  # this exact page/site already showed up for an earlier search in this same run
                 continue
             seen.add(key)
-            if "site:" not in q and not discover._is_official_candidate(url):
-                directory += 1  # a directory, social or map page lists other places; it is not one itself
+            if "site:" not in q and (not discover._is_official_candidate(url) or _is_aggregator_page(url)):
+                directory += 1  # a directory, social, map, tag-hub or search-results page lists other places;
+                # it is not one itself. Aggregator-shaped pages join this bucket even on otherwise-"official"
+                # domains, so a GitHub Topics hub or a "top 10" listicle can never become a company row.
                 # Most directories have no dedicated parser (see scraper/listings.py) and are just dropped, same as
                 # before - but a few do, and one of THEIR pages is a real list of 20-30+ real names worth keeping,
                 # not one row for the directory page itself.
