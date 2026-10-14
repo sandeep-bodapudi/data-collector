@@ -520,6 +520,74 @@ def _on_topic(h: dict, url: str, signal: list[str]) -> bool:
     return any(s in text for s in signal)
 
 
+# Titles that say "dictionary definition", in English or Chinese - a whole class of padding junk a struggling
+# engine returns when it has nothing real (seen live: baike.baidu.com, iciba.com, dictionary.cambridge.org and
+# friends answering "digital marketing ... centers in Ameerpet, Hyderabad" with what the word "digital" means).
+# These pages are never a company, school, hospital or place - unless the person was actually asking for one
+# ("what does X mean"), in which case the query itself carries the same words and the filter stands down.
+_DEF_TITLE_WORDS = ("definition", "define", "meaning", "translation", "translate", "dictionary", "thesaurus",
+                    "encyclopedia", "synonym", "antonym", "意思", "翻译", "词典", "字典", "百科", "音标", "读音",
+                    "释义", "发音", "例句", "用法")
+_PLACE_PREP_RE = re.compile(r"\b(in|near|at|around|across)\b")
+
+
+def _looks_like_definition(title: str, query: str) -> bool:
+    low = (title or "").lower()
+    if not any(w in low for w in _DEF_TITLE_WORDS):
+        return False
+    asked = (query or "").lower()
+    return not any(w in asked for w in _DEF_TITLE_WORDS)
+
+
+def _word_in(word: str, text: str) -> bool:
+    """Whole-word match for Latin words (so "co" never matches "college"); plain
+    substring for anything else (Chinese has no word boundaries)."""
+    if re.fullmatch(r"[a-z0-9]+", word):
+        return re.search(r"\b" + re.escape(word) + r"\b", text) is not None
+    return word in text
+
+
+def _topic_place_words(query: str) -> tuple[list[str], list[str]]:
+    """Split a query into (topic, place) at the last in/near/at. Topic words describe
+    *what* (kept generic-inclusive: "college" in a title is real evidence of kind);
+    place words describe *where*. Short tokens are dropped - they match everything."""
+    base = re.sub(r"\s+site:\S+$", "", query or "")
+    parts = _PLACE_PREP_RE.split(base.lower())
+    if len(parts) >= 3:
+        before, after = "".join(parts[:-2]), parts[-1]
+    else:
+        before, after = base, ""
+    topic = [w for w in re.findall(r"[a-z0-9]+|[\u4e00-\u9fff]+", before.lower()) if len(w) >= 3]
+    place = [w for w in re.findall(r"[a-z0-9]+|[\u4e00-\u9fff]+", after.lower()) if len(w) >= 3]
+    return topic, place
+
+
+def _keep_hit(h: dict, url: str, query: str, area_confirmed: bool) -> bool:
+    """The strict keep-rule for one search hit. Trusted academic/government domains always
+    pass. Dictionary-definition titles never pass (unless asked for). Everything else must
+    show a topic word in its title or domain - snippets echo the query too often to trust -
+    plus either a place word anywhere or a directory hit confirming the engine got the area.
+    A query with no place part only needs the topic-in-title check."""
+    if _is_trusted_domain(url):
+        return True
+    title = h.get("title", "") or ""
+    if _looks_like_definition(title, query):
+        return False
+    topic, place = _topic_place_words(query)
+    if not topic and not place:
+        return True  # nothing distinctive to check, same as _on_topic
+    title_zone = f"{title} {domain_of(url)}".lower()
+    topic_hits = sum(1 for t in dict.fromkeys(topic) if _word_in(t, title_zone))
+    if topic_hits == 0:
+        return False
+    if not place:
+        return True
+    if area_confirmed:
+        return True
+    everywhere = f"{title} {h.get('body', '') or ''} {url}".lower()
+    return any(_word_in(p, everywhere) for p in place)
+
+
 # Domains under these suffixes are only issued to accredited Indian academic/government institutions (.ac.in and
 # .edu.in registration both require UGC/AICTE-recognised status; .gov.in and .nic.in are government-only) - real
 # evidence a result is a genuine Indian institution, independent of whether a short search snippet happens to
@@ -588,7 +656,7 @@ def _search(job: Job) -> tuple[list[dict], list[dict]]:
                 if domain_of(url) in listings.LISTING_PARSERS:
                     listing_hits.append({"url": url})
                 continue
-            if not area_confirmed and not _is_trusted_domain(url) and not _on_topic(h, url, signal):
+            if not _keep_hit(h, url, q, area_confirmed):
                 off_topic += 1
                 continue
             results.append({"query": q, "title": h.get("title", ""), "url": url, "snippet": h.get("body", "")})

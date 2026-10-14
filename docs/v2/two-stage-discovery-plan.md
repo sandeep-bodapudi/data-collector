@@ -174,6 +174,18 @@ green after the change. One real bug caught by the tests before shipping: the
 discovery loop read `hit["href"]` where `_search()` yields `hit["url"]`, which would
 have produced empty sheets — fixed and covered.
 
+## Relevance follow-up (user report: dictionary junk for a coaching-centers query)
+
+- Root cause: the old keep-rule accepted any result mentioning *any single* signal
+  word, so dictionary definitions sharing the word "digital" passed.
+- Fix in `scraper/jobs.py`: `_on_topic` untouched (still the directory-confirmation
+  check); new `_keep_hit` requires a topic word in title/domain plus a place word or
+  directory confirmation, drops definition-titled pages, keeps trusted-TLD and
+  no-place-query behavior. All prior relevance tests in `tests/test_places.py` pass
+  unchanged, plus 6 new regression tests for the reported case.
+- Two prior enrich tests were updated to the approved two-stage semantics (rows
+  missing a website count as needing work; Status column appended).
+
 ## 9. Risks + rollback
 
 - Discovery reuses listing/search paths, so odd queries yield odd names — same as

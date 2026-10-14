@@ -678,6 +678,37 @@ ok("end to end: only the real college survives, the unrelated pages the engine p
 ok("the run log says how many unrelated results were skipped", any("unrelated" in m and "skipped" in m for m in j2.log), j2.log)
 jobs.web_search = real_jobs_web_search
 
+# ---- dictionary-definition padding: the whole class is dropped, not just off-place pages --
+# Real failure, live: "digital marketing couching centers in Ameerpet, Hyderabad" came back
+# with dictionary definitions of the word "digital" (baike, iciba, Cambridge, Collins...)
+# plus GitHub - none of them a company. A single shared word ("digital") used to be enough
+# to pass; now the title/domain must show a topic word AND the place must show up somewhere
+# (or a directory hit must vouch for the area), and definition-titled pages go immediately.
+junk_hits = [
+    {"title": "digital（英语单词）_百度百科", "body": "", "href": "https://baike.baidu.com/item/digital/123"},
+    {"title": "digital是什么意思_digital的翻译_音标_读音_用法_例句_爱词霸在线词典", "body": "", "href": "https://www.iciba.com/word?w=digital"},
+    {"title": "GitHub", "body": "digital marketing resources", "href": "https://github.com/"},
+    {"title": "DIGITAL中文 (简体)翻译：剑桥词典", "body": "", "href": "https://dictionary.cambridge.org/zhs/词典/英语-汉语-简体/digital"},
+]
+junk_query = "digital marketing couching centers in Ameerpet, Hyderabad"
+ok("dictionary-definition titles are dropped even though they share the word 'digital'",
+   not any(jobs._keep_hit(h, h["href"], junk_query, False) for h in junk_hits[:2]), junk_hits[:2])
+ok("a page with no topic word in title or domain is dropped even if its snippet echoes the query",
+   jobs._keep_hit(junk_hits[2], junk_hits[2]["href"], junk_query, False) is False)
+ok("asking for a definition is not filtered",
+   jobs._looks_like_definition("DIGITAL翻译", "what does digital translation mean") is False)
+ok("a real coaching center with topic + place in the title is kept",
+   jobs._keep_hit({"title": "ABC Digital Marketing Institute, Ameerpet", "body": ""},
+                  "https://abc-digital.example/", junk_query, False) is True)
+jobs.web_search = lambda q, region, n, say: junk_hits
+j_junk = FakeJob2()
+j_junk.spec = {"queries": [junk_query], "platforms": ["web"], "max_results": 50,
+               "one_per_site": False, "region": "in-en"}
+rows_junk, _ = jobs._search(j_junk)
+ok("end to end: an all-junk answer yields no rows (honest empty, not junk rows)", rows_junk == [], rows_junk)
+ok("the log still explains the skips", any("unrelated" in m and "skipped" in m for m in j_junk.log), j_junk.log)
+jobs.web_search = real_jobs_web_search
+
 # ---- _keep(): the "Keep only rows that have" filter, exercised directly - had no test at all until now -----------
 ok("require=emails keeps only rows with an email", jobs._keep({"require": "emails"}, {"Emails": "a@b.com"}) is True
    and jobs._keep({"require": "emails"}, {"Emails": "", "Phone Numbers": "123"}) is False)
@@ -916,11 +947,15 @@ already_row = next(r for r in j8.rows if r["Name"] == "Already Has Contact")
 nothing_row = next(r for r in j8.rows if r["Name"] == "Nothing Found Institute")
 ok("a blank row that resolves gets its website and contacts filled in",
    griet_row["Website"] == "https://griet.ac.in/" and griet_row["Emails"] == "info@griet.ac.in", griet_row)
-ok("a row that already has a contact is left completely untouched (never looked up again)",
-   already_row == {"Name": "Already Has Contact", "Website": "", "Emails": "x@y.com", "Phone Numbers": ""}, already_row)
+ok("a row missing its website gets a website lookup, but its existing email is never overwritten",
+   already_row["Emails"] == "x@y.com" and already_row["Status"] in ("Partial", "No website found"), already_row)
 ok("a row nothing resolves for stays blank - nothing invented", nothing_row["Website"] == "" and nothing_row["Emails"] == "", nothing_row)
 ok("all 3 original rows are kept, not just the ones that got filled in", len(j8.rows) == 3)
-ok("the sheet's own columns are preserved exactly", j8.columns == sheet_cols)
+ok("the sheet's own columns are preserved, plus the added Status column", j8.columns == sheet_cols + ["Status"])
+complete_rows = [{"Name": "Done", "Website": "https://done.example/", "Emails": "hi@done.example", "Phone Numbers": ""}]
+j8b = run_enrich([dict(r) for r in complete_rows], sheet_cols)
+ok("a row that already has website and contact is never looked up again",
+   j8b.rows == complete_rows, j8b.rows)
 
 # Places-style singular Email/Phone columns work the same way (column-name detection, not a hardcoded mode check).
 places_cols = ["Name", "Phone", "Email", "Website", "Address"]
