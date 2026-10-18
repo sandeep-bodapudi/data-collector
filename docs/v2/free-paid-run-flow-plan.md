@@ -195,3 +195,19 @@ Not done in Phase 3 (belongs to Phase 4/5): menu/Settings reorder, wizard-style 
 - Tests: `test_capabilities.py` (+12 checks: key-test endpoint, masks, deep links), `test_frontend_static.py` (+1 test incl. section order). Full Python and JS suites pass.
 
 Not done: a paged step-by-step wizard for the run form (still one page with the checklist), a separate paid-data budget from the social one, result-quality columns (Phase 5), per-user health for Apify/Bright Data tokens (the health cache is shared across users, as it already was for Brave).
+
+## 15. Phase 5 status (2026-10-18) - implemented, not yet committed
+
+- **Email quality** (`scraper/quality.py`): Places, web and enrich runs gain **Email Quality** ("High/Medium/Low - reason") and **Last Checked**; Places also gains **Data Source** (OpenStreetMap / Google Maps (paid)). Checks are free and never contact a mail server: free-mail vs the company's own domain, domain match with the website, MX lookup (real, via `dnspython`; without it the check degrades to "the domain exists" and says so), shared inbox (info@...). A dead domain or malformed address is Low; free mail or a different domain is Medium; the company's own domain with a mail server is High. Time-boxed (max 300 domains, 25 s), failures never fail a run, names-only and social runs are untouched. `QUALITY_DNS=0` (or the test suite's `SKIP_STARTUP_PROBES=1`) switches lookups off.
+- Verified against real DNS: gmail.com and iiit.ac.in -> mail server found; a made-up domain -> none; example.com -> none (it publishes a null MX).
+- New dependency: `dnspython>=2.4` in requirements.txt (Render installs it on the next deploy).
+- Two existing tests asserted exact result columns; updated to the new, intended columns.
+- Cleanup: README now documents Standard/Deep runs, the budget, the Email Quality column, the new tests and modules. The old single-page form was kept (decided in Phase 3), so there was nothing legacy left to remove.
+- Tests: `tests/test_quality.py` (31 checks, no network). Full Python and JS suites pass.
+
+### Remaining / open
+1. **Live Apify spike** with the owner's token (still not done - spends the owner's money).
+2. Row-level confidence for fields other than email (phone, website) is not rated yet.
+3. A separate paid-data budget (it still shares the `social_budget_*` setting).
+4. Paid web crawler and email verification providers remain planned, not built.
+5. A paid Google Maps row with no coordinates can duplicate an OSM row.

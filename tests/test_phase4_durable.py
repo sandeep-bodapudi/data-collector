@@ -48,7 +48,7 @@ assert JOBS_POP is not None
 st = c.get(f"/api/jobs/{job.id}").get_json()
 ok("status served from disk", st["status"] == "done" and st["count"] == 1 and st.get("stored") is True)
 res = c.get(f"/api/jobs/{job.id}/result").get_json()
-ok("result served from disk", res["rows"] == [{"Name": "A", "Emails": "a@a.com"}])
+ok("result served from disk", len(res["rows"]) == 1 and res["rows"][0]["Name"] == "A" and res["rows"][0]["Emails"] == "a@a.com" and "Email Quality" in res["rows"][0], res["rows"])
 ok("collect-then-delete removes file",
    c.delete(f"/api/jobs/{job.id}").status_code == 200
    and not os.path.exists(os.path.join(STORE, job.id + ".json.gz"))

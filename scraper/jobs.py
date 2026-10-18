@@ -12,7 +12,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 from urllib.parse import urlparse
 
-from . import ai_extract, apify_actors, discover, extract, listings, places, search, sources
+from . import ai_extract, apify_actors, discover, extract, listings, places, quality, search, sources
 from . import topic as topic_words
 from .excel import SECRET_KEYS
 from .fetch import WORKERS, Fetcher, domain_of
@@ -485,6 +485,7 @@ def _run(job: Job):
                 _run_social(job)
             else:
                 _run_web(job)
+        _annotate_quality(job)
         final = "cancelled" if job.cancelled.is_set() else "done"
         if final == "done" and not job.rows and job.problems:
             job.error, final = job.problems[-1], "error"
@@ -512,6 +513,31 @@ def _run(job: Job):
         job_store.cancel_clear(job.id)  # a finished job must never look stoppable later
     except Exception:
         pass
+
+
+def _annotate_quality(job: Job) -> None:
+    """Add 'Email Quality' / 'Last Checked' (and, for Places, 'Data Source') to a finished collection. Free checks only,
+    never raises: a failure here must not turn a good run into an error."""
+    spec = job.spec
+    if spec.get("mode") not in ("web", "places", "enrich") or spec.get("names_only") or not job.rows:
+        return
+    try:
+        if spec["mode"] == "places":
+            for r in job.rows:
+                r["Data Source"] = "Google Maps (paid)" if r.get("_paid") else "OpenStreetMap"
+            if "Data Source" not in job.columns:
+                job.columns = job.columns + ["Data Source"]
+        if not any(c in job.columns for c in quality.EMAIL_COLUMNS):
+            return
+        job.activity = "Checking email addresses\u2026"
+        job.columns = quality.annotate(job.rows, job.columns)
+        rated = [r for r in job.rows if r.get("Email Quality")]
+        if rated:
+            high = sum(1 for r in rated if r["Email Quality"].startswith("High"))
+            job.say(f"Checked {len(rated)} email address{'es' if len(rated) != 1 else ''}: {high} look like the company's own "
+                    f"working address. See the Email Quality column.")
+    except Exception as e:  # noqa: BLE001
+        job.say(f"  skipped the email check ({type(e).__name__})")
 
 
 # ---------------------------------------------------------------- web search mode

@@ -64,8 +64,36 @@ The logo is [static/logo.svg](static/logo.svg) (a vector trace of the OneBridge 
 ```
 python tests/test_api.py        # backend: login, roles, PWA files, runs, import/export, sharing, database fallback
 python tests/test_places.py     # place search: finding the area, duplicate merging, website lookup (no network needed)
+python tests/test_capabilities.py  # run options, depth gate, paid-key test endpoint
+python tests/test_paid_actors.py   # Apify actors: client, normalisers, budget gate, spend (mocked)
+python tests/test_quality.py       # email quality ratings (no network)
 node tests/sheetops.test.js     # browser logic: merge & dedupe, CSV/JSON export
 ```
+
+## Standard and Deep runs
+
+**New run** starts by asking how deep to go.
+
+- **Standard (free)** uses only free sources: OpenStreetMap maps, free search engines and your own directory sources. A
+  Brave or Google key of your own is optional and only makes it faster.
+- **Deep (paid tools)** adds services billed to *your own* accounts for more detail: Google Maps places and website
+  contacts through Apify, AI-filled custom columns, and paid social lookups. Apify and Bright Data keys go in
+  **Connections & settings -> Keys**; an admin switches the Apify connectors on in **Admin -> Connections** and sets the
+  monthly paid-data budget. A Deep run that could cost more than what is left of the budget is refused up front, and the
+  run re-checks before every paid call.
+
+Every form shows a checklist built from what is actually available (`GET /api/run-options`), so it only offers what will
+work: details nothing can fill are greyed out with the reason, and Start is disabled with the blocker listed when a Deep
+run could not run. Plan and status: `docs/v2/free-paid-run-flow-plan.md`.
+
+## Email Quality column
+
+Places, web and "Fill missing details" runs add **Email Quality** and **Last Checked** (Places also adds **Data Source**).
+We do not claim an address is verified; we say what was checked: free-mail or the company's own domain, whether the
+domain matches the website, whether it publishes a mail server (a real MX lookup when `dnspython` is installed), and
+whether it is a shared inbox such as info@. The result is High / Medium / Low with the reason, for example *High - company's
+own domain, mail server found*. No mail server is ever contacted, so High means "looks like the real address", not "will
+definitely deliver". Set `QUALITY_DNS=0` to switch the lookups off.
 
 ## Finding places with their contacts (for example, engineering colleges in an area)
 
@@ -188,6 +216,9 @@ scraper/places.py      OpenStreetMap places (categories, finding the area, mirro
 scraper/discover.py    Finds a place's own website by web search; merges duplicate listings
 scraper/ai_extract.py  Bring-your-own-key AI providers
 scraper/jobs.py        Background runs and progress (in memory, nothing stored)
+scraper/capabilities.py What a run can do right now: services, fields, setup gaps, Standard/Deep gate
+scraper/apify_actors.py Paid Apify data: Google Maps places and website contacts (own token, budget-gated)
+scraper/quality.py     Email Quality ratings (own domain, free mail, MX lookup)
 scraper/sheets.py      Reads uploaded Excel / CSV / JSON files
 scraper/excel.py       Excel formatting (no secrets, no formula injection)
 ```
