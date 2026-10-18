@@ -439,7 +439,8 @@ async function refreshNavCounts() {
 
 const ROUTES = [
   [/^#\/home$/, () => viewHome()],
-  [/^#\/new\/(web|places|social)$/, (m) => viewNewRun(m[1])],
+  [/^#\/new$/, () => viewNewChooser()],
+  [/^#\/new\/(web|places|social)(?:\/(standard|deep))?$/, (m) => viewNewRun(m[1], m[2] || "standard")],
   [/^#\/runs$/, () => viewRuns()],
   [/^#\/runs\/([\w-]+)$/, (m) => viewRunDetail(m[1])],
   [/^#\/sheets$/, () => viewSheets()],
@@ -447,7 +448,7 @@ const ROUTES = [
   [/^#\/shared$/, () => viewShared()],
   [/^#\/shared\/([\w-]+)$/, (m) => viewSharedSheet(m[1])],
   [/^#\/merge(?:\?ids=([\w,-]*))?$/, (m) => viewMerge(m[1] ? m[1].split(",") : [])],
-  [/^#\/settings$/, () => viewSettings()],
+  [/^#\/settings(?:\/(connections|keys|ai|sources|account))?$/, (m) => viewSettings(m[1])],
   [/^#\/admin$/, () => IS_ADMIN ? viewAdmin() : viewNotFound()],
 ];
 let cleanup = null;
@@ -496,7 +497,7 @@ async function viewHome() {
   v.innerHTML = `
     <div class="page-head"><div><h1>${hello}, ${esc(CFG.user.username)}</h1>
       <p>Collect public data from the web into clean, ready-to-use spreadsheets.</p></div>
-      ${IS_VIEWER ? "" : `<div class="actions"><a class="btn btn-primary" href="#/new/web">${icon("plus")}New run</a></div>`}</div>
+      ${IS_VIEWER ? "" : `<div class="actions"><a class="btn btn-primary" href="#/new">${icon("plus")}New run</a></div>`}</div>
     <div id="home-ai"></div>
     <div class="grid grid-4" id="kpis">${Array.from({ length: 4 }, () => '<div class="card kpi"><div class="skel" style="width:60%"></div><div class="skel mt-16" style="height:26px;width:40%"></div></div>').join("")}</div>
     ${IS_VIEWER ? "" : `<h2 style="font-size:15px;margin:28px 0 12px">Quick start</h2>
@@ -527,7 +528,7 @@ async function viewHome() {
     if (stale(tk)) return;
   }
   if (!aiReady && !IS_VIEWER) {
-    $("#home-ai").innerHTML = `<div class="callout info" style="margin-bottom:16px">${icon("sparkle")}<div class="grow"><b>Collect any detail with AI.</b> Add your own AI key (OpenAI, Gemini, Claude, OpenRouter, Groq…) to fill custom columns like “opening hours” or “services offered”.</div><a class="btn btn-sm" href="#/settings">Add AI key</a></div>`;
+    $("#home-ai").innerHTML = `<div class="callout info" style="margin-bottom:16px">${icon("sparkle")}<div class="grow"><b>Collect any detail with AI.</b> Add your own AI key (OpenAI, Gemini, Claude, OpenRouter, Groq…) to fill custom columns like “opening hours” or “services offered”.</div><a class="btn btn-sm" href="#/settings/ai">Add AI key</a></div>`;
   }
   const lists = $("#home-lists");
   if (!runs.length && !sheets.length) {
@@ -537,7 +538,7 @@ async function viewHome() {
         <div class="card w"><div class="n">1</div><b>Start a run</b><span>Type what you need, such as “CBSE schools in Vijayawada contact”, or pick a place type and a city.</span></div>
         <div class="card w"><div class="n">2</div><b>Watch it collect</b><span>See live progress, rows and contacts found. Stop anytime and keep what was found.</span></div>
         <div class="card w"><div class="n">3</div><b>Use your sheet</b><span>Open, search, merge and download as Excel, CSV or JSON.</span></div>
-      </div><div class="mt-16"><a class="btn btn-primary" href="#/new/web">${icon("plus")}Start your first run</a></div></div></div>`;
+      </div><div class="mt-16"><a class="btn btn-primary" href="#/new">${icon("plus")}Start your first run</a></div></div></div>`;
     return;
   }
   lists.innerHTML = `<div class="grid grid-2">
@@ -576,7 +577,76 @@ const CAT_GROUPS = [
   ["Public", ["Government offices", "Police stations", "Courthouses", "Tourist attractions", "Railway stations", "Parks"]],
 ];
 
-async function viewNewRun(mode) {
+/* ================================================================ NEW RUN: depth first
+   Standard = free sources. Deep = paid tools on the person's own accounts (docs/v2/free-paid-run-flow-plan.md).
+   Everything shown here comes from GET /api/run-options, so the screen only offers what will work. */
+const DEPTH_INFO = {
+  standard: { name: "Standard", tag: "free", icon: "check",
+    blurb: "Free sources only: OpenStreetMap maps, free search engines and your own directory sources. A Brave or Google key of your own is optional and just makes it faster." },
+  deep: { name: "Deep", tag: "paid tools", icon: "sparkle",
+    blurb: "Adds paid tools on your own accounts for more detail: Google Maps places and website contacts through Apify, AI-filled custom columns and paid social lookups. Spend is capped by your monthly budget." },
+};
+const MODE_INFO = [
+  ["web", "globe", "Search the web", "Emails, phones and details from websites"],
+  ["places", "pin", "Find places", "Temples, hospitals, schools… in any city"],
+  ["social", "users", "Social profiles", "Public LinkedIn, Instagram and Facebook details"],
+];
+const SETUP_BADGE = { ready: ["done", "Ready"], optional: ["plain", "Optional"], missing: ["error", "Needs setup"] };
+const savedDepth = () => { try { return sessionStorage.getItem("newRunDepth") === "deep" ? "deep" : "standard"; } catch { return "standard"; } };
+const saveDepth = (d) => { try { sessionStorage.setItem("newRunDepth", d); } catch { /* private window: the choice just isn't remembered */ } };
+
+function setupCard(OPT, depth) {
+  if (!OPT) return "";
+  const rows = (OPT.setup || []).map((r) => {
+    const b = SETUP_BADGE[r.status] || SETUP_BADGE.optional;
+    return `<li class="setup-row"><span class="badge ${b[0]}">${b[1]}</span><div class="grow"><b>${esc(r.label)}</b><small>${esc(r.why || "")}</small></div>`
+      + (r.href ? `<a class="btn btn-sm" href="${esc(r.href)}">${r.status === "missing" ? "Fix this" : "Open"}</a>` : "") + `</li>`;
+  }).join("");
+  const planned = depth === "deep" && (OPT.deep.planned || []).length
+    ? `<p class="hint">Not built yet: ${OPT.deep.planned.map((p) => esc(p.label)).join("; ")}.</p>` : "";
+  return `<div class="card setup-card" id="setup-card">
+    <div class="card-head"><h3>Run depth</h3>
+      <div class="seg" role="tablist" aria-label="Run depth">${["standard", "deep"].map((d) =>
+        `<button type="button" role="tab" aria-selected="${d === depth}" data-depth="${d}" class="${d === depth ? "active" : ""}">${DEPTH_INFO[d].name} <small>${DEPTH_INFO[d].tag}</small></button>`).join("")}</div></div>
+    <div class="card-body"><p class="small" style="margin-top:0">${esc(DEPTH_INFO[depth].blurb)}</p>
+      <ul class="setup-list">${rows}</ul>${planned}</div></div>`;
+}
+
+async function viewNewChooser() {
+  if (IS_VIEWER) return viewNotFound();
+  const tk = routeToken();
+  setCrumbs({ label: "Runs", href: "#/runs" }, "New run");
+  const deepOpts = Object.fromEntries(await Promise.all(MODE_INFO.map(async ([m]) => [m, await api(`/api/run-options?mode=${m}&depth=deep`).catch(() => null)])));
+  if (stale(tk)) return;
+  let depth = savedDepth();
+  const v = $("#view");
+  const deepReady = MODE_INFO.filter(([m]) => deepOpts[m] && deepOpts[m].deep.possible).map((x) => x[2]);
+  const draw = () => {
+    v.innerHTML = `
+      <div class="page-head"><div><h1>New run</h1><p>Choose how deep to go, then what to collect. You can change the depth on the next screen.</p></div></div>
+      <div class="card mb-16"><div class="card-body">
+        <h3 style="margin-top:0">1. How deep?</h3>
+        <div class="choice-grid" role="radiogroup" aria-label="Run depth">${["standard", "deep"].map((d) => `
+          <label class="option radio"><input type="radio" name="depth" value="${d}" ${d === depth ? "checked" : ""}>
+            <span class="o-ico">${icon(DEPTH_INFO[d].icon)}</span>
+            <span><b>${DEPTH_INFO[d].name} <span class="badge plain">${esc(DEPTH_INFO[d].tag)}</span></b><small>${esc(DEPTH_INFO[d].blurb)}</small>
+              ${d === "deep" ? `<small class="mt-8"><b>${deepReady.length ? `Ready for: ${esc(deepReady.join(", "))}` : "Needs setup first"}</b>${deepReady.length === MODE_INFO.length ? "" : " — add keys in Settings to unlock the rest."}</small>` : ""}</span>
+            <span class="box"></span></label>`).join("")}
+        </div></div></div>
+      <div class="card"><div class="card-body">
+        <h3 style="margin-top:0">2. What do you want to collect?</h3>
+        <div class="mode-grid">${MODE_INFO.map(([m, ic, title, sub]) => {
+          const o = deepOpts[m];
+          const note = depth === "deep" ? (o && o.deep.possible ? '<span class="badge done">Deep ready</span>'
+            : `<span class="badge error" title="${esc(o ? o.deep.reason : "")}">Needs setup</span>`) : '<span class="badge plain">Free</span>';
+          return `<a class="card quick" href="#/new/${m}/${depth}"><div class="q-ico">${icon(ic, 20)}</div><div><b>${esc(title)}</b><span>${esc(sub)}</span><span class="mt-8">${note}</span></div></a>`;
+        }).join("")}</div></div></div>`;
+    $$("input[name=depth]", v).forEach((r) => r.addEventListener("change", () => { depth = r.value; saveDepth(depth); draw(); }));
+  };
+  draw();
+}
+
+async function viewNewRun(mode, depth = "standard") {
   if (IS_VIEWER) return viewNotFound();
   const tk = routeToken();
   // The person's own directory sources (Settings -> Directory sources), loaded fresh each time the form opens.
@@ -586,7 +656,11 @@ async function viewNewRun(mode) {
   const v = $("#view");
   let settings = { ai_key_mask: "", ai_provider: "anthropic" };
   try { settings = await api("/api/settings"); } catch {}
+  let OPT = null;  // what this run can do right now (GET /api/run-options); the form still works if it can't be read
+  try { OPT = await api(`/api/run-options?mode=${mode}&depth=${depth}`); } catch {}
   if (stale(tk)) return;
+  saveDepth(depth);
+  const FS = Object.fromEntries(((OPT && OPT.fields) || []).map((f) => [f.id, f]));
   const aiReady = !!settings.ai_key_mask || (settings.org_keys || []).includes("ai_api_key") || (settings.ai_provider === "custom" && settings.ai_base_url);
   const hasBrave = !!settings.brave_key_mask || (settings.org_keys || []).includes("brave_api_key");
   const providerLabel = (CFG.providers[settings.ai_provider] || {}).label || "your AI provider";
@@ -596,7 +670,7 @@ async function viewNewRun(mode) {
       <label class="label">${icon("sparkle")} Other details with AI <span class="opt">(optional)</span></label>
       <div class="tags" id="${id}"></div>
       <div class="hint">${aiReady ? `Type any detail in your own words, such as <i>opening hours</i> or <i>services offered</i>. Uses your ${esc(providerLabel)} key.`
-        : `Add your own AI key in <a href="#/settings">Settings</a> to fill any custom detail.`}</div>
+        : `Add your own AI key in <a href="#/settings/ai">Settings</a> to fill any custom detail.`}</div>
       ${suggest ? `<div class="hint" id="field-suggest" hidden></div>` : ""}
     </div>`;
 
@@ -604,7 +678,7 @@ async function viewNewRun(mode) {
     <div class="form-section">
       <div class="section-title"><div class="step-num">1</div><div><h3>What should we search for?</h3><p>Write it like a Google search. Add as many as you like.</p></div></div>
       <div class="section-body">
-        ${hasBrave ? "" : `<div class="callout info">${icon("info")}<div class="grow"><b>Searching for the right website for each name will be slower without a search key.</b> Fetching the pages themselves is unaffected - this is specifically about finding which site to fetch, which without a key falls back to free search engines that cloud servers often get refused by. <a href="#/settings">Add a free Brave key in Settings</a> - it's optional, the run still works without it, just slower.</div></div>`}
+        ${hasBrave ? "" : `<div class="callout info">${icon("info")}<div class="grow"><b>Searching for the right website for each name will be slower without a search key.</b> Fetching the pages themselves is unaffected - this is specifically about finding which site to fetch, which without a key falls back to free search engines that cloud servers often get refused by. <a href="#/settings/keys">Add a free Brave key in Settings</a> - it's optional, the run still works without it, just slower.</div></div>`}
         <div class="tags" id="queries"></div>
         <div class="hint">Press <kbd>Enter</kbd> after each search. Paste a list to add many at once.</div>
         <div class="chips"><small>Try</small>
@@ -635,7 +709,7 @@ async function viewNewRun(mode) {
             <label class="option"><input type="checkbox" name="sources" value="${x.id}"><span class="o-ico">${icon("globe")}</span><span><b>${esc(x.name)}</b><small>${esc(x.category || "")}</small></span><span class="box"></span></label>`).join("")}
           </div>
           <div class="hint">Read directly, page by page - not affected by free search engines refusing requests. Picking more than one combines them into the same sheet, with duplicate names removed automatically - useful since any one directory can be missing a few entries the others have. Adds to whatever searches you listed above; you can also leave the searches empty and use this alone.</div>`
-            : `<div class="hint">You haven't added a directory source yet. Add one in <a href="#/settings">Settings → Directory sources</a>, or start from a preset there.</div>`}
+            : `<div class="hint">You haven't added a directory source yet. Add one in <a href="#/settings/sources">Settings → Directory sources</a>, or start from a preset there.</div>`}
         </div>
       </div>
     </div>
@@ -643,7 +717,7 @@ async function viewNewRun(mode) {
       <div class="section-title"><div class="step-num">2</div><div><h3>Which details do you need?</h3><p>Each one becomes a column in your sheet.</p></div></div>
       <div class="section-body">
         <div class="option-grid">${Object.keys(FIELD_INFO).filter((k) => k in CFG.fields).map((k) => `
-          <label class="option"><input type="checkbox" name="field" value="${k}" ${DEFAULT_FIELDS.includes(k) ? "checked" : ""}><span class="o-ico">${icon(FIELD_INFO[k][0])}</span><span><b>${esc(CFG.fields[k])}</b><small>${esc(FIELD_INFO[k][1])}</small></span><span class="box"></span></label>`).join("")}
+          <label class="option" title="${esc(FS[k] && !FS[k].available ? FS[k].reason : "")}"><input type="checkbox" name="field" value="${k}" ${FS[k] && !FS[k].available ? "disabled" : DEFAULT_FIELDS.includes(k) ? "checked" : ""}><span class="o-ico">${icon(FIELD_INFO[k][0])}</span><span><b>${esc(CFG.fields[k])}</b><small>${esc(FIELD_INFO[k][1])}</small></span><span class="box"></span></label>`).join("")}
         </div>
         ${aiBlock("custom", true)}
       </div>
@@ -694,7 +768,7 @@ async function viewNewRun(mode) {
         <label class="switch"><input type="checkbox" id="enrich" checked><span class="sw"></span><span><b>Find emails &amp; phone numbers</b><small>Reads each place's website for contact details. The map itself rarely has them, so leave this on if you need contacts. Slower.</small></span></label>
         <label class="switch mt-8"><input type="checkbox" id="names_only_places"><span class="sw"></span><span><b>Collect company names only (recommended for large searches)</b><small>We will save the names first. You can add websites and contact details later.</small></span></label>
         <label class="switch mt-8" id="find-sites-row"><input type="checkbox" id="find_sites" checked><span class="sw"></span><span><b>Look up websites the map doesn't list</b><small>Searches the web for each place's own site first (about 2 seconds per place, up to 80 per run). Without this, only places with a website on the map get contacts.</small></span></label>
-        ${hasBrave ? "" : `<div class="callout info mt-8" id="places-brave-nudge" hidden>${icon("info")}<div class="grow">Without a search key, this website lookup falls back to free search engines, which cloud servers often get refused by, and paces itself much more slowly. <a href="#/settings">Add a free Brave key in Settings</a> to speed it up - optional, this still works without it.</div></div>`}
+        ${hasBrave ? "" : `<div class="callout info mt-8" id="places-brave-nudge" hidden>${icon("info")}<div class="grow">Without a search key, this website lookup falls back to free search engines, which cloud servers often get refused by, and paces itself much more slowly. <a href="#/settings/keys">Add a free Brave key in Settings</a> to speed it up - optional, this still works without it.</div></div>`}
         ${aiBlock("custom-places", true)}
         <div class="callout info mt-16">${icon("info")}<div>Places come from OpenStreetMap, a free public map. Well-known places are almost always listed; very small ones may be missing.</div></div>
       </div>
@@ -712,7 +786,7 @@ async function viewNewRun(mode) {
             <label class="option"><input type="checkbox" name="social-platform" value="${val}" checked><span><b>${label}</b></span><span class="box"></span></label>`).join("")}
           </div></div>
         <label class="switch mt-8"><input type="checkbox" id="hybrid" checked><span class="sw"></span><span><b>Free lookup first, paid only on miss</b><small>Recommended. Turn off only if you want paid enrichment for every profile.</small></span></label>
-        <label class="switch mt-8"><input type="checkbox" id="free_only"><span class="sw"></span><span><b>Free lookup only</b><small>No paid spend on this run, whatever the budget.</small></span></label>
+        <label class="switch mt-8"><input type="checkbox" id="free_only" ${depth === "deep" ? "" : "checked disabled"}><span class="sw"></span><span><b>Free lookup only</b><small>${depth === "deep" ? "No paid spend on this run, whatever the budget." : "Standard runs never spend. Choose Deep for paid lookups."}</small></span></label>
       </div>
     </div>`;
 
@@ -725,6 +799,7 @@ async function viewNewRun(mode) {
         <button type="button" class="${mode === "places" ? "active" : ""}" data-mode="places">${icon("pin")} Places</button>
         <button type="button" class="${mode === "social" ? "active" : ""}" data-mode="social">${icon("users")} Social</button>
       </div></div>
+    ${setupCard(OPT, depth)}
     <div class="callout info" id="conn-banner" hidden></div>
     <div class="split">
       <div class="card">${mode === "web" ? webForm : mode === "places" ? placesForm : socialForm}</div>
@@ -739,14 +814,15 @@ async function viewNewRun(mode) {
         </div>
       </aside>
     </div>`;
-  $$("[data-mode]", v).forEach((b) => b.onclick = () => { location.hash = `#/new/${b.dataset.mode}`; });
+  $$("[data-mode]", v).forEach((b) => b.onclick = () => { location.hash = `#/new/${b.dataset.mode}/${depth}`; });
+  $$("[data-depth]", v).forEach((b) => b.onclick = () => { saveDepth(b.dataset.depth); location.hash = `#/new/${mode}/${b.dataset.depth}`; });
   api("/api/connections/status").then((cs) => {
     const banner = $("#conn-banner");
     if (banner && cs && cs.status_string) {
       let extra = "";
       const ss = cs.social_spend;
-      if (ss && ss.budget_set) extra = ` <b>Social:</b> ₹${esc(String(ss.spent_inr))} / ₹${esc(String(ss.limit_inr))} (${esc(String(ss.pct))}%)`;
-      else if (ss && !ss.budget_set) extra = ` <b>Social:</b> no monthly budget set — paid enrichment stays off`;
+      if (ss && ss.budget_set) extra = ` <b>Paid data:</b> ₹${esc(String(ss.spent_inr))} / ₹${esc(String(ss.limit_inr))} (${esc(String(ss.pct))}%)`;
+      else if (ss && !ss.budget_set) extra = ` <b>Paid data:</b> no monthly budget set — paid runs stay off`;
       banner.hidden = false; banner.innerHTML = `${icon("info")}<div class="grow"><b>Connections:</b> ${esc(cs.status_string)}${extra}</div>`;
     }
   }).catch(() => {});
@@ -782,7 +858,7 @@ async function viewNewRun(mode) {
     $("#sf-dismiss").onclick = () => { dismissedSuggestion = match.label; renderSuggestion(); };
   };
   const update = () => {
-    const rows = [], checks = [];
+    const rows = [["Run depth", depth === "deep" ? "Deep (paid tools)" : "Standard (free)"]], checks = [];
     if (mode === "web") {
       const fields = $$("input[name=field]:checked", v).map((c) => CFG.fields[c.value]).concat(custom.items);
       const plats = $$("input[name=platform]:checked", v).map((c) => PLATFORMS.find((p) => p[0] === c.value)[1]);
@@ -832,6 +908,14 @@ async function viewNewRun(mode) {
           }).catch(() => {});
       }
     }
+    if (OPT && OPT.paid_will_run && mode === "places") {
+      const P = OPT.pricing, locs = locations.items.length, per = Math.min(+$("#max_places").value, P.max_places_per_call);
+      const est = locs * (per * (P.place_usd + ($("#names_only_places").checked ? 0 : P.place_contacts_usd)) + P.start_usd);
+      rows.push(["Est. paid cost", locs ? `up to $${est.toFixed(2)} (Google Maps via Apify)` : "—"]);
+    }
+    ((OPT && OPT.blockers) || []).forEach((b) => checks.push([false, b]));
+    const startBtn = $("#start");
+    if (startBtn && !startBtn.dataset.busy) startBtn.disabled = !!(OPT && !OPT.can_start);
     if (custom.items.length) { rows.push(["AI details", custom.items.length]); checks.push([aiReady, "Your AI key is set"]); }
     $("#summary").innerHTML = rows.map(([k, val]) => `<li><span>${esc(k)}</span><b>${esc(val)}</b></li>`).join("");
     $("#checks").innerHTML = checks.map(([ok, l]) => `<li class="${ok ? "ok" : "todo"}">${esc(l)}</li>`).join("");
@@ -896,7 +980,7 @@ async function viewNewRun(mode) {
 
   $("#start").onclick = async () => {
     custom.flush();
-    const body = { mode, file_name: $("#file_name").value, custom_fields: custom.items.join(",") };
+    const body = { mode, depth, file_name: $("#file_name").value, custom_fields: custom.items.join(",") };
     if (mode === "web") {
       queries.flush();
       const sourceIds = $$("input[name=sources]:checked", v).map((c) => +c.value);
@@ -927,7 +1011,7 @@ async function viewNewRun(mode) {
     if (!navigator.onLine) return toast("You're offline. Connect to the internet to start a run.", "err");
     if (!Store.state.available) return toast(Store.state.error || "Local storage is not available, so results could not be kept.", "err");
     const btn = $("#start");
-    btn.disabled = true; btn.innerHTML = '<span class="spinner"></span>Starting…';
+    btn.disabled = true; btn.dataset.busy = "1"; btn.innerHTML = '<span class="spinner"></span>Starting…';
     try {
       const r = await api("/api/jobs", { method: "POST", body });
       const lines = (t) => String(t || "").split("\n").map((x) => x.trim()).filter(Boolean);
@@ -943,6 +1027,7 @@ async function viewNewRun(mode) {
       location.hash = `#/runs/${r.id}`;
     } catch (e) {
       toast(e.message, "err");
+      delete btn.dataset.busy;
       btn.disabled = false; btn.innerHTML = `${icon("play")}Start run`;
     }
   };
@@ -967,7 +1052,7 @@ async function viewRuns() {
   const state = { q: "", status: "all" };
   v.innerHTML = `
     <div class="page-head"><div><h1>Runs</h1><p>Your collections. The history is kept on this device.</p></div>
-      ${IS_VIEWER ? "" : `<div class="actions"><a class="btn btn-primary" href="#/new/web">${icon("plus")}New run</a></div>`}</div>
+      ${IS_VIEWER ? "" : `<div class="actions"><a class="btn btn-primary" href="#/new">${icon("plus")}New run</a></div>`}</div>
     <div class="card">
       <div class="toolbar">
         <div class="search grow" style="max-width:360px">${icon("search")}<input id="q" placeholder="Search runs" aria-label="Search runs"></div>
@@ -984,7 +1069,7 @@ async function viewRuns() {
   const render = () => {
     const list = runs.filter((r) => (state.status === "all" || r.status === state.status || (state.status === "running" && r.status === "queued"))
       && (!state.q || (r.name || "").toLowerCase().includes(state.q)));
-    $("#list").innerHTML = !runs.length ? emptyState("runs", "No runs yet", "Start a run to collect data from the web.", IS_VIEWER ? "" : `<a class="btn btn-primary" href="#/new/web">${icon("plus")}New run</a>`)
+    $("#list").innerHTML = !runs.length ? emptyState("runs", "No runs yet", "Start a run to collect data from the web.", IS_VIEWER ? "" : `<a class="btn btn-primary" href="#/new">${icon("plus")}New run</a>`)
       : !list.length ? emptyState("search", "No matching runs", "Try a different search or filter.")
       : `<table class="tbl"><thead><tr><th>Run</th><th>Status</th><th>Started</th><th class="num">Duration</th><th class="num">Rows</th><th></th></tr></thead><tbody>
         ${list.map((r) => `<tr class="clickable" data-id="${r.id}">
@@ -1236,7 +1321,7 @@ async function viewSheets() {
   const state = { q: "", source: "all", selected: new Set() };
   v.innerHTML = `
     <div class="page-head"><div><h1>Sheets</h1><p>Results from your runs, merges and imports, saved on this device.</p></div>
-      ${IS_VIEWER ? "" : `<div class="actions"><button class="btn" id="import">${icon("upload")}Import file</button><a class="btn btn-primary" href="#/new/web">${icon("plus")}New run</a></div>`}</div>
+      ${IS_VIEWER ? "" : `<div class="actions"><button class="btn" id="import">${icon("upload")}Import file</button><a class="btn btn-primary" href="#/new">${icon("plus")}New run</a></div>`}</div>
     <input type="file" id="import-file" accept=".xlsx,.csv,.tsv,.json" hidden>
     ${deviceNote()}
     <div class="card">
@@ -1255,7 +1340,7 @@ async function viewSheets() {
     const list = sheets.filter((s) => (state.source === "all" || s.source === state.source) && (!state.q || s.name.toLowerCase().includes(state.q)));
     const allSel = list.length && list.every((s) => state.selected.has(s.id));
     $("#list").innerHTML = !sheets.length ? emptyState("sheet", "No sheets yet", "Finished runs save a sheet here automatically. You can also import Excel, CSV or JSON files.",
-        IS_VIEWER ? "" : `<div class="row-flex" style="justify-content:center"><button class="btn" data-import>${icon("upload")}Import file</button><a class="btn btn-primary" href="#/new/web">${icon("plus")}New run</a></div>`)
+        IS_VIEWER ? "" : `<div class="row-flex" style="justify-content:center"><button class="btn" data-import>${icon("upload")}Import file</button><a class="btn btn-primary" href="#/new">${icon("plus")}New run</a></div>`)
       : !list.length ? emptyState("search", "No matching sheets", "Try a different search or filter.")
       : `<table class="tbl"><thead><tr>${IS_VIEWER ? "" : `<th style="width:36px"><input type="checkbox" id="sel-all" ${allSel ? "checked" : ""} aria-label="Select all"></th>`}
           <th>Name</th><th>Source</th><th class="num">Rows</th><th class="num">Columns</th><th class="num">Size</th><th>Created</th><th></th></tr></thead><tbody>
@@ -1986,9 +2071,9 @@ const PROVIDER_HELP = {
   groq: ["console.groq.com", "https://console.groq.com/keys"],
   custom: null,
 };
-async function viewSettings() {
+async function viewSettings(section) {
   const tk = routeToken();
-  setCrumbs("Settings");
+  setCrumbs("Connections & settings");
   const v = $("#view");
   const s = await api("/api/settings");
   if (stale(tk)) return;
@@ -1997,9 +2082,32 @@ async function viewSettings() {
   if (stale(tk)) return;
   const st = { provider: s.ai_provider, replacing: !s.ai_key_mask };
   v.innerHTML = `
-    <div class="page-head"><div><h1>Settings</h1><p>Your AI provider, password and appearance.</p></div></div>
+    <div class="page-head"><div><h1>Connections &amp; settings</h1><p>What your runs can use, your own keys, the AI provider, password and appearance.</p></div></div>
+    <div class="seg settings-nav" id="settings-nav" role="tablist" aria-label="Jump to a section">${[["connections", "Connections"], ["keys", "Keys"], ["ai", "AI"], ["sources", "Sources"], ["account", "Account"]].map(([k, l]) => `<button type="button" data-sec="${k}">${l}</button>`).join("")}</div>
     <div class="stack" style="max-width:860px">
-      <section class="card">
+      <section class="card" id="sec-connections">
+        <div class="card-head"><div><h3>${icon("info")} Connections</h3><p>What a run can use right now. Free sources need nothing; your own keys speed things up; paid tools unlock Deep runs.</p></div><a class="btn btn-sm" href="#/new">New run</a></div>
+        <div class="card-body" id="conn-list"><div class="skel" style="width:60%"></div><div class="skel mt-8"></div></div>
+      </section>
+      <section class="card" id="sec-keys">
+        <div class="card-head"><div><h3>${icon("search")} Search connector: Brave Search</h3><p>Your own Brave Search key. Website lookups use it, so each person's searches run on their own quota. Stored encrypted, never shared.</p></div><span id="brave-status"></span></div>
+        <div class="card-body">
+          <div class="field" id="brave-field"></div>
+          <div class="row-flex"><button class="btn btn-primary" id="save-brave">Save</button><button class="btn" id="test-brave">${icon("check")}Test key</button><span id="brave-msg" class="small"></span></div>
+          <div class="hint">Get a free key at <a href="https://brave.com/search/api/" target="_blank" rel="noopener noreferrer">brave.com/search/api</a>. The free plan allows about one search per second and a monthly quota, so large runs take longer.</div>
+        </div>
+      </section>
+      <section class="card" id="sec-paid">
+        <div class="card-head"><div><h3>${icon("key")} Paid data: Apify and Bright Data</h3><p>Your own accounts, used only by Deep runs. Stored encrypted, never shared. You are billed by them; spend is capped by your admin's monthly budget.</p></div><span id="paid-status"></span></div>
+        <div class="card-body">
+          <div class="callout info" style="margin-bottom:16px">${icon("info")}<div class="grow">Apify lets Deep runs fetch <b>Google Maps places</b> and read <b>website contacts</b>. Your admin must also switch the Apify connectors on in Admin → Connections. Both are optional.</div></div>
+          <div class="field"><label class="label" for="apify-key">Apify API token</label><input class="input mono" id="apify-key" type="password" autocomplete="off"><div class="hint" id="apify-hint"></div></div>
+          <div class="field"><label class="label" for="bd-key">Bright Data key <span class="opt">(social lookups only)</span></label><input class="input mono" id="bd-key" type="password" autocomplete="off"><div class="hint" id="bd-hint"></div></div>
+          <div class="row-flex"><button class="btn btn-primary" id="save-paid">Save</button><button class="btn" id="test-apify">${icon("check")}Test Apify</button><button class="btn" id="test-bd">${icon("check")}Test Bright Data</button><span id="paid-msg" class="small"></span></div>
+          <div class="hint">Get an Apify token at <a href="https://console.apify.com/account/integrations" target="_blank" rel="noopener noreferrer">console.apify.com</a>. Leave a box empty to keep what is saved; use Remove to delete it.</div>
+        </div>
+      </section>
+      <section class="card" id="sec-ai">
         <div class="card-head"><div><h3>${icon("sparkle")} AI provider</h3><p>Bring your own key. It's used only for your runs, never shared, and stored encrypted.</p></div><span id="ai-status"></span></div>
         <div class="card-body">
           <div class="field"><span class="label">Provider</span>
@@ -2014,7 +2122,7 @@ async function viewSettings() {
           <div class="row-flex"><button class="btn btn-primary" id="save-ai">Save</button><button class="btn" id="test-ai">${icon("check")}Test connection</button><span id="test-msg" class="small"></span></div>
         </div>
       </section>
-      <section class="card">
+      <section class="card" id="sec-sources">
         <div class="card-head"><div><h3>${icon("globe")} Directory sources</h3><p>Websites that list places, such as a college, school or hospital directory. Each one says where its lists are and how to read them - no code needed.</p></div><span class="badge plain">${srcData.sources.length} saved</span></div>
         <div class="card-body">
           ${srcData.sources.length ? `<ul class="summary-list" id="src-list">${srcData.sources.map((x) => `
@@ -2047,14 +2155,6 @@ async function viewSettings() {
           </details>
         </div>
       </section>
-      <section class="card">
-        <div class="card-head"><div><h3>${icon("search")} Search connector: Brave Search</h3><p>Your own Brave Search key. Website lookups use it, so each person's searches run on their own quota. Stored encrypted, never shared.</p></div><span id="brave-status"></span></div>
-        <div class="card-body">
-          <div class="field" id="brave-field"></div>
-          <div class="row-flex"><button class="btn btn-primary" id="save-brave">Save</button><button class="btn" id="test-brave">${icon("check")}Test key</button><span id="brave-msg" class="small"></span></div>
-          <div class="hint">Get a free key at <a href="https://brave.com/search/api/" target="_blank" rel="noopener noreferrer">brave.com/search/api</a>. The free plan allows about one search per second and a monthly quota, so large runs take longer.</div>
-        </div>
-      </section>
       ${CFG.restricted ? `
       <section class="card">
         <div class="card-head"><div><h3>${icon("key")} Social logins <span class="badge cancelled plain">Restricted</span></h3><p>Enabled by your admin. Use only accounts your company owns and where the platform's terms allow it.</p></div></div>
@@ -2082,7 +2182,7 @@ async function viewSettings() {
         <div class="card-head"><div><h3>${icon("download")} Install the app</h3><p>Add Data Collector to your desktop or phone. It opens in its own window and works offline with your saved sheets.</p></div></div>
         <div class="card-body" id="install-body"></div>
       </section>
-      <section class="card">
+      <section class="card" id="sec-account">
         <div class="card-head"><div><h3>${icon("key")} Password</h3><p>Change the password you use to sign in.</p></div></div>
         <div class="card-body"><div class="grid grid-3">
           <div class="field"><label class="label" for="pw-cur">Current password</label><input class="input" id="pw-cur" type="password" autocomplete="current-password"></div>
@@ -2199,6 +2299,81 @@ async function viewSettings() {
     });
   };
   renderBrave();
+
+  // ---- connections overview: one honest status per service, from the same data the run screen uses
+  const orgHas = (n) => (s.org_keys || []).includes(n);
+  const HAS_KEY = {
+    brave: () => !!s.brave_key_mask || orgHas("brave_api_key"),
+    ai: () => !!s.ai_key_mask || orgHas("ai_api_key") || (s.ai_provider === "custom" && !!s.ai_base_url),
+    apify: () => !!s.apify_key_mask || orgHas("apify_api_key"), apify_places: () => HAS_KEY.apify(), apify_contacts: () => HAS_KEY.apify(),
+    brightdata: () => !!s.brightdata_key_mask || orgHas("brightdata_api_key"),
+  };
+  const connState = (id, c) => {
+    if (!c.enabled) return ["plain", "Off (admin)", "Your admin has turned this off in Admin → Connections."];
+    if (HAS_KEY[id] && !HAS_KEY[id]()) return ["cancelled", "Needs key", "Add your own key below."];
+    if (c.healthy === false) return ["error", "Failing", c.error || "Its last check failed."];
+    if (c.checked === false) return ["plain", "Not checked", "No check has run yet; it will be tried when a run needs it."];
+    return ["done", "OK", ""];
+  };
+  const renderConnections = (cs) => {
+    const box = $("#conn-list");
+    if (!box) return;
+    if (!cs || !cs.services) { box.innerHTML = '<p class="small">Connection status is unavailable right now.</p>'; return; }
+    const groups = [["free", "Free sources"], ["key", "With your own key (optional)"], ["paid", "Paid tools (Deep runs)"]];
+    box.innerHTML = groups.map(([cost, title]) => {
+      const items = Object.entries(cs.services).filter(([, c]) => (c.cost || "free") === cost);
+      return items.length ? `<h4 class="conn-group">${esc(title)}</h4><ul class="setup-list">${items.map(([id, c]) => {
+        const [cls, label, why] = connState(id, c);
+        return `<li class="setup-row"><span class="badge ${cls}">${esc(label)}</span><div class="grow"><b>${esc(c.label)}</b>${why ? `<small>${esc(why)}</small>` : ""}</div></li>`;
+      }).join("")}</ul>` : "";
+    }).join("");
+  };
+  // The list above the other sections grows when it fills in, so a deep link jumps only after that has happened.
+  const afterConnections = (cs) => { if (stale(tk)) return; renderConnections(cs); if (section && section !== "connections") jump(section, false); };
+  api("/api/connections/status").then(afterConnections).catch(() => afterConnections(null));
+
+  // ---- paid data keys (Apify / Bright Data)
+  const renderPaid = () => {
+    const ap = !!s.apify_key_mask, bd = !!s.brightdata_key_mask;
+    $("#apify-key").placeholder = ap ? `Saved ${s.apify_key_mask} - paste to replace` : orgHas("apify_api_key") ? "Your company shares a token - paste your own to use it instead" : "Paste your Apify API token";
+    $("#bd-key").placeholder = bd ? `Saved ${s.brightdata_key_mask} - paste to replace` : orgHas("brightdata_api_key") ? "Your company shares a key - paste your own to use it instead" : "Paste your Bright Data key";
+    $("#apify-hint").innerHTML = ap ? '<button type="button" class="btn btn-sm btn-danger" id="rm-apify">Remove saved token</button>' : "";
+    $("#bd-hint").innerHTML = bd ? '<button type="button" class="btn btn-sm btn-danger" id="rm-bd">Remove saved key</button>' : "";
+    $("#paid-status").innerHTML = ap || bd || orgHas("apify_api_key") || orgHas("brightdata_api_key") ? '<span class="badge done">Ready</span>' : '<span class="badge plain">Not set up</span>';
+    [["rm-apify", "apify_api_key", "Apify token", "apify_key_mask"], ["rm-bd", "brightdata_api_key", "Bright Data key", "brightdata_key_mask"]].forEach(([id, name, label, mask]) => {
+      $("#" + id)?.addEventListener("click", async () => {
+        if (!await confirmDialog(`Remove your ${label}?`, "Deep runs that use it will stop until you add one again.", "Remove")) return;
+        try { await api("/api/settings", { method: "POST", body: { [name]: "" } }); s[mask] = ""; renderPaid(); toast(`${label} removed`, "ok"); } catch (e) { toast(e.message, "err"); }
+      });
+    });
+  };
+  renderPaid();
+  $("#save-paid").onclick = async () => {
+    const ap = $("#apify-key").value.trim(), bd = $("#bd-key").value.trim();
+    if (!ap && !bd) return toast("Paste a token or key first.", "err");
+    try {
+      await api("/api/settings", { method: "POST", body: { ...(ap ? { apify_api_key: ap } : {}), ...(bd ? { brightdata_api_key: bd } : {}) } });
+      Object.assign(s, await api("/api/settings"));
+      $("#apify-key").value = ""; $("#bd-key").value = "";
+      renderPaid(); toast("Saved", "ok");
+    } catch (e) { toast(e.message, "err"); }
+  };
+  [["test-apify", "apify"], ["test-bd", "brightdata"]].forEach(([id, name]) => {
+    $("#" + id).onclick = async () => {
+      const b = $("#" + id), msg = $("#paid-msg");
+      b.disabled = true; msg.innerHTML = '<span class="spinner"></span>';
+      try {
+        const r = await api("/api/settings/key-test", { method: "POST", body: { name } });
+        msg.innerHTML = r.ok ? '<span class="badge done">Working</span>' : `<span class="badge error">${esc(r.error)}</span>`;
+      } catch (e) { msg.innerHTML = `<span class="badge error">${esc(e.message)}</span>`; }
+      b.disabled = false;
+    };
+  });
+
+  // ---- jump between sections; a deep link (#/settings/keys) scrolls straight to one
+  const SEC_ID = { connections: "sec-connections", keys: "sec-keys", ai: "sec-ai", sources: "sec-sources", account: "sec-account" };
+  const jump = (k, smooth) => document.getElementById(SEC_ID[k])?.scrollIntoView({ behavior: smooth ? "smooth" : "auto", block: "start" });
+  $$("#settings-nav [data-sec]").forEach((b) => b.onclick = () => jump(b.dataset.sec, true));
   $("#save-brave").onclick = async () => {
     const key = $("#brave-key")?.value.trim();
     if (!key && !s.brave_key_mask) return toast("Paste your Brave key first.", "err");
@@ -2348,10 +2523,10 @@ async function viewAdmin() {
         <div class="card-body">
           <div class="muted small" id="conns-status">${conns ? esc(conns.status_string || "") : "Connection status unavailable."}</div>
           <div class="grid grid-2 mt-8">
-            <div class="field"><label class="label" for="social-budget-inr">Monthly social budget (₹)</label><input class="input" id="social-budget-inr" type="number" min="0" placeholder="e.g. 2500"></div>
-            <div class="field"><label class="label" for="social-budget-usd">Monthly social budget ($)</label><input class="input" id="social-budget-usd" type="number" min="0" step="0.01" placeholder="e.g. 26"></div>
+            <div class="field"><label class="label" for="social-budget-inr">Monthly paid-data budget (₹)</label><input class="input" id="social-budget-inr" type="number" min="0" placeholder="e.g. 2500"></div>
+            <div class="field"><label class="label" for="social-budget-usd">Monthly paid-data budget ($)</label><input class="input" id="social-budget-usd" type="number" min="0" step="0.01" placeholder="e.g. 26"></div>
           </div>
-          <div class="row-flex"><button class="btn btn-sm" id="budgets-save">Save budget</button><span class="muted small">Paid enrichment stays off until a budget is set. 1,000 profiles ≈ $1.40–$3.50 ≈ ₹135–₹340.</span></div>
+          <div class="row-flex"><button class="btn btn-sm" id="budgets-save">Save budget</button><span class="muted small">One budget covers every paid run (Google Maps, website contacts, social lookups). Paid runs stay off until a budget is set. 1,000 social profiles ≈ $1.40–$3.50 ≈ ₹135–₹340.</span></div>
           <div class="field mt-8"><label class="label" for="pacing">Search pacing</label>
             <select class="input" id="pacing" style="max-width:320px"><option value="conservative">Conservative — slowest, kindest to free engines</option><option value="standard">Standard</option><option value="fast">Fast — only with a search key</option></select>
             <div class="hint">Changes how long runs wait between searches. Takes effect on the next run, no redeploy.</div></div>
@@ -2371,7 +2546,7 @@ async function viewAdmin() {
           <div class="table-wrap"><table class="tbl"><thead><tr><th>Service</th><th>Kind</th><th>Enabled</th><th>Health</th><th></th></tr></thead><tbody id="conns-body">
             ${(conns ? Object.entries(conns.services) : []).map(([name, s]) => `<tr><td><b>${esc(s.label || name)}</b></td><td>${esc(s.kind || "")}</td>
               <td><label class="switch"><input type="checkbox" data-conn="${esc(name)}" ${s.enabled ? "checked" : ""}><span class="sw"></span></label></td>
-              <td>${s.enabled ? (s.healthy ? '<span class="badge done">OK</span>' : `<span class="badge plain">FAIL</span> <small class="muted">${esc(s.error || "")}</small>`) : '<span class="badge cancelled plain">OFF</span>'}</td>
+              <td>${s.enabled ? (s.healthy ? (s.checked === false ? '<span class="badge plain">not checked</span>' : '<span class="badge done">OK</span>') : `<span class="badge plain">FAIL</span> <small class="muted">${esc(s.error || "")}</small>`) : '<span class="badge cancelled plain">OFF</span>'}</td>
               <td class="actions"><button class="btn btn-sm" data-conn-test="${esc(name)}">Test</button></td></tr>`).join("")}
           </tbody></table></div>
         </div>

@@ -12,7 +12,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 from urllib.parse import urlparse
 
-from . import ai_extract, discover, extract, listings, places, search, sources
+from . import ai_extract, apify_actors, discover, extract, listings, places, search, sources
 from . import topic as topic_words
 from .excel import SECRET_KEYS
 from .fetch import WORKERS, Fetcher, domain_of
@@ -350,14 +350,9 @@ def preflight(spec: dict) -> dict:
     from .config import FREE_PLACES_ORDER, FREE_SEARCH_ORDER, is_enabled
 
     def _unhealthy(name: str) -> bool:
-        try:
-            from .connection_health import HEALTH_CACHE, _is_cache_fresh
+        from .connection_health import is_unhealthy
 
-            if _is_cache_fresh(name):
-                return not bool(HEALTH_CACHE.get(name, {}).get("healthy", True))
-        except Exception:
-            pass
-        return False
+        return is_unhealthy(name)
 
     notes: list[str] = []
     search_eff: list[str] = []
@@ -440,8 +435,23 @@ def preflight(spec: dict) -> dict:
             lim_usd, lim_inr = _social_limits()
             if lim_usd <= 0 and lim_inr <= 0:
                 notes.append("no monthly social budget is set; paid enrichment stays off until an admin sets one")
+    # Paid Apify data for a Deep Places / Enrich run: only with the person's own token, the admin's switch on and the
+    # Apify token not known-broken. Standard runs never get these.
+    paid_places: list[str] = []
+    paid_contacts: list[str] = []
+    if spec.get("depth") == "deep" and spec.get("mode") in ("places", "enrich"):
+        wanted, bucket = (("apify_places", paid_places) if spec["mode"] == "places" else ("apify_contacts", paid_contacts))
+        if not is_enabled(wanted):
+            notes.append(f"skipped {wanted} (disabled in Admin \u2192 Connections)")
+        elif not (spec.get("apify_key") or ""):
+            notes.append(f"skipped {wanted} (no Apify token)")
+        elif _unhealthy("apify"):
+            notes.append(f"skipped {wanted} (Apify's last check failed)")
+        else:
+            bucket.append(wanted)
     return {"search": search_eff, "places": places_eff, "ai_ok": ai_ok, "notes": notes,
-            "social": social_providers, "estimate_usd": estimate_usd, "estimate_inr": estimate_inr}
+            "social": social_providers, "estimate_usd": estimate_usd, "estimate_inr": estimate_inr,
+            "paid_places": paid_places, "paid_contacts": paid_contacts}
 
 
 def _run(job: Job):
@@ -1125,6 +1135,7 @@ def _run_enrich(job: Job):
                  "Address": r.get("Address", ""), "_orig": r} for r in batch]
         fetcher = Fetcher(spec)
         _enrich_listed_rows(job, fetcher, work, spec)
+        _paid_contacts(job, work)
         for w in work:
             orig = w["_orig"]
             had_emails = {e.strip() for e in str(orig.get(email_col, "") or "").split(";") if e.strip()} if email_col else set()
@@ -1390,6 +1401,97 @@ def _discover_websites(job: Job, rows: list[dict]):
         job.say(f"  Looked up the first {len(batch)} of {len(todo)} places. Run again with a smaller area for the rest.")
 
 
+# ---------------------------------------------------------------- paid Apify data (Deep Places / Enrich runs)
+# One monthly pot covers all paid actor spend: the same budget the admin already sets for social enrichment.
+
+def _paid_budget_left(job: Job) -> float:
+    """USD still spendable this month; 0 when no budget is set (paid calls stay off until an admin sets one)."""
+    from .config import USD_TO_INR
+
+    lim_usd, lim_inr = _social_limits()
+    if lim_usd <= 0 and lim_inr <= 0:
+        return 0.0
+    sp_usd, sp_inr = _social_spend(job.owner_id)
+    left = []
+    if lim_usd > 0:
+        left.append(lim_usd - sp_usd)
+    if lim_inr > 0:
+        left.append((lim_inr - sp_inr) / USD_TO_INR)
+    return max(min(left), 0.0)
+
+
+def _charge_paid(job: Job, usd: float, what: str) -> None:
+    from .config import USD_TO_INR
+
+    _add_social_spend(job.owner_id, usd, usd * USD_TO_INR, label=f"paid.{what}")
+    job.say(f"  paid {what}: about ${usd:.3f} / \u20b9{usd * USD_TO_INR:.1f} used")
+
+
+def _paid_places(job: Job, loc: str) -> list[dict]:
+    """Google Maps rows for one location, through the person's Apify account. [] (with a log line) when it can't run."""
+    eff = job.effective if isinstance(job.effective, dict) else {}
+    if not eff.get("paid_places"):
+        return []
+    spec = job.spec
+    n = min(int(spec.get("max_results") or 30), apify_actors.MAX_PLACES_PER_CALL)
+    contacts = not spec.get("names_only")
+    est, left = apify_actors.estimate_places_usd(n, contacts), _paid_budget_left(job)
+    if est > left:
+        job.say(f"  Google Maps (paid) skipped for {loc}: up to ${est:.2f} but ${left:.2f} of the monthly budget is left")
+        return []
+    job.activity = f"Asking Google Maps (paid) about {loc}\u2026"
+    try:
+        rows = apify_actors.fetch_places(spec["category"], loc, n, spec.get("apify_key", ""),
+                                         spec.get("name_filter", ""), contacts)
+    except apify_actors.ActorError as e:
+        job.say(f"  Google Maps (paid) failed: {e}")
+        job.problems.append(str(e))
+        return []
+    _charge_paid(job, apify_actors.places_cost_usd(len(rows), contacts), "places")
+    for r in rows:
+        r["_paid"] = True
+    job.say(f"  {len(rows)} places from Google Maps (paid)")
+    return rows
+
+
+def _paid_contacts(job: Job, work: list[dict]) -> None:
+    """Fill emails/phones for rows that have a website but still no contact after the free crawl. Hybrid on purpose:
+    the free path goes first, the paid actor only pays for the gaps."""
+    eff = job.effective if isinstance(job.effective, dict) else {}
+    if not eff.get("paid_contacts") or job.cancelled.is_set():
+        return
+    todo = [w for w in work if (w.get("Website") or "").strip() and not (w.get("Emails") or w.get("Phone Numbers"))]
+    todo = todo[:apify_actors.MAX_PAID_URLS_PER_RUN]
+    if not todo:
+        return
+    job.say(f"Asking Apify (paid) for contacts on {len(todo)} websites the free lookup could not read\u2026")
+    filled = 0
+    for i in range(0, len(todo), apify_actors.CONTACT_BATCH):
+        batch = todo[i:i + apify_actors.CONTACT_BATCH]
+        est, left = apify_actors.estimate_contacts_usd(len(batch), 1), _paid_budget_left(job)
+        if est > left:
+            job.say(f"  stopped: next batch could cost ${est:.2f} but ${left:.2f} of the monthly budget is left")
+            break
+        job.activity = f"Reading {len(batch)} websites for contacts (paid)\u2026"
+        try:
+            found = apify_actors.fetch_contacts([w["Website"] for w in batch], job.spec.get("apify_key", ""))
+        except apify_actors.ActorError as e:
+            job.say(f"  Apify contacts failed: {e}")
+            job.problems.append(str(e))
+            break
+        _charge_paid(job, apify_actors.contacts_cost_usd(len(batch)), "contacts")
+        for w in batch:
+            rec = found.get(apify_actors.host_of(w["Website"]))
+            if not rec:
+                continue
+            if rec["emails"]:
+                w["Emails"] = "; ".join(rec["emails"][:5])
+            if rec["phones"]:
+                w["Phone Numbers"] = "; ".join(rec["phones"][:5])
+            filled += bool(rec["emails"] or rec["phones"])
+    job.say(f"  {filled} more website{'s' if filled != 1 else ''} gave contact details")
+
+
 def _run_places_names(job: Job):
     """Stage 1 discovery for Places: map names only, no website lookup of any kind."""
     from .config import DISCOVERY_COLUMNS
@@ -1415,13 +1517,14 @@ def _run_places_names(job: Job):
             job.say(f"  failed: {type(e).__name__}: {e}")
             job.problems.append(f"Could not reach the map service ({type(e).__name__}). Please try again.")
             found = []
+        found = found + _paid_places(job, loc)
         added = 0
         for r in found:
             name = (r.get("Name", "") or "").strip()
             if len(name) < 2 or name.lower() in known:
                 continue
             known.add(name.lower())
-            job.rows.append(_discovery_row(name, "Map", loc))
+            job.rows.append(_discovery_row(name, "Google Maps" if r.get("_paid") else "Map", loc))
             added += 1
         job.say(f"  {added} new company name{'s' if added != 1 else ''} saved")
         job.done += 1
@@ -1455,6 +1558,7 @@ def _run_places(job: Job):
             job.say(f"  failed: {type(e).__name__}: {e}")
             job.problems.append(f"Could not reach the map service ({type(e).__name__}). Please try again.")
             found = []
+        found = found + _paid_places(job, loc)
         for r in found:
             r["Search Location"] = loc
         job.say(f"  {len(found)} places found")
@@ -1471,8 +1575,8 @@ def _run_places(job: Job):
         return
 
     for r in all_rows:
-        if r.get("Website"):
-            r["Website Source"] = "Map"
+        if r.get("Website") and not r.get("Website Source"):
+            r["Website Source"] = "Map"  # paid Google Maps rows already say so
     fetcher = Fetcher(spec)
     if spec.get("find_websites", True):
         _guess_websites(job, fetcher, all_rows)
@@ -1569,7 +1673,7 @@ def _social_spend(owner_id: int | None) -> tuple[float, float]:
         return (0.0, 0.0)
 
 
-def _add_social_spend(owner_id: int | None, usd: float, inr: float) -> None:
+def _add_social_spend(owner_id: int | None, usd: float, inr: float, label: str = "social.spend") -> None:
     try:
         from models import MonthlyBudget, db
 
@@ -1583,7 +1687,7 @@ def _add_social_spend(owner_id: int | None, usd: float, inr: float) -> None:
         if usd or inr:
             from models import log_audit
 
-            log_audit(owner_id, "social.spend", f"+${float(usd):.4f} / ₹{float(inr):.2f}")
+            log_audit(owner_id, label, f"+${float(usd):.4f} / ₹{float(inr):.2f}")
     except Exception:
         try:
             from models import db as _db

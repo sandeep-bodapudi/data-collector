@@ -26,6 +26,25 @@ HEALTH_CACHE: dict[str, dict] = {}
 CACHE_TTL_SECONDS = 1800  # 30 minutes
 
 
+def is_unhealthy(service: str) -> bool:
+    """The one rule for 'last check failed': only a FRESH entry that says unhealthy counts. No entry, or a stale one,
+    means unknown - and unknown is usable. Search, Places, preflight and the status endpoint all use this."""
+    try:
+        if _is_cache_fresh(service):
+            return not bool(HEALTH_CACHE.get(service, {}).get("healthy", True))
+    except Exception:
+        pass
+    return False
+
+
+def is_checked(service: str) -> bool:
+    """True when there is a fresh health result (good or bad) for the service."""
+    try:
+        return _is_cache_fresh(service)
+    except Exception:
+        return False
+
+
 def _is_cache_fresh(service: str) -> bool:
     """Return True if the cached health check for *service* is still fresh."""
     entry = HEALTH_CACHE.get(service)
@@ -516,6 +535,8 @@ def status_string(statuses: dict, enabled: dict[str, bool] | None = None) -> str
         label = friendly.get(svc, svc)
         if enabled is not None and not enabled.get(svc, True):
             parts.append(f"{label} OFF")
+        elif entry.get("checked") is False:
+            parts.append(f"{label} not checked yet")
         elif healthy:
             parts.append(f"{label} OK")
         else:

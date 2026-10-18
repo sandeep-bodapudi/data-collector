@@ -76,7 +76,7 @@
       <div><b>OneBridge</b><small>Data Collector</small></div>
     </div>
     {% if user.role != 'viewer' %}
-    <a class="btn btn-primary nav-btn-new" href="#/new/web"><svg width="16" height="16"><use href="#i-plus"/></svg>New run</a>
+    <a class="btn btn-primary nav-btn-new" href="#/new"><svg width="16" height="16"><use href="#i-plus"/></svg>New run</a>
     {% endif %}
     <nav class="nav">
       <a href="#/home" data-nav="home"><svg width="18" height="18"><use href="#i-home"/></svg>Home</a>
@@ -85,8 +85,8 @@
       <a href="#/shared" data-nav="shared"><svg width="18" height="18"><use href="#i-share"/></svg>Shared</a>
       <div class="nav-label">Tools</div>
       <a href="#/merge" data-nav="merge"><svg width="18" height="18"><use href="#i-merge"/></svg>Merge &amp; Dedupe</a>
-      <div class="nav-label">Account</div>
-      <a href="#/settings" data-nav="settings"><svg width="18" height="18"><use href="#i-settings"/></svg>Settings</a>
+      <div class="nav-label">Setup</div>
+      <a href="#/settings/connections" data-nav="settings"><svg width="18" height="18"><use href="#i-settings"/></svg>Connections &amp; settings</a>
       {% if user.role == 'admin' %}
       <a href="#/admin" data-nav="admin"><svg width="18" height="18"><use href="#i-shield"/></svg>Admin</a>
       {% endif %}

@@ -166,14 +166,9 @@ def _enabled(name: str) -> bool:
 
 
 def _cache_says_unhealthy(name: str) -> bool:
-    try:
-        from .connection_health import HEALTH_CACHE, _is_cache_fresh
+    from .connection_health import is_unhealthy
 
-        if _is_cache_fresh(name):
-            return not bool(HEALTH_CACHE.get(name, {}).get("healthy", True))
-    except Exception:
-        pass
-    return False
+    return is_unhealthy(name)
 
 
 def web_search(query: str, region: str, max_results: int, say, engines=None) -> list[dict]:

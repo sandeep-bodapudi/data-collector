@@ -509,8 +509,21 @@ def build_job_spec(d: dict, vault: dict, user_id: int, enforce_budget: bool = Tr
     except (TypeError, ValueError):
         return None, "Max results must be a number.", 400
 
+    # Depth: "standard" (default) or "deep". Deep is refused up front when no paid service could actually run, so the
+    # screen and the server agree and a "Deep" run is never silently a Standard one.
+    from scraper import capabilities
+
+    depth = d.get("depth", "standard")
+    if depth not in capabilities.DEPTHS:
+        return None, "Depth must be standard or deep.", 400
+    if mode in capabilities.DEEP_SERVICES:
+        depth_ok, depth_why = capabilities.check_depth(mode, depth, vault)
+        if not depth_ok:
+            return None, depth_why, 400
+
     restricted = _restricted_enabled()
     common = {
+        "depth": depth,
         "custom_fields": custom, "max_results": max_results,
         "file_name": _clean_name(d.get("file_name"), ""),
         "ai": ai, "allow_restricted": restricted, "brave_key": vault.get("brave_api_key", ""),
@@ -630,7 +643,41 @@ def build_job_spec(d: dict, vault: dict, user_id: int, enforce_budget: bool = Tr
                 "follow_contact": bool(d.get("follow_contact", True)), "one_per_site": bool(d.get("one_per_site")),
                 "require": d.get("require") if d.get("require") in ("emails", "phones", "any_contact") else "",
                 **common}
+    # Deep Places / Enrich runs can buy data through the person's own Apify account. The token joins the spec only for
+    # those runs, and the same monthly budget that guards social enrichment gates the spend (402 when it can't be paid).
+    if depth == "deep" and mode in ("places", "enrich"):
+        spec["apify_key"] = vault.get("apify_api_key", "")
+        if enforce_budget:
+            err = _paid_gate(spec, user_id)
+            if err:
+                return None, err, 402
     return spec, None, 200
+
+
+def _paid_gate(spec: dict, user_id: int) -> str:
+    """'' when the paid part of a Deep run (if any) fits the monthly budget, else a plain-words reason."""
+    from scraper import apify_actors
+    from scraper.config import USD_TO_INR
+    from scraper.jobs import _social_limits, _social_spend, preflight as _pre
+
+    eff = _pre(spec)
+    if spec["mode"] == "places" and eff.get("paid_places"):
+        n = min(spec["max_results"], apify_actors.MAX_PLACES_PER_CALL) * len(spec["locations"])
+        est = apify_actors.estimate_places_usd(n, not spec.get("names_only"), calls=len(spec["locations"]))
+    elif spec["mode"] == "enrich" and eff.get("paid_contacts"):
+        est = apify_actors.estimate_contacts_usd(min(len(spec["rows"]), apify_actors.MAX_PAID_URLS_PER_RUN))
+    else:
+        return ""  # nothing paid will run (AI only, or the Apify switch/token is off): no budget needed
+    lim_usd, lim_inr = _social_limits()
+    if lim_usd <= 0 and lim_inr <= 0:
+        return ("Paid data needs a monthly budget first. Ask your admin to set one in Admin \u2192 Connections, "
+                "or run again as Standard.")
+    sp_usd, sp_inr = _social_spend(user_id)
+    over = (lim_usd > 0 and sp_usd + est > lim_usd) or (lim_inr > 0 and sp_inr + est * USD_TO_INR > lim_inr)
+    if over:
+        return (f"This run could cost up to ${est:.2f} but only ${max(lim_usd - sp_usd, 0):.2f} of the monthly budget is left. "
+                "Ask for fewer places or locations, run as Standard, or ask your admin to raise the budget.")
+    return ""
 
 
 @app.post("/api/jobs")
@@ -957,6 +1004,30 @@ def test_brave_key():
             return jsonify(ok=False, error="Brave says the rate or monthly limit is used up. Try again later.")
         return jsonify(ok=False, error="Could not reach Brave. Check your connection and try again.")
     return jsonify(ok=True, results=len(hits))
+
+
+@app.post("/api/settings/key-test")
+@roles_required("admin", "member")
+def test_paid_key():
+    """Check the person's own saved Apify token or Bright Data key. Never returns the key, only a readable result."""
+    from scraper.connection_health import check_apify_key, check_brightdata_key
+
+    name = (request.get_json(force=True, silent=True) or {}).get("name")
+    checks = {"apify": ("apify_api_key", check_apify_key, "Apify"),
+              "brightdata": ("brightdata_api_key", check_brightdata_key, "Bright Data")}
+    if name not in checks:
+        return jsonify(ok=False, error="Unknown connector."), 400
+    vault_name, fn, label = checks[name]
+    key = _effective_vault(current_user.id, current_user.role).get(vault_name, "")
+    if not key:
+        return jsonify(ok=False, error=f"Save your {label} key first.")
+    try:
+        r = fn(key)
+    except Exception as e:  # a failing check is a message, never a crash and never the key
+        return jsonify(ok=False, error=f"Could not check {label} ({type(e).__name__}).")
+    if r.get("healthy"):
+        return jsonify(ok=True)
+    return jsonify(ok=False, error=(r.get("error") or f"{label} refused this key.")[:160])
 
 
 @app.post("/api/settings")
@@ -1378,18 +1449,21 @@ def admin_save_settings():
 def connections_status():
     """Member-visible connection summary. No keys or secrets, only flags + health + own spend."""
     from scraper.config import SERVICES
-    from scraper.connection_health import HEALTH_CACHE, status_string
+    from scraper.connection_health import HEALTH_CACHE, is_checked, is_unhealthy, status_string
 
     enabled = _enabled_map()
     services = {}
     for name, meta in SERVICES.items():
         entry = HEALTH_CACHE.get(name, {})
+        # Same rule preflight uses: only a fresh failed check is "unhealthy"; no result yet is "not checked" and usable.
         services[name] = {
             "label": meta["label"],
             "kind": meta["kind"],
+            "cost": meta.get("cost", "free"),
             "enabled": enabled.get(name, True),
-            "healthy": bool(entry.get("healthy", False)),
-            "error": (entry.get("error", "") or "")[:100],
+            "healthy": not is_unhealthy(name),
+            "checked": is_checked(name),
+            "error": (entry.get("error", "") or "")[:100] if is_unhealthy(name) else "",
         }
     social_spend = None
     try:
@@ -1406,11 +1480,34 @@ def connections_status():
     return jsonify(
         services=services,
         status_string=status_string(
-            {k: {"healthy": v["healthy"], "error": v["error"]} for k, v in services.items()},
+            {k: {"healthy": v["healthy"], "error": v["error"], "checked": v["checked"]} for k, v in services.items()},
             enabled,
         ),
         social_spend=social_spend,
     )
+
+
+@app.get("/api/run-options")
+@roles_required("admin", "member")
+def run_options():
+    """What a run of this mode/depth can do right now - services, fields, setup gaps, whether Deep is possible.
+    Built from the same checks the job uses; no network calls, and never a key value, only whether one is present."""
+    from scraper import capabilities
+
+    mode = request.args.get("mode", "web")
+    if mode not in capabilities.DEEP_SERVICES:
+        return jsonify(error="Unknown mode."), 400
+    depth = request.args.get("depth", "standard")
+    if depth not in capabilities.DEPTHS:
+        return jsonify(error="Depth must be standard or deep."), 400
+    vault = _effective_vault(current_user.id, current_user.role)
+    has_sources = DirectorySource.query.filter_by(owner_id=current_user.id).first() is not None
+    from scraper.jobs import _social_limits, _social_spend
+
+    lim_usd, lim_inr = _social_limits()
+    sp_usd, _sp_inr = _social_spend(current_user.id)
+    budget = {"set": bool(lim_usd > 0 or lim_inr > 0), "limit_usd": lim_usd, "spent_usd": round(sp_usd, 4)}
+    return jsonify(capabilities.run_options(mode, depth, vault, has_sources, budget))
 
 
 @app.post("/api/social/estimate")
@@ -1464,7 +1561,7 @@ def _enabled_map() -> dict[str, bool]:
 def admin_get_connections():
     """Health + enable state for every registered service. Never probes network inline."""
     from scraper.config import SERVICES
-    from scraper.connection_health import HEALTH_CACHE, status_string
+    from scraper.connection_health import HEALTH_CACHE, is_checked, is_unhealthy, status_string
 
     enabled = _enabled_map()
     services = {}
@@ -1473,16 +1570,18 @@ def admin_get_connections():
         services[name] = {
             "label": meta["label"],
             "kind": meta["kind"],
+            "cost": meta.get("cost", "free"),
             "needs_key": meta["needs_key"],
             "enabled": enabled.get(name, True),
-            "healthy": bool(entry.get("healthy", False)),
-            "error": (entry.get("error", "") or "")[:100],
+            "healthy": not is_unhealthy(name),
+            "checked": is_checked(name),
+            "error": (entry.get("error", "") or "")[:100] if is_unhealthy(name) else "",
             "last_checked": entry.get("checked_at", 0),
         }
     return jsonify(
         services=services,
         status_string=status_string(
-            {k: {"healthy": v["healthy"], "error": v["error"]} for k, v in services.items()},
+            {k: {"healthy": v["healthy"], "error": v["error"], "checked": v["checked"]} for k, v in services.items()},
             enabled,
         ),
     )

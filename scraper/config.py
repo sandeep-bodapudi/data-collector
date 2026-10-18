@@ -7,18 +7,26 @@ Effective = enabled AND healthy.
 """
 from __future__ import annotations
 
+# "free" = usable with no paid account at all. "cost" says what using it can cost the person:
+#   "free" - nothing, no key        "key" - needs the person's own key, which normally has a free quota
+#   "paid" - bills the person's own account (AI provider, Bright Data, Apify)
+# A "Deep" run is one that can use at least one "paid" service (scraper/capabilities.py).
 SERVICES: dict[str, dict] = {
-    "brave": {"label": "Brave Search", "kind": "search", "needs_key": True, "free": True, "default": "1"},
-    "google_cse": {"label": "Google CSE", "kind": "search", "needs_key": True, "free": True, "default": "1"},
-    "ddgs": {"label": "Free engines (DDGS)", "kind": "search", "needs_key": False, "free": True, "default": "1"},
-    "overpass": {"label": "Overpass", "kind": "places", "needs_key": False, "free": True, "default": "1"},
-    "photon": {"label": "Photon", "kind": "places", "needs_key": False, "free": True, "default": "1"},
-    "nominatim": {"label": "Nominatim", "kind": "places", "needs_key": False, "free": True, "default": "1"},
-    "wikidata": {"label": "Wikidata", "kind": "places", "needs_key": False, "free": True, "default": "1"},
-    "ai": {"label": "AI custom fields", "kind": "ai", "needs_key": True, "free": False, "default": "1"},
-    "social": {"label": "Social enrichment (master)", "kind": "social", "needs_key": False, "free": False, "default": "0"},
-    "brightdata": {"label": "Bright Data (social)", "kind": "social", "needs_key": True, "free": True, "default": "0"},
-    "apify": {"label": "Apify actors (social)", "kind": "social", "needs_key": True, "free": False, "default": "0"},
+    "brave": {"label": "Brave Search", "kind": "search", "needs_key": True, "free": False, "cost": "key", "default": "1"},
+    "google_cse": {"label": "Google CSE", "kind": "search", "needs_key": True, "free": False, "cost": "key", "default": "1"},
+    "ddgs": {"label": "Free engines (DDGS)", "kind": "search", "needs_key": False, "free": True, "cost": "free", "default": "1"},
+    "overpass": {"label": "Overpass", "kind": "places", "needs_key": False, "free": True, "cost": "free", "default": "1"},
+    "photon": {"label": "Photon", "kind": "places", "needs_key": False, "free": True, "cost": "free", "default": "1"},
+    "nominatim": {"label": "Nominatim", "kind": "places", "needs_key": False, "free": True, "cost": "free", "default": "1"},
+    "wikidata": {"label": "Wikidata", "kind": "places", "needs_key": False, "free": True, "cost": "free", "default": "1"},
+    "ai": {"label": "AI custom fields", "kind": "ai", "needs_key": True, "free": False, "cost": "paid", "default": "1"},
+    "social": {"label": "Social enrichment (master)", "kind": "social", "needs_key": False, "free": False, "cost": "paid", "default": "0"},
+    "brightdata": {"label": "Bright Data (social)", "kind": "social", "needs_key": True, "free": False, "cost": "paid", "default": "0"},
+    # Paid data through the person's own Apify token (scraper/apify_actors.py). Off until an admin turns them on, like
+    # the social providers. They share the "apify" token, so they share its health result.
+    "apify_places": {"label": "Apify Google Maps places", "kind": "places", "needs_key": True, "free": False, "cost": "paid", "default": "0", "health_as": "apify"},
+    "apify_contacts": {"label": "Apify website contacts", "kind": "enrich", "needs_key": True, "free": False, "cost": "paid", "default": "0", "health_as": "apify"},
+    "apify": {"label": "Apify actors (social)", "kind": "social", "needs_key": True, "free": False, "cost": "paid", "default": "0"},
 }
 
 FREE_SEARCH_ORDER = ["brave", "google_cse", "ddgs"]

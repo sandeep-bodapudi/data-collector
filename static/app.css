@@ -426,4 +426,26 @@ kbd { font: 11.5px var(--mono); background: var(--surface-3); border: 1px solid 
   .tabs button { padding: 14px 12px; }
   .topbar .menu-toggle, #theme-toggle { min-width: 40px; min-height: 40px; }
   .person { padding: 12px; }
+  #presets .btn { min-height: 40px; }
 }
+
+/* ---------- new run: depth chooser and setup checklist ---------- */
+.setup-card { margin-bottom: 16px; }
+.setup-card .card-head { gap: 12px; flex-wrap: wrap; }
+.setup-list { list-style: none; margin: 12px 0 0; padding: 0; display: grid; gap: 8px; }
+.setup-row { display: flex; align-items: center; gap: 12px; padding: 10px 12px; border: 1px solid var(--line); border-radius: var(--radius-sm); background: var(--surface-2); }
+.setup-row .grow { min-width: 0; }
+.setup-row small { display: block; color: var(--muted); font-size: 12.5px; }
+.setup-row .badge { flex: none; min-width: 92px; justify-content: center; }
+.choice-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; margin-top: 12px; }
+.choice-grid .option { padding: 16px 38px 16px 14px; }
+.mode-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 12px; margin-top: 12px; }
+.mb-16 { margin-bottom: 16px; }
+@media (max-width: 860px) { .mode-grid { grid-template-columns: 1fr; } }
+@media (max-width: 640px) { .choice-grid { grid-template-columns: 1fr; } .setup-row { flex-wrap: wrap; } }
+
+/* ---------- settings: section nav + connections overview ---------- */
+.settings-nav { margin-bottom: 16px; position: sticky; top: 0; z-index: 5; box-shadow: var(--shadow-sm); }
+.conn-group { margin: 18px 0 8px; font-size: 13px; font-weight: 600; color: var(--muted); }
+.conn-group:first-child { margin-top: 0; }
+#view [id^="sec-"] { scroll-margin-top: 72px; }

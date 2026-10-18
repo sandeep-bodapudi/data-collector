@@ -37,6 +37,34 @@ class TestFrontendContracts(unittest.TestCase):
         self.assertPresent("Est. paid cost", "estimate row")
         self.assertPresent("/api/social/estimate", "estimate fetch")
 
+    def test_depth_first_new_run(self):
+        self.assertPresent("viewNewChooser", "depth chooser view")
+        self.assertPresent("#\\/new$", "bare /new route")
+        self.assertPresent("(?:\\/(standard|deep))?", "depth segment on the form route")
+        self.assertPresent("/api/run-options?mode=", "form reads what the run can do")
+        self.assertPresent('data-depth="${d}"', "depth switch on the form")
+        self.assertPresent("setupCard(OPT, depth)", "setup checklist on the form")
+        self.assertPresent("const body = { mode, depth,", "depth sent with the run")
+        self.assertPresent("OPT.blockers", "blockers stop the Start button")
+        self.assertPresent("Est. paid cost", "paid estimate row")
+        self.assertPresent('href="#/new">', "New run buttons open the chooser")
+
+    def test_connections_and_keys_settings(self):
+        self.assertPresent("viewSettings(m[1])", "settings sections are deep-linkable")
+        self.assertPresent("(connections|keys|ai|sources|account)", "section names in the route")
+        self.assertPresent('id="sec-connections"', "connections overview first")
+        self.assertPresent('id="sec-paid"', "paid data keys card")
+        self.assertPresent('id="apify-key"', "Apify token field")
+        self.assertPresent('id="bd-key"', "Bright Data key field")
+        self.assertPresent("/api/settings/key-test", "test saved paid keys")
+        self.assertPresent('id="settings-nav"', "jump-to-section nav")
+        self.assertPresent("Paid data:", "budget banner says paid data, not social")
+        self.assertPresent("Monthly paid-data budget", "admin budget label")
+        i = self.src.index('id="sec-connections"')
+        self.assertTrue(i < self.src.index('id="sec-keys"') < self.src.index('id="sec-paid"') < self.src.index('id="sec-ai"')
+                        < self.src.index('id="sec-sources"') < self.src.index('id="sec-account"'),
+                        "settings sections are in the order: connections, keys, paid data, AI, sources, account")
+
     def test_connection_transparency(self):
         self.assertPresent('id="conn-banner"', "connections banner")
         self.assertPresent("data-conn-test", "per-service Test button")
