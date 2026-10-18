@@ -6,6 +6,7 @@ import sys
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from scraper import discover, fetch, jobs, listings, places  # noqa: E402
+_REAL_OVERPASS = places._overpass  # kept: later sections replace it with fakes
 
 failures = []
 
@@ -1128,8 +1129,47 @@ ok("a category with no name rule is still asked for exactly the limit",
              setattr(places, "_overpass", _coaching_overpass), "out center tags 50;" in _coaching_sent["q"])[-1])())
 
 
+# ---- an overloaded mirror answering 500 must not stop the other mirrors (production, 2026-10-18) ------------------------
+class _R:
+    def __init__(self, code, data=None):
+        self.status_code, self._d = code, data or {}
+
+    def json(self):
+        return self._d
+
+
+_calls = []
+
+
+def _post_seq(codes):
+    def _post(url, data=None, headers=None, timeout=None):
+        _calls.append(url)
+        code = codes[min(len(_calls), len(codes)) - 1]
+        return _R(code, {"elements": [{"id": 1}]} if code == 200 else None)
+    return _post
+
+
+_real_post = places.requests.post
+places.requests.post = _post_seq([500, 200, 200])
+ok("HTTP 500 from the first mirror moves on to the next one", _REAL_OVERPASS("q") == [{"id": 1}] and len(_calls) == 2, _calls)
+_calls.clear()
+places.requests.post = _post_seq([400, 200, 200])
+try:
+    _REAL_OVERPASS("q")
+    ok("HTTP 400 (bad query) stops at once", False)
+except places.PlaceError:
+    ok("HTTP 400 (bad query) stops at once instead of asking every mirror", len(_calls) == 1, _calls)
+_calls.clear()
+places.requests.post = _post_seq([500, 503, 500])
+try:
+    _REAL_OVERPASS("q")
+    ok("all mirrors failing raises", False)
+except places.PlaceError as e:
+    ok("all mirrors failing raises PlaceError after trying each once", len(_calls) == len(places.OVERPASS_SERVERS) and "HTTP 500" in str(e), (_calls, str(e)))
+places.requests.post = _real_post
+
 print(f"\n{len(failures)} failure(s)" if failures else "\nAll tests passed")
 
 sys.exit(1 if failures else 0)
 
-
+

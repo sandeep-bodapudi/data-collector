@@ -591,7 +591,7 @@ const MODE_INFO = [
   ["places", "pin", "Find places", "Temples, hospitals, schools… in any city"],
   ["social", "users", "Social profiles", "Public LinkedIn, Instagram and Facebook details"],
 ];
-const SETUP_BADGE = { ready: ["done", "Ready"], optional: ["plain", "Optional"], missing: ["error", "Needs setup"] };
+const SETUP_BADGE = { ready: ["done", "Ready"], optional: ["plain", "Optional"], recommended: ["cancelled", "Recommended"], missing: ["error", "Needs setup"] };
 const savedDepth = () => { try { return sessionStorage.getItem("newRunDepth") === "deep" ? "deep" : "standard"; } catch { return "standard"; } };
 const saveDepth = (d) => { try { sessionStorage.setItem("newRunDepth", d); } catch { /* private window: the choice just isn't remembered */ } };
 

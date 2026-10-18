@@ -199,5 +199,55 @@ ok("setup checklist links into the right Settings section",
    any(r["href"] == "#/settings/keys" for r in opts["setup"]) and all(r["href"].startswith("#/") for r in opts["setup"] if r["href"]),
    [r["href"] for r in opts["setup"]])
 
+# ---- 9. a single search / location keeps its commas (production bug, 2026-10-18) ------------------------------------------
+with app.app_context():
+    s, e, code = appmod.build_job_spec({"mode": "places", "category": "Hindu temples", "locations": "Ameerpet, Hyderabad"}, {}, 1)
+    ok("one location with a comma stays one location", e is None and s["locations"] == ["Ameerpet, Hyderabad"], s and s["locations"])
+    s, e, code = appmod.build_job_spec({"mode": "places", "category": "Hindu temples", "locations": "Ameerpet, Hyderabad\nKukatpally, Hyderabad"}, {}, 1)
+    ok("several locations are split on lines only", e is None and s["locations"] == ["Ameerpet, Hyderabad", "Kukatpally, Hyderabad"], s and s["locations"])
+    s, e, code = appmod.build_job_spec({"mode": "web", "queries": "coaching centers in Ameerpet, Hyderabad", "fields": ["emails"]}, {}, 1)
+    ok("one search with a comma stays one search", e is None and s["queries"] == ["coaching centers in Ameerpet, Hyderabad"], s and s["queries"])
+    s, e, code = appmod.build_job_spec({"mode": "web", "queries": ["a, b", "c"], "fields": ["emails"]}, {}, 1)
+    ok("a list from a schedule or API caller is taken as given", e is None and s["queries"] == ["a, b", "c"])
+    s, e, code = appmod.build_job_spec({"mode": "places", "category": "Hindu temples", "locations": "Pune", "custom_fields": "main deity, timings"},
+                                       {"ai_api_key": AI_KEY, "ai_provider": "openai"}, 1)
+    ok("custom AI fields still split on commas", e is None and s["custom_fields"] == ["main deity", "timings"], s and s["custom_fields"])
+
+# ---- 10. web search that nobody answers (production, 2026-10-18) -------------------------------------------------------
+from scraper import jobs as JJ  # noqa: E402
+
+
+class _FJ:
+    def __init__(self, spec):
+        self.spec, self.problems, self.log, self.activity = spec, [], [], ""
+        self.cancelled = type("E", (), {"is_set": staticmethod(lambda: False)})
+
+    def say(self, m):
+        self.log.append(m)
+
+
+_real_ws, _real_sleep = JJ.web_search, JJ.time.sleep
+JJ.time.sleep = lambda s: None
+JJ.web_search = lambda q, region, n, say, *a, **k: []
+fj = _FJ({"queries": ["IT companies in Hyderabad contact", "schools in Pune"], "platforms": ["web"], "max_results": 10, "region": "in-en"})
+JJ._search(fj)
+ok("every search empty and no key -> a clear problem, not a silent empty run", any("Free engines usually refuse" in p for p in fj.problems), fj.problems)
+JJ.web_search = lambda q, region, n, say, *a, **k: [] if "Pune" in q else [{"title": "x", "href": "https://x.example.com", "body": ""}]
+fj2 = _FJ({"queries": ["IT companies in Hyderabad contact", "schools in Pune"], "platforms": ["web"], "max_results": 10, "region": "in-en"})
+JJ._search(fj2)
+ok("one search answered -> no such problem (nothing found is then a real answer)", not fj2.problems, fj2.problems)
+fj3 = _FJ({"queries": ["a"], "platforms": ["web"], "max_results": 10, "region": "in-en", "brave_key": "BSA-test-key-123456"})
+JJ.web_search = lambda q, region, n, say, *a, **k: []
+JJ._search(fj3)
+ok("with a search key an empty answer is not blamed on the server", not fj3.problems)
+JJ.web_search, JJ.time.sleep = _real_ws, _real_sleep
+
+os.environ["RENDER"] = "true"
+r10 = {x["id"]: x for x in C.run_options("web", "standard", {})["setup"]}
+ok("on the hosted app a missing Brave key is 'recommended', with the reason", r10["brave"]["status"] == "recommended" and "cloud servers" in r10["brave"]["why"], r10.get("brave"))
+os.environ.pop("RENDER")
+r11 = {x["id"]: x for x in C.run_options("web", "standard", {})["setup"]}
+ok("on a local machine it stays optional", r11["brave"]["status"] == "optional")
+
 print(f"\n{len(failures)} failure(s)" if failures else "\nAll tests passed")
 sys.exit(1 if failures else 0)

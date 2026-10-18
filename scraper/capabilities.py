@@ -208,8 +208,15 @@ def run_options(mode: str, depth: str, vault: dict, has_sources: bool = False, b
             "Using: " + ", ".join(chain["search"]) if ok else "Every search option is off or unavailable (Admin → Connections).",
             "" if ok else "#/settings/connections")
         if not key_present("brave", vault):
-            row("brave", "Brave Search key (faster, optional)", "optional",
-                "Free to get. Without it the run uses free engines, which are slower.", "#/settings/keys")
+            if os.environ.get("RENDER"):
+                # On the hosted app the free engines usually refuse the server's address outright (checked in
+                # production: 0 results for every search), so the key is not just "faster" there.
+                row("brave", "Brave Search key (needed on the hosted app)", "recommended",
+                    "Free engines usually refuse cloud servers, so web searches here often find nothing without it. "
+                    "Free to get.", "#/settings/keys")
+            else:
+                row("brave", "Brave Search key (faster, optional)", "optional",
+                    "Free to get. Without it the run uses free engines, which are slower.", "#/settings/keys")
     if mode == "places":
         ok = bool(chain["places"])
         row("places", "Map sources", "ready" if ok else "missing",

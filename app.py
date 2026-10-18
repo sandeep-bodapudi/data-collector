@@ -287,6 +287,16 @@ def _list(text: str) -> list[str]:
     return list(dict.fromkeys(p.strip() for p in text.split(sep) if p.strip()))
 
 
+def _one_per_line(v) -> list[str]:
+    """Searches and locations: one per line, never split on commas. "Ameerpet, Hyderabad" is ONE place and
+    "coaching centers in Ameerpet, Hyderabad" is ONE search - the form sends them newline-joined, so a single entry
+    has no newline, and the old comma fallback cut it in two (found in production: a one-location run searched
+    "Ameerpet" and, separately, the whole of "Hyderabad"). Lists (schedules, API callers) are taken as given."""
+    if isinstance(v, list):
+        return [str(x).strip() for x in v if str(x).strip()]
+    return list(dict.fromkeys(p.strip() for p in str(v or "").splitlines() if p.strip()))
+
+
 def _parse_social_items(d: dict) -> tuple[list[dict], list[str], str | None]:
     """Parse social input into (items, platforms, cap_error). Items: {url, platform, name}."""
     from scraper.social_base import PLATFORMS, normalize_url, platform_of
@@ -531,7 +541,7 @@ def build_job_spec(d: dict, vault: dict, user_id: int, enforce_budget: bool = Tr
         "fb_cookie": vault.get("fb_cookie", "") if restricted else "",
     }
     if mode == "places":
-        locations = list(dict.fromkeys(_lines(d.get("locations") or "")))
+        locations = list(dict.fromkeys(_one_per_line(d.get("locations") or "")))
         if not locations:
             return None, "Add at least one location.", 400
         if d.get("category") not in places.CATEGORIES:
@@ -607,7 +617,7 @@ def build_job_spec(d: dict, vault: dict, user_id: int, enforce_budget: bool = Tr
     else:
         # 300 is generous on purpose - for breadth across "100-200 websites" the limit that actually matters is how
         # fast search engines can be queried without being refused (see scraper/search.py), not this count.
-        queries = list(dict.fromkeys(_lines(d.get("queries") or "")))[:300]
+        queries = list(dict.fromkeys(_one_per_line(d.get("queries") or "")))[:300]
         # Several of a person's directory sources can be combined into one run - the same college, say, might be
         # missing from one directory and present in another, and listing expansion already dedupes by name across
         # every list it reads, so combining sources only ever adds coverage, never doubles a name up.

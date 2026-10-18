@@ -712,6 +712,7 @@ def _search(job: Job) -> tuple[list[dict], list[dict]]:
             job.say(f"Also searching {len(extra)} similar wordings (training/institute/academy style synonyms)…")
 
     results, listing_hits, seen = [], [], set()
+    searched, answered = 0, 0
     for q in expanded_queries:
         if job.cancelled.is_set():
             break
@@ -722,6 +723,8 @@ def _search(job: Job) -> tuple[list[dict], list[dict]]:
         except SearchBlocked as e:
             job.problems.append(str(e))
             hits = []
+        searched += 1
+        answered += bool(hits)
         signal = _signal_words(q)
         # Real failure, found on live micro-neighbourhood queries (e.g. "engineering colleges in Tarnaka"): a
         # genuine official college site for the exact right place still got dropped by _on_topic, because its own
@@ -771,6 +774,12 @@ def _search(job: Job) -> tuple[list[dict], list[dict]]:
             job.say("  skipped as unrelated: " + "; ".join(dropped_titles) + (" …" if off_topic > len(dropped_titles) else ""))
         if q != expanded_queries[-1]:
             time.sleep(_current_gap())  # measured-safe pacing; shorter automatically once an official search key is set
+    if searched and not answered and not job.cancelled.is_set() and not (spec.get("brave_key") or search.brave_key_set()):
+        # Seen in production: every free engine refuses a cloud server's address, so even "IT companies in Hyderabad"
+        # came back empty and the run used to end as a quiet "done, 0 rows". Say what actually happened instead.
+        job.problems.append("No search engine answered any of these searches. Free engines usually refuse requests "
+                            "from cloud servers, so on the hosted app a search key is needed: add a free Brave "
+                            "Search key in Connections & settings \u2192 Keys, or ask your admin to share one.")
     return results, listing_hits
 
 

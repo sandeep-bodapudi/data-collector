@@ -269,7 +269,10 @@ def _overpass(query: str, notify=None) -> list[dict]:
         if r.status_code == 200:
             return r.json().get("elements", [])
         last = f"HTTP {r.status_code}"
-        if r.status_code not in (429, 502, 503, 504):
+        # Any 5xx or 429 is the server, not the query: try the next mirror. (A 500 used to stop here, so one
+        # overloaded overpass-api.de sent production straight to Photon, which found 2 places instead of dozens.)
+        # A 4xx means the query itself was refused, and every mirror would refuse it the same way.
+        if r.status_code != 429 and r.status_code < 500:
             break
     raise PlaceError(f"OpenStreetMap's Overpass servers are busy or unreachable ({last}).")
 
