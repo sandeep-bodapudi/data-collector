@@ -28,6 +28,10 @@ NOT_OFFICIAL = (
     # lists many unrelated colleges per area/category, same as the directories above.
     "indiastudychannel.com", "asklaila.com", "webindia123.com", "colleges9.in", "collegeandfees.com", "fullhyderabad.com",
     "vedantu.com", "telugucolleges.com", "educationdunia.com", "careercartz.com",
+    # Code hosts, Q&A and blogging platforms: a page there is somebody's profile or post, never the company's own
+    # site (production, 2026-10-19: a GitHub user page came back as a "digital marketing institute in Ameerpet").
+    "github.com", "gitlab.com", "bitbucket.org", "stackoverflow.com", "stackexchange.com", "medium.com",
+    "blogspot.com", "wordpress.com", "substack.com", "tumblr.com", "sites.google.com",
 )
 # Words that say what kind of place it is, not which one. They don't identify the right website.
 GENERIC_WORDS = {

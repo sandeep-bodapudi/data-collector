@@ -194,5 +194,18 @@ ok("names-only keeps the real centre and treats the list page as a directory",
    [r["url"] for r in rows_l] == ["https://vibgyorcoaching.in/"], rows_l)
 J.web_search, J.time.sleep = real_ws, real_sleep
 
+# ---- junk a free engine answered on the hosted app (production, 2026-10-19) ----------------------------------------------
+Q_DM = "digital marketing institute in Ameerpet, Hyderabad"
+ok("'What Is Digital?' on a /jargon/ page is not a company",
+   not keep("What Is Digital?", "https://www.computerhope.com/jargon/d/digital.htm", Q_DM))
+ok("a /glossary/ page is not a company even with a plain title",
+   not keep("Digital Marketing", "https://example-agency.com/glossary/digital-marketing", Q_DM))
+ok("a question the person asked still gets answers", J._looks_like_definition("What is digital marketing", "what is digital marketing") is False)
+ok("a real institute titled normally is kept", keep("Digital Vidya - Digital Marketing Institute in Hyderabad", "https://www.digitalvidya.com/", Q_DM))
+from scraper import discover as D  # noqa: E402
+ok("GitHub, Medium and blogspot pages are never someone's official site",
+   not D._is_official_candidate("https://github.com/someone") and not D._is_official_candidate("https://x.blogspot.com/p")
+   and not D._is_official_candidate("https://medium.com/@x/post"))
+
 print(f"\n{len(failures)} failure(s)" if failures else "\nAll tests passed")
 sys.exit(1 if failures else 0)

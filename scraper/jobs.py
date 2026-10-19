@@ -590,12 +590,21 @@ _DEF_TITLE_WORDS = ("definition", "define", "meaning", "translation", "translate
 _PLACE_PREP_RE = re.compile(r"\b(in|near|at|around|across)\b")
 
 
-def _looks_like_definition(title: str, query: str) -> bool:
+_DEF_TITLE_START = re.compile(r"^\s*(what (is|are|does|do)|who (is|are)|how (to|does|do))\b", re.I)
+_DEF_PATH = re.compile(r"/(jargon|glossary|dictionary|definitions?|define|meaning|terms?|encyclopedia|wiki)/", re.I)
+
+
+def _looks_like_definition(title: str, query: str, url: str = "") -> bool:
+    """Dictionary/explainer pages. Besides the title words above: a title that opens with "What is..." / "How to..."
+    and a /jargon/, /glossary/, /definition/ style path (production, 2026-10-19: computerhope.com's "What Is
+    Digital?" came back as a digital marketing institute). Stands down when the person asked a question themselves."""
     low = (title or "").lower()
-    if not any(w in low for w in _DEF_TITLE_WORDS):
-        return False
     asked = (query or "").lower()
-    return not any(w in asked for w in _DEF_TITLE_WORDS)
+    if any(w in asked for w in _DEF_TITLE_WORDS) or _DEF_TITLE_START.search(asked):
+        return False
+    if any(w in low for w in _DEF_TITLE_WORDS) or _DEF_TITLE_START.search(low):
+        return True
+    return bool(url and _DEF_PATH.search(urlparse(url).path or ""))
 
 
 def _word_in(word: str, text: str) -> bool:
@@ -662,7 +671,7 @@ def _keep_hit(h: dict, url: str, query: str, area_confirmed: bool, wide: bool = 
     if _is_trusted_domain(url):
         return True
     title = h.get("title", "") or ""
-    if _looks_like_definition(title, query):
+    if _looks_like_definition(title, query, url):
         return False
     topic, place = _topic_place_words(query)
     if not topic and not place:
