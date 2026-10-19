@@ -2521,6 +2521,7 @@ async function viewAdmin() {
       <div class="card mt-16">
         <div class="card-head"><div><h3>${icon("info")} Connections</h3><p>Each source can be enabled or tested individually. Jobs only try enabled services.</p></div><div class="actions"><button class="btn btn-sm" id="conns-test-all">Test all</button></div></div>
         <div class="card-body">
+          ${conns && (conns.warnings || []).length ? conns.warnings.map((w) => `<div class="callout warn" style="margin-bottom:10px">${icon("alert")}<div>${esc(w)}</div></div>`).join("") : ""}
           <div class="muted small" id="conns-status">${conns ? esc(conns.status_string || "") : "Connection status unavailable."}</div>
           <div class="grid grid-2 mt-8">
             <div class="field"><label class="label" for="social-budget-inr">Monthly paid-data budget (₹)</label><input class="input" id="social-budget-inr" type="number" min="0" placeholder="e.g. 2500"></div>

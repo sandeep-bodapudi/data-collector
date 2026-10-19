@@ -42,6 +42,7 @@ Environment variables (set them in the Render dashboard, never in git):
 | `SECRET_KEY` | A long random value. **Never change it**, because it signs logins and encrypts saved AI keys. |
 | `APP_USER`, `APP_PASSWORD` | The first admin, created when the database has no users. |
 | `DATABASE_URL` | The **Internal Database URL** of a Render PostgreSQL database. **Without it, users are lost on every restart.** If it can't be reached, the app falls back to a temporary SQLite file so the site stays up, and Admin shows a warning. |
+| `JOB_STORE_BACKEND` | Set to `db` on Render. Runs save their rows every few seconds; with `db` those snapshots live in the database, so a run that is going during a deploy keeps the rows it had found. With the default (`disk`) they are wiped with the server. |
 | `COMPANY_NAME` | Optional. Shown on the customer page and in the messages (default "OneBridge Infotech"). |
 | `SHARE_MAX_TOTAL_MB` | Optional. Total space for shared copies in the database (default 200). |
 | `BRAVE_MIN_INTERVAL_SECONDS` | Optional. Spacing between Brave requests on the same key (default 1.1s, matching the free plan's ~1/second limit). Each person sets their own Brave key in Settings -> Search connector, not here - see "What happens when Brave's quota runs out" below. |

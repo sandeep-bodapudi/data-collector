@@ -223,9 +223,17 @@ def rehydrate_jobs() -> dict:
             if not isinstance(payload, dict):
                 continue
             if payload.get("status") in ("queued", "running"):
-                payload["status"] = "error"
-                payload["error"] = ("Server restarted while this run was going. "
-                                    "Start again — nothing was collected.")
+                n = len(payload.get("rows") or [])
+                if n:
+                    # Running runs save a snapshot every few seconds, so a deploy or restart keeps what was found.
+                    payload["status"] = "cancelled"
+                    payload["error"] = (f"The server restarted (usually a new deploy) while this run was going. "
+                                        f"The {n} row{'s' if n != 1 else ''} collected before that are kept. "
+                                        f"Start the run again to collect the rest.")
+                else:
+                    payload["status"] = "error"
+                    payload["error"] = ("The server restarted (usually a new deploy) while this run was going, before "
+                                        "any rows were found. Start it again.")
                 payload["finished_at"] = now
                 job_store.persist(jid, payload)
                 converted += 1
@@ -313,7 +321,28 @@ def start_job(spec: dict, user_id: int) -> Job:
     except Exception:
         pass
     threading.Thread(target=_run_with_context, args=(job,), daemon=True).start()
+    threading.Thread(target=_snapshot_while_running, args=(job,), daemon=True).start()
     return job
+
+
+SNAPSHOT_EVERY = float(os.environ.get("RUN_SNAPSHOT_SECONDS", "20"))
+
+
+def _snapshot_while_running(job: Job) -> None:
+    """Save the rows found so far every SNAPSHOT_EVERY seconds. A deploy or restart kills the run's thread; with a
+    database-backed job store (JOB_STORE_BACKEND=db) the last snapshot survives and rehydrate_jobs() hands those
+    rows to the browser instead of "nothing was collected"."""
+    last = -1
+    while not job.finished:
+        time.sleep(SNAPSHOT_EVERY)
+        if job.finished:
+            break
+        if len(job.rows) != last:  # nothing new: skip the write
+            last = len(job.rows)
+            try:
+                _persist_job(job, "running", finished=False)
+            except Exception:
+                pass
 
 
 def _run_with_context(job: Job) -> None:

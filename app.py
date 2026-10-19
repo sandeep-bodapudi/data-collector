@@ -45,6 +45,9 @@ def _secret_key() -> str:
 
 
 _load_env_file()
+# Remember whether the key came from the environment. If not, on a host without a persistent disk (Render free) a new
+# key is made on every deploy: everyone is signed out, and saved keys in the vault can no longer be decrypted.
+SECRET_FROM_ENV = bool(os.environ.get("SECRET_KEY"))
 _secret_key()
 
 from models import ROLES, AppSetting, DirectorySource, Share, User, VaultCredential, db, decrypt, encrypt  # noqa: E402
@@ -1594,7 +1597,23 @@ def admin_get_connections():
             {k: {"healthy": v["healthy"], "error": v["error"], "checked": v["checked"]} for k, v in services.items()},
             enabled,
         ),
+        warnings=_server_warnings(),
     )
+
+
+def _server_warnings() -> list[str]:
+    """Hosting settings that make every deploy hurt. Shown to admins only."""
+    from scraper import job_store
+
+    out = []
+    if ON_SERVER and not SECRET_FROM_ENV:
+        out.append("SECRET_KEY is not set on this server, so a new one is made on every deploy: everyone is signed "
+                   "out and saved API keys can no longer be read. Set SECRET_KEY (a long random value, never "
+                   "changed) in the host's environment settings.")
+    if ON_SERVER and job_store.backend() == "disk":
+        out.append("Runs are saved on the server's disk, which is wiped on every deploy, so a run that is going "
+                   "during a deploy loses its rows. Set JOB_STORE_BACKEND=db to keep them in the database.")
+    return out
 
 
 @app.post("/api/admin/connections/<svc_name>")
