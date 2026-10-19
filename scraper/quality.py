@@ -115,6 +115,18 @@ def org_domain(host: str) -> str:
     return ".".join(parts[-2:])
 
 
+def same_org(a: str, b: str) -> bool:
+    """skillfloor.in and skillfloor.com are the same business (seen on a real run); mail.college.ac.in and
+    college.ac.in too. Different brands that merely share a TLD are not."""
+    oa, ob = org_domain(a), org_domain(b)
+    if not oa or not ob:
+        return False
+    if oa == ob:
+        return True
+    la, lb = oa.split(".")[0], ob.split(".")[0]
+    return len(la) >= 4 and la == lb
+
+
 def domain_state(domain: str, resolver=None) -> str:
     """mx (publishes a mail server) | exists (resolves; MX could not be checked) | a (resolves, no MX record)
     | none (does not exist or refuses mail) | unknown (lookup failed). Cached for the life of the process."""
@@ -186,7 +198,7 @@ def assess(email: str, site_host: str, state: str) -> tuple[str, str]:
     shared = " (shared inbox)" if local.split("+")[0] in ROLE_LOCALS else ""
     if dom in FREE_MAIL:
         return "Medium", "free mail address, not the company's own domain" + shared
-    match = bool(site_host) and org_domain(dom) == org_domain(site_host)
+    match = bool(site_host) and same_org(dom, site_host)
     server = {"mx": "mail server found", "exists": "domain exists", "a": "domain has no mail server record",
               "unknown": "mail server not checked"}.get(state, "mail server not checked")
     if match and state in ("mx", "exists"):

@@ -12,7 +12,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 from urllib.parse import urlparse
 
-from . import ai_extract, apify_actors, discover, extract, listings, places, quality, search, sources
+from . import ai_extract, apify_actors, browser, discover, extract, listings, places, profile, quality, search, sources
 from . import topic as topic_words
 from .excel import SECRET_KEYS
 from .fetch import WORKERS, Fetcher, domain_of
@@ -58,6 +58,9 @@ class Job:
         self.cancelled = threading.Event()
         self.problems: list[str] = []  # service errors; shown when a run ends with no rows
         self.effective: dict = {}  # preflight result: what will actually be used
+        self.lock = threading.Lock()
+        self.browser_used = 0   # sites read with the browser fallback this run
+        self.browser_found = 0  # ...of which gained an email/phone that the plain reader missed
         self.remote = False  # True when a queue worker (not this process) runs the job
 
     def say(self, msg: str):
@@ -563,6 +566,20 @@ def _annotate_quality(job: Job) -> None:
                 r["Data Source"] = "Google Maps (paid)" if r.get("_paid") else "OpenStreetMap"
             if "Data Source" not in job.columns:
                 job.columns = job.columns + ["Data Source"]
+        if spec["mode"] in ("web", "places"):
+            # One clear business-profile sheet (scraper/profile.py): primary phone/email, Match Confidence, no
+            # empty columns, duplicates merged, strongest rows first.
+            job.activity = "Tidying the sheet and checking email addresses\u2026"
+            job.rows, job.columns = profile.build(job.rows, job.columns, spec)
+            n = len(job.rows)
+            high = sum(1 for r in job.rows if r["Match Confidence"].startswith("High"))
+            job.say(f"Sheet ready: {n} business{'es' if n != 1 else ''} - {high} high-confidence matches, "
+                    f"{sum(1 for r in job.rows if r['Email'])} with an email, {sum(1 for r in job.rows if r['Phone'])} with a phone.")
+            used, found = getattr(job, "browser_used", 0), getattr(job, "browser_found", 0)
+            if used:
+                job.say(f"Browser fallback read {used} site{'s' if used != 1 else ''} the plain reader could not; "
+                        f"{found} gave contacts that way.")
+            return
         if not any(c in job.columns for c in quality.EMAIL_COLUMNS):
             return
         job.activity = "Checking email addresses\u2026"
@@ -887,24 +904,10 @@ def _enrich_web_row(job: Job, fetcher: Fetcher, row: dict, spec: dict) -> dict:
         url = "http://" + url
     if not url:
         return row
-    html, note = fetcher.get_html(url)
-    if not html:
+    page, note = _read_site(job, fetcher, url)
+    if page is None:
         job.say(f"  could not read {url}: {note}")
         return row
-    page = extract.parse(html, url)
-    candidates = extract.candidate_contact_urls(url, page.get("contact_page", ""))
-    visited = {url}
-    for sub_url in candidates:
-        if job.cancelled.is_set():
-            break
-        if sub_url in visited:
-            continue
-        if page["emails"] and page["phones"]:
-            break
-        visited.add(sub_url)
-        sub_html, _ = fetcher.get_html(sub_url)
-        if sub_html:
-            _merge_pages(page, extract.parse(sub_html, sub_url))
     emails = _own_emails(page["emails"], url)
     if emails:
         existing = row["Emails"].split("; ") if row.get("Emails") else []
@@ -1001,30 +1004,66 @@ def _merge_pages(base: dict, extra: dict):
     base["_text"] += "\n\n" + extra["_text"]
 
 
-def _process_page(job: Job, fetcher: Fetcher, hit: dict) -> dict:
-    spec = job.spec
-    html, note = fetcher.get_html(hit["url"])
-    if not html:
-        job.say(f"  could not read {hit['url']}: {note}")
-    page = extract.parse(html, hit["url"]) if html else None
+# ---------------------------------------------------------------- one website reader for every mode
+_REFUSED_NOTES = ("HTTP 401", "HTTP 403", "HTTP 406", "HTTP 429", "HTTP 503", "connection", "timed out", "Timeout")
 
-    # Check contact/about/staff pages for more emails & phones (the "Contact Us pages" switch).
-    if page is not None and spec.get("follow_contact", True):
-        candidates = extract.candidate_contact_urls(hit["url"], page.get("contact_page", ""))
-        visited = {hit["url"]}
-        for sub_url in candidates:
-            if job.cancelled.is_set():
+
+def _browser_turn(job: Job) -> bool:
+    """Take one of this run's browser-fallback slots (BROWSER_MAX_SITES), if any are left."""
+    with job.lock:
+        if job.browser_used >= browser.max_sites():
+            return False
+        job.browser_used += 1
+        return True
+
+
+def _read_site(job: Job, fetcher: Fetcher, url: str, follow: bool = True) -> tuple[dict | None, str]:
+    """Read a business's website: the page, then up to 3 contact/about pages until both an email and a phone are found.
+    When that finds no email, or the site refused the plain reader, and BROWSER_FALLBACK is on, read it again in a
+    real browser (scraper/browser.py) - many sites only show their contacts after JavaScript runs. Web, Places and
+    Fill-missing-details all use this, so a fix here reaches every mode. Returns (page or None, fetch note)."""
+    html, note = fetcher.get_html(url)
+    page = extract.parse(html, url) if html else None
+    if page is not None and follow:
+        visited = {url}
+        for sub_url in extract.candidate_contact_urls(url, page.get("contact_page", "")):
+            if job.cancelled.is_set() or (page["emails"] and page["phones"]):
                 break
             if sub_url in visited:
                 continue
-            # We have enough data already; stop crawling sub-pages
-            if page["emails"] and page["phones"]:
-                break
             visited.add(sub_url)
             sub_html, _ = fetcher.get_html(sub_url)
             if sub_html:
-                sub_page = extract.parse(sub_html, sub_url)
-                _merge_pages(page, sub_page)
+                _merge_pages(page, extract.parse(sub_html, sub_url))
+    refused = page is None and any(n in (note or "") for n in _REFUSED_NOTES)
+    if (refused or (page is not None and not page["emails"])) and browser.enabled() and not job.cancelled.is_set() \
+            and fetcher.allowed(url) and _browser_turn(job):
+        had = bool(page and (page["emails"] or page["phones"]))
+        try:
+            pages = browser.read_site(url, allowed=fetcher.allowed)
+        except Exception as e:  # noqa: BLE001 - the plain result stands
+            pages = []
+            job.say(f"  browser could not read {url}: {type(e).__name__}")
+        for b_html, b_url in pages:
+            parsed = extract.parse(b_html, b_url)
+            if page is None:
+                page = parsed
+            else:
+                _merge_pages(page, parsed)
+        if page is not None and (page["emails"] or (page["phones"] and not had)):
+            with job.lock:
+                job.browser_found += 1
+        if pages and note and page is not None:
+            note = "read in a browser"
+    return page, note
+
+
+def _process_page(job: Job, fetcher: Fetcher, hit: dict) -> dict:
+    spec = job.spec
+    # The "Contact Us pages" switch decides whether contact/about pages are followed.
+    page, note = _read_site(job, fetcher, hit["url"], follow=spec.get("follow_contact", True))
+    if page is None:
+        job.say(f"  could not read {hit['url']}: {note}")
 
     # Only the real data: who it is, how to reach them, where the site is. Search/fetch details stay in the run log.
     name = (page["name"] if page else "") or extract.clean_name(hit["title"])
@@ -1032,7 +1071,7 @@ def _process_page(job: Job, fetcher: Fetcher, hit: dict) -> dict:
         name = extract.clean_name(hit["title"]) or domain_of(hit["url"])  # a site whose name is just "-" (seen live)
         if not any(ch.isalnum() for ch in name or ""):
             name = domain_of(hit["url"])
-    row = {"Name": name}
+    row = {"Name": name, "_query": hit.get("query", "")}
     for key in spec["fields"]:
         if key != "title":  # the name above already covers the page title
             row[extract.STANDARD_FIELDS[key]] = page[key] if page else ""
@@ -1292,27 +1331,11 @@ def _enrich_place(job: Job, fetcher: Fetcher, row: dict) -> dict:
         url = "http://" + url
     if not url:
         return row
-    html, note = fetcher.get_html(url)
+    page, note = _read_site(job, fetcher, url)
     row["Website Status"] = note
-    if not html:
+    if page is None:
         job.say(f"  could not read {url}: {note}")
         return row
-    page = extract.parse(html, url)
-
-    # Visit up to 3 contact-type sub-pages automatically
-    candidates = extract.candidate_contact_urls(url, page.get("contact_page", ""))
-    visited = {url}
-    for sub_url in candidates:
-        if job.cancelled.is_set():
-            break
-        if sub_url in visited:
-            continue
-        if page["emails"] and page["phones"]:
-            break
-        visited.add(sub_url)
-        sub_html, _ = fetcher.get_html(sub_url)
-        if sub_html:
-            _merge_pages(page, extract.parse(sub_html, sub_url))
 
     emails = _own_emails(page["emails"], url)
     if emails:

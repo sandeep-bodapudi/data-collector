@@ -38,7 +38,7 @@ SOCIAL_PROVIDER_ORDER = ["brightdata", "apify"]
 DISCOVERY_COLUMNS = ["Company Name", "Source", "Location / Search", "Status"]
 NAME_ONLY_STATUS = "Name only"
 # A sheet being enriched may call its name column either of these.
-NAME_COLUMN_ALIASES = ("Name", "Company Name")
+NAME_COLUMN_ALIASES = ("Name", "Company Name", "Business Name")
 DEFAULT_STATUS_COLUMN = "Status"
 # Status values written by enrichment, per attempted row.
 STATUS_ENRICHED = "Enriched"

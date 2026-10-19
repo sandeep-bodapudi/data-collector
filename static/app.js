@@ -1477,7 +1477,7 @@ function mountGrid(data) {
 // Company Name to look up by, and at least one row that's still missing a website,
 // an email or a phone number.
 function sheetNeedsFilling(meta, data) {
-  const nameCol = ["Name", "Company Name"].find((c) => meta.columns.includes(c));
+  const nameCol = ["Name", "Company Name", "Business Name"].find((c) => meta.columns.includes(c));
   if (!nameCol) return false;
   const siteCol = meta.columns.includes("Website") ? "Website" : null;
   const emailCol = ["Emails", "Email"].find((c) => meta.columns.includes(c));
@@ -1521,7 +1521,7 @@ async function viewSheet(id) {
   $("#rename")?.addEventListener("click", () => renameSheet(meta, () => route()));
   $("#share")?.addEventListener("click", () => shareDialog(meta));
   $("#fill-missing")?.addEventListener("click", async () => {
-    const nameCol = ["Name", "Company Name"].find((c) => data.columns.includes(c));
+    const nameCol = ["Name", "Company Name", "Business Name"].find((c) => data.columns.includes(c));
     const siteCol = data.columns.includes("Website") ? "Website" : null;
     const emailCol = ["Emails", "Email"].find((c) => data.columns.includes(c));
     const phoneCol = ["Phone Numbers", "Phone"].find((c) => data.columns.includes(c));
@@ -1654,7 +1654,7 @@ async function shareDialog(meta) {
   const contactCols = [...emailCols, ...phoneCols];
   const withContact = contactCols.length ? data.rows.filter((r) => contactCols.some((c) => String(r[c] ?? "").trim())).length : 0;
   const contactPct = data.rows.length ? Math.round((withContact / data.rows.length) * 100) : 0;
-  const nameCol = data.columns.includes("Name") ? "Name" : data.columns[0];
+  const nameCol = ["Name", "Business Name", "Company Name"].find((c) => data.columns.includes(c)) || data.columns[0];
   const seenNames = new Set(), dupes = new Set();
   if (nameCol) for (const r of data.rows) {
     const n = String(r[nameCol] ?? "").trim().toLowerCase();

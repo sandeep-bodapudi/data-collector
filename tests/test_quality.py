@@ -83,12 +83,14 @@ class FakeJob:
         self.log.append(m)
 
 
-j = FakeJob({"mode": "places"}, [{"Name": "A", "Email": "info@allen.in", "Website": "allen.in"}, {"Name": "B", "_paid": True, "Email": "", "Website": ""}],
+j = FakeJob({"mode": "places"}, [{"Name": "Allen Coaching", "Email": "info@allen.in", "Website": "allen.in"}, {"Name": "Bright Tutors", "_paid": True, "Email": "", "Website": ""}],
             ["Name", "Email", "Website"])
 J._annotate_quality(j)
-ok("places runs gain Data Source, Email Quality, Last Checked", j.columns == ["Name", "Email", "Website", "Data Source", "Email Quality", "Last Checked"], j.columns)
-ok("data source says where a row came from", j.rows[0]["Data Source"] == "OpenStreetMap" and j.rows[1]["Data Source"] == "Google Maps (paid)")
-ok("the log summarises the check", any("Checked 1 email address" in m for m in j.log), j.log)
+ok("places runs become a business-profile sheet with Email Quality, Source, Last Checked",
+   j.columns[0] == "Business Name" and all(c in j.columns for c in ("Email Quality", "Source", "Last Checked", "Match Confidence")), j.columns)
+by = {r["Business Name"]: r for r in j.rows}
+ok("Source says where a row came from", by["Allen Coaching"]["Source"].startswith("OpenStreetMap") and by["Bright Tutors"]["Source"].startswith("Google Maps (paid)"), j.rows)
+ok("the log summarises the sheet", any(m.startswith("Sheet ready:") for m in j.log), j.log)
 jn = FakeJob({"mode": "places", "names_only": True}, [{"Company Name": "A"}], ["Company Name"])
 J._annotate_quality(jn)
 ok("names-only runs are untouched", jn.columns == ["Company Name"])
@@ -97,7 +99,8 @@ J._annotate_quality(js)
 ok("social runs are untouched", js.columns == ["Name"])
 jw = FakeJob({"mode": "web"}, [{"Name": "A", "Emails": "a@x.com", "Website": "x.com"}], ["Name", "Emails", "Website"])
 J._annotate_quality(jw)
-ok("web runs gain the quality columns but no Data Source", jw.columns[-2:] == ["Email Quality", "Last Checked"] and "Data Source" not in jw.columns)
+ok("web runs gain the quality columns and Source but no Data Source", "Email Quality" in jw.columns and jw.columns[-1] == "Last Checked"
+   and "Data Source" not in jw.columns and jw.rows[0]["Source"].startswith("Web search"), jw.columns)
 jb = FakeJob({"mode": "web"}, "not rows", ["Emails"])
 jb.rows = [object()]
 J._annotate_quality(jb)

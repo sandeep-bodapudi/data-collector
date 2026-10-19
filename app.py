@@ -564,7 +564,7 @@ def build_job_spec(d: dict, vault: dict, user_id: int, enforce_budget: bool = Tr
         columns = [str(c)[:200] for c in in_columns][:300]
         name_col = d.get("name_column") if d.get("name_column") in columns else None
         if not name_col:
-            name_col = next((c for c in ("Name", "Company Name") if c in columns), None)
+            name_col = next((c for c in ("Name", "Company Name", "Business Name") if c in columns), None)
         if not name_col:
             return None, "This sheet has no Name or Company Name column, so there's nothing to look up by.", 400
         if not isinstance(in_rows, list) or not in_rows:

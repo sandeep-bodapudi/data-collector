@@ -95,8 +95,11 @@ for _ in range(50):
 st = c.get(f"/api/jobs/{jid}").get_json()
 ok("run finishes", st["status"] == "done" and st["count"] == 2, st["status"])
 res = c.get(f"/api/jobs/{jid}/result").get_json()
-ok("result gives plain-text cells (lists joined)", res["rows"][0]["Emails"] == "a@a.com; b@b.com" and res["columns"] == ["Name", "Emails", "Email Quality", "Last Checked"])
-ok("result rows carry an email-quality rating and the date it was checked", res["rows"][0]["Email Quality"].split(" - ")[0] in ("High", "Medium", "Low") and len(res["rows"][0]["Last Checked"]) == 10, res["rows"][0])
+row0 = next(r for r in res["rows"] if r["Business Name"] == "A")
+ok("result is a business-profile sheet: one primary email, the rest in Other Emails",
+   {row0["Email"], row0["Other Emails"]} == {"a@a.com", "b@b.com"} and res["columns"][:1] == ["Business Name"]
+   and "Other Emails" in res["columns"] and "Match Confidence" in res["columns"], (res["columns"], row0))
+ok("result rows carry an email-quality rating and the date it was checked", row0["Email Quality"].split(" - ")[0] in ("High", "Medium", "Low") and len(row0["Last Checked"]) == 10, res["rows"][0])
 c.post("/api/admin/users", json={"username": "ravi", "password": "memberpass1", "role": "viewer"})
 c.post("/api/admin/users", json={"username": "meena", "password": "memberpass2", "role": "member"})
 meena = app.test_client(); meena.post("/login", data={"username": "meena", "password": "memberpass2"})

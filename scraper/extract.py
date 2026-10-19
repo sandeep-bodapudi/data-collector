@@ -39,9 +39,12 @@ EMAIL_JUNK_DOMAINS = ("example.com", "domain.com", "email.com", "sentry.io", "wi
 
 # Phone numbers: optional +country code, then 8-12 digits with common separators.
 PHONE_RE = re.compile(r"(?<![/\w])(\+?(?:91[\s\-.]?)?\(?\d{3,5}\)?[\s.\-]?\d{3,5}[\s.\-]?\d{3,5})(?![/\w])")
+# Indian mobiles the way sites actually write them: "+91 98480 12345", "98480 12345", "+91-98480-12345", "098480 12345".
+# PHONE_RE above needs three digit groups, so the common 5+5 form was only found next to a "Phone:" label.
+MOBILE_RE = re.compile(r"(?<![\w/+])(?:\+?91[\s\-.]?|0)?[6-9]\d{4}[\s\-.]?\d{5}(?![\w/])")
 # Also catches: Tel: 040-12345678, Ph: 1800-222-333
 PHONE_LABEL_RE = re.compile(
-    r"(?:Tel|Ph|Phone|Mobile|Mob|Fax|Helpline|Toll[\s\-]?Free|Call us?|Contact)\s*[:\-\s]\s*"
+    r"(?:Tel|Ph|Phone|Mobile|Mob|Fax|Helpline|Toll[\s\-]?Free|Call(?: us)?|Contact|WhatsApp)\s*[:\-\s]\s*"
     r"(\+?[\d\s.\-\(\)]{8,18})",
     re.I
 )
@@ -404,8 +407,9 @@ def parse(html: str, url: str) -> dict:
     # Obfuscated emails
     emails += _extract_obfuscated_emails(text)
 
-    # Standard phone regex
+    # Standard phone regex, then Indian mobiles in their usual 5+5 form
     phones += [_clean_phone(m.group(0)) for m in PHONE_RE.finditer(text)]
+    phones += [_clean_phone(m.group(0)) for m in MOBILE_RE.finditer(text)]
     # Label-anchored phones (Tel:, Phone: etc.)
     phones += _extract_phones_labeled(text)
 

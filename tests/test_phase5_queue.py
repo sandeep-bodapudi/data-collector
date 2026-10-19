@@ -80,7 +80,7 @@ finally:
     J.web_search = _orig_ws4
 ok("worker runs to done", job2 == "done")
 stored = J.load_stored_job("cafe0202")
-ok("worker result persisted", stored is not None and stored.result()["rows"] == [{"Name": "W"}])
+ok("worker result persisted", stored is not None and [r.get("Business Name") for r in stored.result()["rows"]] == ["W"])
 ok("worker cancel flag cleared", JS.is_cancelled("cafe0202") is False)
 J.JOBS.pop("cafe0202", None)
 JS.remove("cafe0202")
@@ -115,7 +115,7 @@ J._run(job3)
 t.join(timeout=10)
 snap = JS.load("beef0303")
 ok("final payload persisted", snap is not None and snap["status"] == "done"
-   and snap["rows"] == [{"Name": "Slow"}])
+   and [r.get("Business Name") for r in snap["rows"]] == ["Slow"])
 J.JOBS.pop("beef0303", None)
 if JOBS_KEEP is not None:
     J.JOBS["beef0303"] = JOBS_KEEP

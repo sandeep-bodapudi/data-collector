@@ -87,6 +87,24 @@ Every form shows a checklist built from what is actually available (`GET /api/ru
 work: details nothing can fill are greyed out with the reason, and Start is disabled with the blocker listed when a Deep
 run could not run. Plan and status: `docs/v2/free-paid-run-flow-plan.md`.
 
+## The business-profile sheet
+
+Web and Places runs produce the same clear sheet: **Business Name, Category, Phone, Other Phones, Email, Other Emails,
+Email Quality, Website, Address, Area, City, State, Pincode, Opening Hours, Google Maps Link, Social Links, Match
+Confidence, Source, Last Checked** (plus any AI columns). The primary phone is a mobile where there is one; the primary
+email is the best-rated one (the company's own domain first). Columns with nothing in them are left out, the same
+business found twice becomes one row, and the strongest rows come first. **Match Confidence** (High / Medium / Low, with
+the reason) says whether the website matches the business name, whether the email is on that website's own domain, and
+whether the place is on a map. Names-only lists and "Fill missing details" keep their own columns.
+
+## Browser fallback (optional, for a PC or worker machine)
+
+Some websites only show their email and phone after JavaScript runs. With `BROWSER_FALLBACK=1` and Playwright installed
+(`pip install playwright` then `python -m playwright install chromium`), a site where the normal reader found no email,
+or that refused it, is read once more in a headless browser (images, fonts and video off; robots.txt respected), at most
+`BROWSER_MAX_SITES` (default 40) sites per run. In a trial on 46 real sites it doubled the sites with an email (6 -> 12),
+at about 17 seconds a site. Leave it off on a small server: a browser needs about 300 MB of memory.
+
 ## Email Quality column
 
 Places, web and "Fill missing details" runs add **Email Quality** and **Last Checked** (Places also adds **Data Source**).
