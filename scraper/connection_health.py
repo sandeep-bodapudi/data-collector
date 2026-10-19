@@ -221,7 +221,7 @@ def check_photon() -> dict:
 def check_wikidata() -> dict:
     """Test basic Wikidata SPARQL endpoint reachability."""
     url = "https://query.wikidata.org/sparql"
-    query = "SELECT COUNT(?item) WHERE ?item wdt:P31 wd:Q3624078 LIMIT 1"
+    query = "ASK { wd:Q1353 wdt:P31 ?type }"  # valid, tiny: "does Delhi have a type?" - the old probe was not valid SPARQL
     try:
         r = requests.get(
             url,
@@ -355,19 +355,25 @@ def check_overpass() -> dict:
 
 def check_ddgs() -> dict:
     """Lightweight DDGS probe. One tiny query; failure-tolerant."""
+    # Real searches rotate several engines, so one engine timing out is not "free search is down". Try a few
+    # before saying so; any answer at all means searches can work right now.
+    last = "no results"
     try:
         from ddgs import DDGS
-
-        with DDGS(timeout=4) as ddgs:
-            hits = ddgs.text("Hyderabad", region="in-en", max_results=1, backend="duckduckgo") or []
-        if hits:
-            _record_check("ddgs", True)
-            return {"healthy": True}
-        _record_check("ddgs", False, "no results")
-        return {"healthy": False, "error": "no results"}
     except Exception as e:
-        _record_check("ddgs", False, f"{type(e).__name__}: {str(e)[:60]}")
-        return {"healthy": False, "error": f"{type(e).__name__}: {str(e)[:60]}"}
+        _record_check("ddgs", False, f"{type(e).__name__}")
+        return {"healthy": False, "error": type(e).__name__}
+    for backend in ("duckduckgo", "yahoo", "auto"):
+        try:
+            with DDGS(timeout=8) as ddgs:
+                hits = ddgs.text("Hyderabad", region="in-en", max_results=1, backend=backend) or []
+            if hits:
+                _record_check("ddgs", True)
+                return {"healthy": True}
+        except Exception as e:
+            last = f"{type(e).__name__}: {str(e)[:60]}"
+    _record_check("ddgs", False, last)
+    return {"healthy": False, "error": last}
 
 
 # ---------------------------------------------------------------------------

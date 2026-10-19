@@ -31,7 +31,11 @@ _WORD_DOT = re.compile(r"[\[\(\{]\s*dot\s*[\]\)\}]|\s(?:dot|DOT)\s")
 EMAIL_JUNK_TLDS = (".png", ".jpg", ".jpeg", ".gif", ".webp", ".svg", ".css", ".js")
 EMAIL_JUNK_DOMAINS = ("example.com", "domain.com", "email.com", "sentry.io", "wixpress.com",
                       "sentry-next.wixpress.com", "yourdomain.com", "company.com", "schema.org",
-                      "w3.org", "googleapis.com", "gstatic.com")
+                      "w3.org", "googleapis.com", "gstatic.com",
+                      # website-template placeholders left in by themes (seen live: contact@mysite.com next to the
+                      # institute's real address)
+                      "mysite.com", "yoursite.com", "yourcompany.com", "yourwebsite.com", "website.com", "sitename.com",
+                      "test.com", "mydomain.com", "domainname.com")
 
 # Phone numbers: optional +country code, then 8-12 digits with common separators.
 PHONE_RE = re.compile(r"(?<![/\w])(\+?(?:91[\s\-.]?)?\(?\d{3,5}\)?[\s.\-]?\d{3,5}[\s.\-]?\d{3,5})(?![/\w])")
@@ -126,6 +130,8 @@ def _clean_phone(raw: str) -> str | None:
         return None
     if len(set(digits)) <= 2 or re.search(r"(\d)\1{6,}", digits):  # 0000000000, +91-8888888888 placeholders
         return None
+    if digits.lstrip("0").lstrip("1") in ("234567890", "23456789", "2345678900") or digits in ("9876543210", "0123456789"):
+        return None  # 123-456-7890 / 1234567890 / 9876543210: template placeholders, not anybody's number
     if re.fullmatch(r"(19|20)\d{2}(19|20)\d{2}.*", digits):  # year ranges like 2019-2024
         return None
     # Reject pure date-like patterns (e.g. 01012024)

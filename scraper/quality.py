@@ -54,8 +54,44 @@ _RANK = {"High": 3, "Medium": 2, "Low": 1}
 _CACHE: dict[str, str] = {}
 
 
+def _make_resolver():
+    """Built once, here, at import. On Windows dnspython reads the system DNS settings through WMI, which fails inside
+    worker threads - lookups made from the thread pool all came back "unknown" (seen on a real run: 16 addresses,
+    none checked). Public resolvers are the fallback when the system settings can't be read at all."""
+    if not HAVE_DNS:
+        return None
+    try:
+        res = dns.resolver.Resolver()
+    except Exception:
+        res = dns.resolver.Resolver(configure=False)
+        res.nameservers = ["1.1.1.1", "8.8.8.8"]
+    res.lifetime = DNS_TIMEOUT
+    return res
+
+
+_RESOLVER = _make_resolver()
+
+
+def _public_resolver():
+    if not HAVE_DNS:
+        return None
+    res = dns.resolver.Resolver(configure=False)
+    res.nameservers = ["1.1.1.1", "8.8.8.8", "9.9.9.9"]
+    res.lifetime = DNS_TIMEOUT
+    return res
+
+
+_PUBLIC = _public_resolver()  # second opinion when the local DNS server times out (seen on a busy office network)
+
+
 def split_emails(value) -> list[str]:
-    return [e.strip() for e in re.split(r"[;,\s]+", str(value or "")) if "@" in e]
+    """Emails from a cell. Web runs hold a *list* at this point (it is joined into text later), and str(list) gave
+    "['info@x.in']" - quotes and brackets included - so every web email was rated "not a valid address"."""
+    parts = value if isinstance(value, (list, tuple, set)) else [value]
+    out = []
+    for p in parts:
+        out += [e.strip(" '\"[]()<>") for e in re.split(r"[;,\s]+", str(p or "")) if "@" in e]
+    return [e for e in out if e]
 
 
 def host_of(url: str) -> str:
@@ -100,9 +136,16 @@ def domain_state(domain: str, resolver=None) -> str:
 
 
 def _lookup(d: str) -> str:
-    if HAVE_DNS:
-        res = dns.resolver.Resolver()
-        res.lifetime = DNS_TIMEOUT
+    state = _lookup_with(_RESOLVER, d)
+    if state == "unknown" and _PUBLIC is not None:
+        state = _lookup_with(_PUBLIC, d)
+    if state == "unknown" and not HAVE_DNS:
+        return "exists" if _resolves(d) else "unknown"
+    return state
+
+
+def _lookup_with(res, d: str) -> str:
+    if res is not None:
         try:
             answers = res.resolve(d, "MX")
             hosts = [str(r.exchange).rstrip(".") for r in answers]
@@ -121,7 +164,7 @@ def _lookup(d: str) -> str:
                 return "a" if _resolves(d) else "unknown"
         except Exception:
             return "unknown"
-    return "exists" if _resolves(d) else "unknown"
+    return "unknown"
 
 
 def _resolves(d: str) -> bool:

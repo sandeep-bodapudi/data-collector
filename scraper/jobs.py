@@ -384,6 +384,13 @@ def preflight(spec: dict) -> dict:
         if not is_enabled(name):
             notes.append(f"skipped {name} (disabled)")
             continue
+        if name == "overpass":
+            # search_places() always tries Overpass when it is enabled - its own mirror loop is the real health
+            # check, and a probe that timed out once must not hide the best map source for 30 minutes.
+            places_eff.append(name)
+            if _unhealthy(name):
+                notes.append("overpass: last check failed, still tried first (it has backup mirrors)")
+            continue
         if _unhealthy(name):
             notes.append(f"skipped {name} (last check failed)")
             places_flaky.append(name)
@@ -687,6 +694,23 @@ def _is_trusted_domain(url: str) -> bool:
     return domain_of(url).endswith(_TRUSTED_TLDS)
 
 
+# Titles that describe a LIST of places rather than one place. Seen on a real names-only run for "coaching centres in
+# Karimnagar": "Top Coaching Center in Karimnagar", "Coaching Centres in Karimnagar" and "Karimnagar SSC Coaching Fees"
+# were saved as company names, then "filled in" with unrelated sites (aakash.ac.in). A plural kind-of-place followed by
+# in/near, a "top/best/list of" opening, or fees/ranking pages are lists; "Vibgyor Coaching Centre in Karimnagar"
+# (singular, a real business's own listing) is not.
+_LIST_TITLE_RE = re.compile(
+    r"^\s*(top|best|list of|\d+\s+(best|top))\b"
+    r"|\b(centres|centers|institutes|academies|classes|colleges|schools|hospitals|temples|companies|agencies|coachings)"
+    r"\s+(in|near|at|around)\b"
+    r"|\b(fees|fee structure|ranking|rankings|near me)\b",
+    re.I)
+
+
+def _looks_like_list_title(title: str) -> bool:
+    return bool(_LIST_TITLE_RE.search(title or ""))
+
+
 def _search(job: Job) -> tuple[list[dict], list[dict]]:
     spec = job.spec
     platforms = spec.get("platforms", ["web"])
@@ -750,7 +774,8 @@ def _search(job: Job) -> tuple[list[dict], list[dict]]:
                 dup += 1  # this exact page/site already showed up for an earlier search in this same run
                 continue
             seen.add(key)
-            if "site:" not in q and (not discover._is_official_candidate(url) or _is_aggregator_page(url)):
+            if "site:" not in q and (not discover._is_official_candidate(url) or _is_aggregator_page(url)
+                                     or _looks_like_list_title(h.get("title", ""))):
                 directory += 1  # a directory, social, map, tag-hub or search-results page lists other places;
                 # it is not one itself. Aggregator-shaped pages join this bucket even on otherwise-"official"
                 # domains, so a GitHub Topics hub or a "top 10" listicle can never become a company row.
@@ -964,7 +989,12 @@ def _process_page(job: Job, fetcher: Fetcher, hit: dict) -> dict:
                 _merge_pages(page, sub_page)
 
     # Only the real data: who it is, how to reach them, where the site is. Search/fetch details stay in the run log.
-    row = {"Name": (page["name"] if page else "") or extract.clean_name(hit["title"])}
+    name = (page["name"] if page else "") or extract.clean_name(hit["title"])
+    if not any(ch.isalnum() for ch in name or ""):
+        name = extract.clean_name(hit["title"]) or domain_of(hit["url"])  # a site whose name is just "-" (seen live)
+        if not any(ch.isalnum() for ch in name or ""):
+            name = domain_of(hit["url"])
+    row = {"Name": name}
     for key in spec["fields"]:
         if key != "title":  # the name above already covers the page title
             row[extract.STANDARD_FIELDS[key]] = page[key] if page else ""

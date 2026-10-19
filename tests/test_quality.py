@@ -103,5 +103,20 @@ jb.rows = [object()]
 J._annotate_quality(jb)
 ok("a failure inside the check is logged, never raised", any("skipped the email check" in m for m in jb.log), jb.log)
 
+# ---- web rows hold lists when they are rated (real run, 2026-10-18: every web email came out "not a valid address") --------
+ok("a list cell is read as its addresses, not as the text of a Python list",
+   Q.split_emails(["info@workdyn.in", "x@y.com"]) == ["info@workdyn.in", "x@y.com"] and Q.split_emails("['q@w.in']") == ["q@w.in"])
+wl = [{"Emails": ["info@workdyn.in"], "Website": "workdyn.in"}]
+Q.annotate(wl, ["Emails", "Website"], resolver=lambda d: "mx")
+ok("a web row with a list of emails is rated High, not Low", wl[0]["Email Quality"].startswith("High"), wl[0])
+
+# ---- template placeholders are not contacts (real web run, 2026-10-19) ----------------------------------------------------
+from scraper import extract as X  # noqa: E402
+html = "<html><body><p>Phone: 123-456-7890</p><p>Mobile: +91 81259 88743</p><p>Email: contact@mysite.com, info@workdyn.in</p></body></html>"
+got = X.parse(html, "https://workdyn.in/contact")
+ok("a template email (contact@mysite.com) is dropped, the real one kept", got["emails"] == ["info@workdyn.in"], got["emails"])
+ok("a template phone (123-456-7890) is dropped, the real one kept",
+   all("123" not in p for p in got["phones"]) and any("81259" in p for p in got["phones"]), got["phones"])
+
 print(f"\n{len(failures)} failure(s)" if failures else "\nAll tests passed")
 sys.exit(1 if failures else 0)

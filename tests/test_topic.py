@@ -171,5 +171,28 @@ with appmod.app.app_context():
 ok("expand_synonyms reaches the job spec when ticked", e1 is None and s_on["expand_synonyms"] is True)
 ok("it defaults to off", e2 is None and s_off["expand_synonyms"] is False)
 
+# ---- list pages are not companies (real names-only run, 2026-10-19) ------------------------------------------------------
+for title in ("Top Coaching Center in Karimnagar", "Coaching Centres in Karimnagar", "Karimnagar SSC Coaching Fees",
+              "10 Best Digital Marketing Institutes in Hyderabad", "List of coaching centers in Warangal"):
+    ok(f"list title is recognised: {title}", J._looks_like_list_title(title))
+for title in ("Vibgyor Coaching Centre in Karimnagar", "Naresh IT - Software Training Institute", "Allen Coaching Classes Hyderabad",
+              "Digital Vidya | Digital Marketing Courses"):
+    ok(f"a real company title is not a list: {title}", not J._looks_like_list_title(title))
+
+sent.clear()
+
+
+def fake_lists(q, region, n, say, *a, **k):
+    return [{"title": "Top Coaching Center in Karimnagar", "body": "", "href": "https://digitalclassworld.com/coaching/karimnagar"},
+            {"title": "Vibgyor Coaching Centre in Karimnagar", "body": "Karimnagar", "href": "https://vibgyorcoaching.in/"}]
+
+
+J.web_search, J.time.sleep = fake_lists, lambda s: None
+jl = FakeJob({**base, "queries": ["coaching centres in Karimnagar"], "names_only": True})
+rows_l, _ = J._search(jl)
+ok("names-only keeps the real centre and treats the list page as a directory",
+   [r["url"] for r in rows_l] == ["https://vibgyorcoaching.in/"], rows_l)
+J.web_search, J.time.sleep = real_ws, real_sleep
+
 print(f"\n{len(failures)} failure(s)" if failures else "\nAll tests passed")
 sys.exit(1 if failures else 0)
