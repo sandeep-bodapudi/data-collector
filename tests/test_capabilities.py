@@ -249,5 +249,13 @@ os.environ.pop("RENDER")
 r11 = {x["id"]: x for x in C.run_options("web", "standard", {})["setup"]}
 ok("on a local machine it stays optional", r11["brave"]["status"] == "optional")
 
+# ---- review finding: an explicit Standard social run never spends ------------------------------------------------------
+with app.app_context():
+    s, e, code = appmod.build_job_spec({"mode": "social", "profiles": "https://linkedin.com/in/anna", "depth": "standard"},
+                                       {"apify_api_key": "apify_api_TESTTOKEN1234567890"}, 1)
+    ok("depth=standard forces free lookup only for social runs", e is None and s["free_only"] is True and s["apify_key"] == "", (e, s and s.get("free_only")))
+    s, e, code = appmod.build_job_spec({"mode": "social", "profiles": "https://linkedin.com/in/anna", "free_only": True}, {}, 1)
+    ok("a request without a depth keeps its own free_only choice", e is None and s["free_only"] is True)
+
 print(f"\n{len(failures)} failure(s)" if failures else "\nAll tests passed")
 sys.exit(1 if failures else 0)

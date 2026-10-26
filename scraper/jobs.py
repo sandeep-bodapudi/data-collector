@@ -59,6 +59,7 @@ class Job:
         self.problems: list[str] = []  # service errors; shown when a run ends with no rows
         self.effective: dict = {}  # preflight result: what will actually be used
         self.lock = threading.Lock()
+        self.persist_lock = threading.Lock()  # snapshot vs final save: the final one always wins
         self.browser_used = 0   # sites read with the browser fallback this run
         self.browser_found = 0  # ...of which gained an email/phone that the plain reader missed
         self.remote = False  # True when a queue worker (not this process) runs the job
@@ -338,14 +339,15 @@ def _snapshot_while_running(job: Job) -> None:
     last = -1
     while not job.finished:
         time.sleep(SNAPSHOT_EVERY)
-        if job.finished:
-            break
-        if len(job.rows) != last:  # nothing new: skip the write
-            last = len(job.rows)
-            try:
-                _persist_job(job, "running", finished=False)
-            except Exception:
-                pass
+        with job.persist_lock:  # finished is set under this lock, so a snapshot never lands after the final save
+            if job.finished:
+                break
+            if len(job.rows) != last:  # nothing new: skip the write
+                last = len(job.rows)
+                try:
+                    _persist_job(job, "running", finished=False)
+                except Exception:
+                    pass
 
 
 def _run_with_context(job: Job) -> None:
@@ -532,7 +534,8 @@ def _run(job: Job):
         job.error = f"{type(e).__name__}: {e}"
         final = "error"
         job.say("ERROR: " + job.error)
-    job.phase, job.finished = "done", datetime.now()
+    with getattr(job, "persist_lock", threading.Lock()):
+        job.phase, job.finished = "done", datetime.now()
     job.activity = {"done": "All done!", "cancelled": "Stopped. The rows collected so far are kept.",
                     "error": "Something went wrong."}[final]
     job.status = final
@@ -838,7 +841,7 @@ def _search(job: Job) -> tuple[list[dict], list[dict]]:
                 # before - but a few do, and one of THEIR pages is a real list of 20-30+ real names worth keeping,
                 # not one row for the directory page itself.
                 if domain_of(url) in listings.LISTING_PARSERS:
-                    listing_hits.append({"url": url})
+                    listing_hits.append({"url": url, "query": q})
                 continue
             if not _keep_hit(h, url, q, area_confirmed, wide=wide):
                 off_topic += 1
@@ -884,7 +887,7 @@ def _expand_listings(job: Job, fetcher: Fetcher, listing_hits: list[dict], known
             if key in known_names:
                 continue
             known_names.add(key)
-            row = {"Name": it["name"], "Address": it.get("address", ""), "Website": it["href"]}
+            row = {"Name": it["name"], "Address": it.get("address", ""), "Website": it["href"], "_query": hit.get("query", "")}
             if recipe and recipe.get("profile"):
                 row["_profile_ok"] = True  # the person's source asked for each entry's own page to be read
             rows.append(row)

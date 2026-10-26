@@ -18,7 +18,7 @@ from __future__ import annotations
 import os
 import queue
 import threading
-from concurrent.futures import Future
+from concurrent.futures import Future, TimeoutError as FutureTimeout
 from urllib.parse import urlparse
 
 IDLE_SECONDS = 120
@@ -48,35 +48,81 @@ def max_sites() -> int:
         return 40
 
 
+class BrowserUnavailable(RuntimeError):
+    """The browser could not be started (e.g. Chromium not installed). Raised at once, not after a long wait."""
+
+
+RETRY_AFTER_FAILURE = 600  # seconds before trying to start a browser again after a failed start
+WAIT_LIMIT = 30 * 60       # a caller waits at most this long in the queue (one site takes up to ~2 minutes)
+
+
 class _Service:
     def __init__(self):
         self._q: queue.Queue = queue.Queue()
         self._thread: threading.Thread | None = None
         self._lock = threading.Lock()
+        self._failed: tuple[float, str] | None = None  # (when, why) the last start failed
 
-    def read(self, url: str, allowed=None, timeout: float = 90.0) -> list[tuple[str, str]]:
-        """[(html, final_url), ...] for the page and up to MAX_CONTACT_LINKS contact pages. Raises on failure."""
-        fut: Future = Future()
+    def run(self, task, *args, timeout: float = WAIT_LIMIT):
+        """Run task(page, *args) on the browser thread and return its result. One browser serves every caller in turn,
+        so the wait covers the queue ahead, not just this site; a caller that gives up withdraws its request so the
+        browser never works for nobody."""
+        import time as _t
+
         with self._lock:
+            if self._failed and _t.time() - self._failed[0] < RETRY_AFTER_FAILURE:
+                raise BrowserUnavailable(self._failed[1])
+            fut: Future = Future()
             if not (self._thread and self._thread.is_alive()):
                 self._thread = threading.Thread(target=self._loop, name="browser-reader", daemon=True)
                 self._thread.start()
-            self._q.put((url, allowed, fut))
-        return fut.result(timeout=timeout)
+            self._q.put((task, args, fut))
+        try:
+            return fut.result(timeout=timeout)
+        except FutureTimeout:
+            fut.cancel()
+            raise
+
+    def read(self, url: str, allowed=None) -> list[tuple[str, str]]:
+        """[(html, final_url), ...] for the page and up to MAX_CONTACT_LINKS contact pages. Raises on failure."""
+        return self.run(_read, url, allowed)
+
+    def _fail_all(self, why: str):
+        import time as _t
+
+        with self._lock:
+            self._failed = (_t.time(), why)
+            self._thread = None
+            while True:
+                try:
+                    _task, _args, fut = self._q.get_nowait()
+                except queue.Empty:
+                    break
+                if fut.set_running_or_notify_cancel():
+                    fut.set_exception(BrowserUnavailable(why))
 
     def _loop(self):
-        from playwright.sync_api import sync_playwright
+        try:
+            from playwright.sync_api import sync_playwright
 
-        with sync_playwright() as p:
-            browser = p.chromium.launch(headless=True, args=["--disable-dev-shm-usage", "--disable-gpu"])
-            ctx = browser.new_context(user_agent=USER_AGENT)
+            pw_cm = sync_playwright()
+            p = pw_cm.__enter__()
+        except BaseException as e:  # noqa: BLE001
+            return self._fail_all(f"browser could not start ({type(e).__name__})")
+        try:
+            try:
+                browser = p.chromium.launch(headless=True, args=["--disable-dev-shm-usage", "--disable-gpu"])
+            except BaseException as e:  # noqa: BLE001 - e.g. 'playwright install chromium' never run
+                return self._fail_all(f"browser could not start ({type(e).__name__}: {str(e)[:120]})")
+            self._failed = None
+            ctx = browser.new_context(user_agent=USER_AGENT, locale="en-US")
             ctx.route("**/*", lambda route: route.abort()
                       if route.request.resource_type in ("image", "media", "font") else route.continue_())
             page = ctx.new_page()
             try:
                 while True:
                     try:
-                        url, allowed, fut = self._q.get(timeout=IDLE_SECONDS)
+                        task, args, fut = self._q.get(timeout=IDLE_SECONDS)
                     except queue.Empty:
                         with self._lock:  # idle: close, unless a request slipped in while deciding
                             if self._q.empty():
@@ -87,7 +133,7 @@ class _Service:
                         try:
                             if page.is_closed():
                                 page = ctx.new_page()
-                            fut.set_result(_read(page, url, allowed))
+                            fut.set_result(task(page, *args))
                         except BaseException as e:  # noqa: BLE001 - always answer the caller
                             fut.set_exception(e)
                             try:
@@ -100,6 +146,11 @@ class _Service:
                     browser.close()
                 except Exception:
                     pass
+        finally:
+            try:
+                pw_cm.__exit__(None, None, None)
+            except Exception:
+                pass
 
 
 def _settle(page):
@@ -142,3 +193,8 @@ _SERVICE = _Service()
 
 def read_site(url: str, allowed=None) -> list[tuple[str, str]]:
     return _SERVICE.read(url, allowed)
+
+
+def run(task, *args, timeout: float = WAIT_LIMIT):
+    """Run task(page, *args) on the shared browser (used by the Google search / Maps readers)."""
+    return _SERVICE.run(task, *args, timeout=timeout)

@@ -34,7 +34,9 @@ _STOP = set(discover.GENERIC_WORDS) | {"pvt", "private", "limited", "ltd", "llp"
                                        # subject words: "A.V College of Arts" must not match arts.com
                                        "arts", "art", "science", "sciences", "commerce", "degree", "management",
                                        "computer", "computers", "software", "systems", "global", "info", "infotech",
-                                       "technologies", "learning", "education", "study", "studies", "career", "careers"}
+                                       "technologies", "learning", "education", "study", "studies", "career", "careers",
+                                       # honorifics and filler that start thousands of names ("Sri Ram ..." is not srichaitanya.com)
+                                       "sri", "shri", "sree", "shree", "smt", "new", "the", "om", "maa", "jai", "my"}
 
 
 def _as_list(v) -> list[str]:
@@ -101,7 +103,7 @@ def name_matches_site(name: str, host: str) -> bool:
     words = [w for w in _WORD.findall((name or "").lower())]
     distinctive = [w for w in words if w not in _STOP and len(w) >= 3]
     squashed = "".join(words)
-    if any(w in label for w in distinctive if len(w) >= 4) or any(label.startswith(w) for w in distinctive):
+    if any(w in label for w in distinctive if len(w) >= 4):
         return True
     if len(label) >= 5 and label in squashed:
         return True
@@ -146,7 +148,8 @@ def build(rows: list[dict], columns: list[str], spec: dict, resolver=None, today
         name = str(r.get("Name") or r.get("Company Name") or "").strip()
         if not name:
             continue
-        q = r.get("_query") or (queries[0] if queries else "")
+        # Listing/source rows carry the search that found them; without one, only a single-search run can say.
+        q = r["_query"] if r.get("_query") else (queries[0] if len(queries) == 1 else "")
         topic, area = _split_query(q) if mode == "web" else ("", "")
         emails = list(dict.fromkeys(e.lower() for e in quality.split_emails(r.get("Emails") or r.get("Email"))))
         phone, other_phones = _phones(r.get("Phone Numbers") or r.get("Phone"))
@@ -170,7 +173,10 @@ def build(rows: list[dict], columns: list[str], spec: dict, resolver=None, today
             "Opening Hours": r.get("Opening Hours") or "", "Google Maps Link": r.get("Google Maps Link") or "",
             "Social Links": "; ".join(social[:6]),
             "Description": str(r.get("Description") or "")[:400], "Contact Page": r.get("Contact Page URL") or "",
-            "Source": source + (" + company website" if (emails or phone) and r.get("Website") else ""),
+            # "+ company website" only when the website was actually read (web runs always read it; Places runs
+            # record a Website Status when they did), not merely because the map listed one.
+            "Source": source + (" + company website" if (emails or phone) and r.get("Website")
+                                and (not on_map or r.get("Website Status")) else ""),
             "_on_map": on_map,
         }
         for c in custom:
@@ -212,6 +218,8 @@ def _dedupe(rows: list[dict]) -> list[dict]:
         keys = [f"site:{quality.org_domain(host)}"] if host else []
         keys.append(f"name:{p['Business Name'].lower()}|{(p.get('Area') or '').lower()}")
         twin = next((by_key[k] for k in keys if k in by_key), None)
+        if twin is not None and host and twin.get("Website") and not quality.same_org(host, quality.host_of(twin["Website"])):
+            twin = None  # same name, different websites: two businesses (branches, franchisees), not one
         if twin is None:
             kept.append(p)
             for k in keys:

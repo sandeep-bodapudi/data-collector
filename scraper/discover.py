@@ -214,6 +214,13 @@ SAME_NAME_M = 150      # the same name this close together is one place
 SAME_PLACE_M = 300     # a short name, an abbreviation or the same website this close together is one place
 
 
+def _has_coords(r: dict) -> bool:
+    try:
+        return bool(float(r.get("Latitude") or 0) or float(r.get("Longitude") or 0))
+    except (TypeError, ValueError):
+        return False
+
+
 def _distance_m(a: dict, b: dict) -> float:
     la1, lo1, la2, lo2 = (float(a["Latitude"] or 0), float(a["Longitude"] or 0), float(b["Latitude"] or 0), float(b["Longitude"] or 0))
     dx = (lo2 - lo1) * 111320 * math.cos(math.radians((la1 + la2) / 2))
@@ -268,7 +275,12 @@ def merge_duplicates(rows: list[dict]) -> tuple[list[dict], int]:
         site = domain_of(row["Website"]) if row.get("Website") else ""
         twin = None
         for k in kept:
-            d = _distance_m(k, row)
+            if _has_coords(k) and _has_coords(row):
+                d = _distance_m(k, row)
+            else:
+                # A row with no coordinates (seen: Google Maps items without a location) used to count as 0,0 and so
+                # never matched anything. Without a position, only an exact same name can say it is the same place.
+                d = 0 if same_place_by_name(k.get("Name", ""), row.get("Name", "")) == "same" else float("inf")
             if d > SAME_PLACE_M:
                 continue
             k_site = domain_of(k["Website"]) if k.get("Website") else ""

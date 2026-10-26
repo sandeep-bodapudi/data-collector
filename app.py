@@ -588,7 +588,10 @@ def build_job_spec(d: dict, vault: dict, user_id: int, enforce_budget: bool = Tr
         if not items:
             return None, "Add at least one LinkedIn / Instagram / Facebook URL or name.", 400
         social_spec = {"mode": "social", "items": items, "platforms": plats,
-                       "hybrid": bool(d.get("hybrid", True)), "free_only": bool(d.get("free_only", False)),
+                       "hybrid": bool(d.get("hybrid", True)),
+                       # Standard = free sources only, enforced here and not just by the form. A request that does not
+                       # say a depth at all (older API callers, saved schedules) keeps its own free_only choice.
+                       "free_only": bool(d.get("free_only", False)) or d.get("depth") == "standard",
                        "brightdata_key": vault.get("brightdata_api_key", ""),
                        "apify_key": vault.get("apify_api_key", ""),
                        "apify_actor": vault.get("apify_actor", ""), **common}

@@ -179,5 +179,71 @@ ok("skillfloor.in mail on skillfloor.com is the company's own domain", Q.same_or
    and Q.assess("support@skillfloor.in", "skillfloor.com", "mx")[0] == "High")
 ok("different brands on the same TLD are not the same org", not Q.same_org("abc.com", "xyz.com"))
 
+# ---- review findings (2026-10-26) ----------------------------------------------------------------------------------------
+ok("'Sri Ram Coaching Centre' does not match srichaitanya.com (honorific prefix)", not P.name_matches_site("Sri Ram Coaching Centre", "srichaitanya.com"))
+ok("'New Horizon Academy' does not match newgen.com", not P.name_matches_site("New Horizon Academy", "newgen.com"))
+ok("a real 4+ letter name still matches", P.name_matches_site("Sri Chaitanya Academy", "srichaitanya.com"))
+
+two_q = {"mode": "web", "queries": ["coaching centres in Ameerpet, Hyderabad", "coaching centres in Warangal"], "custom_fields": []}
+rows, _ = P.build([{"Name": "Vibgyor Coaching", "Website": "vibgyor.in", "Emails": [], "_query": "coaching centres in Warangal"},
+                   {"Name": "Listed Centre", "Website": "", "Emails": []}], ["Name", "Website", "Emails"], two_q, resolver=resolver)
+by = {r["Business Name"]: r for r in rows}
+ok("a row keeps the area of the search that found it", by["Vibgyor Coaching"]["Area"] == "Warangal", by["Vibgyor Coaching"])
+ok("a row with no search of its own in a multi-search run gets no guessed area", by["Listed Centre"].get("Area", "") == "", by["Listed Centre"])
+
+rows, _ = P.build([{"Name": "Allen Career Institute", "Website": "allen.ac.in", "Emails": [], "_query": "coaching in Hyderabad"},
+                   {"Name": "Allen Career Institute", "Website": "allenhyd.com", "Emails": [], "_query": "coaching in Hyderabad"}],
+                  ["Name", "Website", "Emails"], {"mode": "web", "queries": ["coaching in Hyderabad"], "custom_fields": []}, resolver=resolver)
+ok("same name and area but different websites stay two businesses", len(rows) == 2, rows)
+
+rows, _ = P.build([{"Name": "Sri Balaji Temple", "Phone": "040 2345 6789", "Email": "", "Website": "https://balajitemple.org", "Data Source": "OpenStreetMap"},
+                   {"Name": "Lakshmi Temple", "Phone": "040 2345 6790", "Email": "", "Website": "https://lakshmitemple.org", "Data Source": "OpenStreetMap",
+                    "Website Status": "ok"}],
+                  ["Name", "Phone", "Email", "Website", "Data Source"], {"mode": "places", "category": "Hindu temples", "custom_fields": []}, resolver=resolver)
+by = {r["Business Name"]: r for r in rows}
+ok("map contacts with an unread website say 'OpenStreetMap' only", by["Sri Balaji Temple"]["Source"] == "OpenStreetMap", by["Sri Balaji Temple"]["Source"])
+ok("a website that was read says '+ company website'", by["Lakshmi Temple"]["Source"] == "OpenStreetMap + company website", by["Lakshmi Temple"]["Source"])
+
+from scraper import discover as D  # noqa: E402
+merged, n = D.merge_duplicates([{"Name": "Naresh IT", "Latitude": 17.437, "Longitude": 78.448, "Website": "", "Phone": ""},
+                                {"Name": "Naresh IT", "Latitude": "", "Longitude": "", "Website": "https://nareshit.com", "Phone": "+91 81796 19999"}])
+ok("a row without coordinates merges with the same-named mapped place", n == 1 and merged[0]["Website"] == "https://nareshit.com", merged)
+merged, n = D.merge_duplicates([{"Name": "Naresh IT", "Latitude": 17.4, "Longitude": 78.4, "Website": ""},
+                                {"Name": "Zoom Technologies", "Latitude": "", "Longitude": "", "Website": ""}])
+ok("...but not with a differently named one", n == 0)
+
+import time as _time  # noqa: E402
+from concurrent.futures import TimeoutError as _FT  # noqa: E402
+
+
+class _StuckService(B._Service):
+    def _loop(self):
+        _time.sleep(5)  # never takes work: stands in for a browser busy with a long queue
+
+
+svc = _StuckService()
+try:
+    svc.run(lambda page: 1, timeout=0.2)
+    ok("a caller that waits too long gives up", False)
+except _FT:
+    item = svc._q.get_nowait()
+    ok("a caller that gives up withdraws its request, so the browser never works for nobody", item[2].cancelled())
+
+svc2 = B._Service()
+svc2._failed = (_time.time(), "browser could not start (Error: Executable doesn't exist)")
+t0 = _time.time()
+try:
+    svc2.run(lambda page: 1)
+    ok("a browser that failed to start fails fast", False)
+except B.BrowserUnavailable as e:
+    ok("a browser that failed to start fails at once with the reason", _time.time() - t0 < 1 and "could not start" in str(e))
+svc3 = B._Service()
+from concurrent.futures import Future as _F  # noqa: E402
+f1, f2 = _F(), _F()
+svc3._q.put((None, (), f1))
+svc3._q.put((None, (), f2))
+svc3._fail_all("browser could not start (X)")
+ok("a failed start answers everyone already waiting", all(isinstance(f.exception(0), B.BrowserUnavailable) for f in (f1, f2)))
+
 print(f"\n{len(failures)} failure(s)" if failures else "\nAll tests passed")
 sys.exit(1 if failures else 0)
