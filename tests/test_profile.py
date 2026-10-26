@@ -245,5 +245,23 @@ svc3._q.put((None, (), f2))
 svc3._fail_all("browser could not start (X)")
 ok("a failed start answers everyone already waiting", all(isinstance(f.exception(0), B.BrowserUnavailable) for f in (f1, f2)))
 
+# ---- real places run, 2026-10-26 ----------------------------------------------------------------------------------------
+from scraper import extract as X  # noqa: E402
+ok("'%20name@x.com' from a mailto link is cleaned", X._clean_email("%20jbkacademyhyderabad@gmail.com") == "jbkacademyhyderabad@gmail.com")
+rows, cols = P.build([{"Name": "POWER BI TRAINING", "Phone": "+91 98598 31831", "Email": "", "Website": "https://forms.gle/a3cWnyU5hd"},
+                      {"Name": "Race institute", "Phone": "+18013732887", "Email": "", "Website": "https://race.edu/", "Website Status": "ok"},
+                      {"Name": "Zoom Technologies", "Phone": "1 416 725-5646", "Email": "info@zoomt.com", "Website": "https://zoomtechnologies.com/",
+                       "Website Status": "ok"}],
+                     ["Name", "Phone", "Email", "Website"],
+                     {"mode": "places", "category": "Coaching & training centers", "locations": ["Ameerpet, Hyderabad"], "custom_fields": []}, resolver=resolver)
+by = {r["Business Name"]: r for r in rows}
+ok("a Google Forms link is not a website: it moves to Social Links", by["POWER BI TRAINING"]["Website"] == "" and "forms.gle" in by["POWER BI TRAINING"].get("Social Links", ""), by["POWER BI TRAINING"])
+ok("a US phone on an Ameerpet search lowers confidence and says why", not by["Race institute"]["Match Confidence"].startswith("High")
+   and "not an Indian number" in by["Race institute"]["Match Confidence"], by["Race institute"]["Match Confidence"])
+ok("a North American number without + is caught too", "not an Indian number" in by["Zoom Technologies"]["Match Confidence"], by["Zoom Technologies"]["Match Confidence"])
+ok("outside India a foreign phone is fine", "not an Indian number" not in P.build(
+    [{"Name": "Race Institute", "Phone": "+18013732887", "Email": "", "Website": "https://race.edu/"}], ["Name", "Phone", "Email", "Website"],
+    {"mode": "places", "category": "Colleges", "locations": ["Salt Lake City, Utah"], "custom_fields": []}, resolver=resolver)[0][0]["Match Confidence"])
+
 print(f"\n{len(failures)} failure(s)" if failures else "\nAll tests passed")
 sys.exit(1 if failures else 0)

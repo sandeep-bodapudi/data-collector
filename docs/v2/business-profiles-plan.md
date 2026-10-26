@@ -49,3 +49,18 @@ Paid Google Maps (Apify) stays as built; Brave key setup is the owner's next ste
 - Real local run, "digital marketing institute in Ameerpet, Hyderabad": 6 businesses, 5 High, 6 with email and phone.
 - Tests: tests/test_profile.py (new); test_api, test_phase4_durable, test_phase5_queue, test_quality updated to the new
   sheet. Full suite passes.
+
+## 2026-10-26: code review fixes + Google Maps (option c)
+
+- The 9 review findings fixed (commit e7582e2): browser queue/start failure, snapshot race, Standard social spend,
+  name prefixes, listing areas, same-name merges, coordinate-less merges, Source wording.
+- `scraper/google_places.py`: official Places API (New) Text Search, up to 60 places per search, per-run cap.
+- `scraper/google_browser.py`: Google Maps and Google search in the shared browser, PC only, paced, stops on Google's
+  check. Page parsers tested against fixtures cut from real Google pages (tests/fixtures/).
+- Real run on this PC, "Coaching & training centers in Ameerpet, Hyderabad": 27 businesses, 25 High confidence,
+  24 with an email, 26 with a phone (the same run gave 1 earlier the same week, with OpenStreetMap overloaded).
+- Google *search* in the browser met Google's "unusual traffic" check at once from this PC (its address had made
+  many automated searches); the run stopped using it as designed. Google *Maps* worked.
+- Found on that run and fixed: request interception printed CancelledError tracebacks (now a launch setting turns
+  images off); "%20name@x.com" emails; a forms.gle / social link given as a website (moved to Social Links); a
+  foreign phone on an Indian search (race.edu matched "Race institute") now lowers Match Confidence.

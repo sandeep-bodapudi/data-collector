@@ -77,6 +77,13 @@ def _split_query(q: str) -> tuple[str, str]:
     return q[:last.start()].strip(" ,"), q[last.end():].strip(" ,")
 
 
+# Hosts that are not a business's own website, though Google Maps and directories often list them as "Website":
+# forms, link-in-bio pages, chat links and social profiles (seen live: a forms.gle link as an institute's website).
+NOT_A_WEBSITE = ("forms.gle", "docs.google.com", "sites.google.com", "linktr.ee", "wa.me", "api.whatsapp.com",
+                 "facebook.com", "fb.com", "instagram.com", "linkedin.com", "twitter.com", "x.com", "youtube.com",
+                 "t.me", "bit.ly", "g.page", "business.site")
+
+
 def _website(v: str) -> str:
     v = (v or "").strip()
     if not v:
@@ -85,6 +92,33 @@ def _website(v: str) -> str:
     if not host:
         return ""
     return v if v.startswith("http") else f"https://{host}"
+
+
+def _not_a_website(url: str) -> bool:
+    host = quality.host_of(url)
+    return bool(host) and any(host == h or host.endswith("." + h) for h in NOT_A_WEBSITE)
+
+
+INDIA_WORDS = ("india", "telangana", "andhra", "hyderabad", "secunderabad", "bengaluru", "bangalore", "chennai", "mumbai",
+               "delhi", "pune", "kolkata", "vijayawada", "visakhapatnam", "warangal", "karimnagar", "tamil nadu",
+               "karnataka", "maharashtra", "kerala", "gujarat", "ameerpet", "kukatpally", "madhapur", "gachibowli")
+
+
+def indian_context(spec: dict) -> bool:
+    """Is this run about places in India? Then a phone with another country code means the website we matched
+    probably belongs to someone else (seen live: 'Race institute' in Ameerpet matched race.edu, a US college)."""
+    if spec.get("region") == "in-en":
+        return True
+    text = " ".join([*(spec.get("locations") or []), *(spec.get("queries") or [])]).lower()
+    return any(w in text for w in INDIA_WORDS)
+
+
+def _foreign_phone(phone: str) -> bool:
+    p = (phone or "").strip()
+    digits = re.sub(r"\D", "", p)
+    if p.startswith("+"):
+        return not p.startswith("+91")
+    return len(digits) == 11 and digits.startswith("1")  # "1 416 725-5646" style North American numbers
 
 
 def _phones(values) -> tuple[str, list[str]]:
@@ -161,13 +195,17 @@ def build(rows: list[dict], columns: list[str], spec: dict, resolver=None, today
         on_map = mode == "places"
         source = (r.get("Data Source") or "OpenStreetMap") if on_map else "Web search"
         social = _as_list(r.get("Social Media Links"))
+        site = str(r.get("Website") or "")
+        if _not_a_website(site):  # a form / social / chat link listed as the website: keep it, but as a link
+            social = [site] + social
+            site = ""
         name = clean_business_name(name, str(r.get("Website") or ""))
         prof = {
             "Business Name": name[:150],
             "Category": r.get("Category") or (spec.get("category") if on_map else topic),
             "Phone": phone, "Other Phones": "; ".join(other_phones),
             "_emails": emails,
-            "Website": _website(r.get("Website") or ""),
+            "Website": _website(site),
             "Address": address, "Area": r.get("Search Location") or area,
             "City": r.get("City") or "", "State": r.get("State") or "", "Pincode": pin,
             "Opening Hours": r.get("Opening Hours") or "", "Google Maps Link": r.get("Google Maps Link") or "",
@@ -185,6 +223,7 @@ def build(rows: list[dict], columns: list[str], spec: dict, resolver=None, today
         all_emails.append(emails)
 
     # Rate every email once (Email Quality's free checks), then pick each row's best one as its primary email.
+    india = indian_context(spec)
     domains = list(dict.fromkeys(e.rpartition("@")[2] for es in all_emails for e in es))[:quality.MAX_DOMAINS]
     states = quality._states(domains, resolver)
     for p in out:
@@ -200,6 +239,10 @@ def build(rows: list[dict], columns: list[str], spec: dict, resolver=None, today
         p["Other Emails"] = "; ".join(t[2] for t in rated[1:6])
         p["Match Confidence"] = confidence(p["Business Name"], p["Website"], p["Email"], p.pop("_on_map"),
                                            bool(p["Email"] or p["Phone"]))
+        if india and p["Phone"] and _foreign_phone(p["Phone"]):
+            level, _, why = p["Match Confidence"].partition(" - ")
+            lower = {"High": "Medium", "Medium": "Low"}.get(level, level)
+            p["Match Confidence"] = f"{lower} - " + ", ".join(x for x in (why, "phone is not an Indian number") if x)
         p["Last Checked"] = when
 
     out = _dedupe(out)

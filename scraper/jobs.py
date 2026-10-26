@@ -12,7 +12,8 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 from urllib.parse import urlparse
 
-from . import ai_extract, apify_actors, browser, discover, extract, listings, places, profile, quality, search, sources
+from . import (ai_extract, apify_actors, browser, discover, extract, google_browser, google_places, listings, places, profile,
+               quality, search, sources)
 from . import topic as topic_words
 from .excel import SECRET_KEYS
 from .fetch import WORKERS, Fetcher, domain_of
@@ -62,6 +63,8 @@ class Job:
         self.persist_lock = threading.Lock()  # snapshot vs final save: the final one always wins
         self.browser_used = 0   # sites read with the browser fallback this run
         self.browser_found = 0  # ...of which gained an email/phone that the plain reader missed
+        self.gplaces_used = 0   # places taken from the Google Places API this run (GOOGLE_PLACES_MAX_PER_RUN)
+        self.google = None      # google_browser.Session, made on first use
         self.remote = False  # True when a queue worker (not this process) runs the job
 
     def say(self, msg: str):
@@ -566,7 +569,8 @@ def _annotate_quality(job: Job) -> None:
     try:
         if spec["mode"] == "places":
             for r in job.rows:
-                r["Data Source"] = "Google Maps (paid)" if r.get("_paid") else "OpenStreetMap"
+                if not r.get("Data Source"):  # Google rows say which Google route they came from
+                    r["Data Source"] = "Google Maps (paid)" if r.get("_paid") else "OpenStreetMap"
             if "Data Source" not in job.columns:
                 job.columns = job.columns + ["Data Source"]
         if spec["mode"] in ("web", "places"):
@@ -805,6 +809,12 @@ def _search(job: Job) -> tuple[list[dict], list[dict]]:
         except SearchBlocked as e:
             job.problems.append(str(e))
             hits = []
+        if not hits and browser.enabled() and not (spec.get("brave_key") or search.brave_key_set()):
+            # PC only: the free engines gave nothing, so ask Google itself in the browser (scraper/google_browser.py).
+            got = _google_session(job).search(q, int(spec.get("max_results") or 20))
+            if got:
+                job.say(f"  Google (in the browser) found {len(got)} result{'s' if len(got) != 1 else ''}")
+                hits = got
         searched += 1
         answered += bool(hits)
         signal = _signal_words(q)
@@ -1583,6 +1593,44 @@ def _paid_places(job: Job, loc: str) -> list[dict]:
     return rows
 
 
+def _google_session(job: Job) -> google_browser.Session:
+    if getattr(job, "google", None) is None:
+        job.google = google_browser.Session(job.say)
+    return job.google
+
+
+def _google_maps_rows(job: Job, loc: str) -> list[dict]:
+    """Google Maps listings for one location: the official Places API when a key is set (works anywhere, including the
+    hosted server); otherwise, on a PC with the browser fallback on, Google Maps read in the browser. [] when neither."""
+    from .config import is_enabled
+
+    spec = job.spec
+    query = f"{apify_actors.search_term(spec['category'], spec.get('name_filter', ''))} in {loc}"
+    want = min(int(spec.get("max_results") or 30), 60)
+    key = spec.get("google_places_key", "")
+    if key and is_enabled("google_places"):
+        left = google_places.max_per_run() - job.gplaces_used
+        if left <= 0:
+            job.say(f"  Google Maps (API) skipped for {loc}: this run already used its {google_places.max_per_run()} places")
+        else:
+            job.activity = f"Asking Google Maps about {loc}\u2026"
+            try:
+                rows = google_places.search(query, key, min(want, left))
+                job.gplaces_used += len(rows)
+                job.say(f"  {len(rows)} places from Google Maps (API)")
+                return rows
+            except google_places.GooglePlacesError as e:
+                job.say(f"  Google Maps (API) failed: {e}")
+                job.problems.append(str(e))
+    if browser.enabled():
+        job.activity = f"Reading Google Maps in the browser for {loc}\u2026 (slow on purpose)"
+        rows = _google_session(job).maps(query, want)
+        if rows:
+            job.say(f"  {len(rows)} places from Google Maps (in the browser)")
+        return rows
+    return []
+
+
 def _paid_contacts(job: Job, work: list[dict]) -> None:
     """Fill emails/phones for rows that have a website but still no contact after the free crawl. Hybrid on purpose:
     the free path goes first, the paid actor only pays for the gaps."""
@@ -1646,7 +1694,7 @@ def _run_places_names(job: Job):
             job.say(f"  failed: {type(e).__name__}: {e}")
             job.problems.append(f"Could not reach the map service ({type(e).__name__}). Please try again.")
             found = []
-        found = found + _paid_places(job, loc)
+        found = found + _google_maps_rows(job, loc) + _paid_places(job, loc)
         added = 0
         for r in found:
             name = (r.get("Name", "") or "").strip()
@@ -1687,7 +1735,7 @@ def _run_places(job: Job):
             job.say(f"  failed: {type(e).__name__}: {e}")
             job.problems.append(f"Could not reach the map service ({type(e).__name__}). Please try again.")
             found = []
-        found = found + _paid_places(job, loc)
+        found = found + _google_maps_rows(job, loc) + _paid_places(job, loc)
         for r in found:
             r["Search Location"] = loc
         job.say(f"  {len(found)} places found")

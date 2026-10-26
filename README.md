@@ -97,6 +97,22 @@ business found twice becomes one row, and the strongest rows come first. **Match
 the reason) says whether the website matches the business name, whether the email is on that website's own domain, and
 whether the place is on a map. Names-only lists and "Fill missing details" keep their own columns.
 
+## Google Maps data
+
+Places runs add Google Maps listings to the free OpenStreetMap results (same place found twice is merged):
+
+1. **Google Places API (official)** whenever a key is set - in Settings -> Keys, as an org-shared key, or as
+   `GOOGLE_PLACES_API_KEY` on the server. Works on the hosted server. Needs a Google Cloud project with the
+   **Places API (New)** enabled and billing on; Google gives a free monthly allowance, and you should set a daily
+   quota there so nothing can surprise you. `GOOGLE_PLACES_MAX_PER_RUN` (default 300) caps one run.
+2. **Google Maps in a browser** - only on a PC with the browser fallback on (below) and no API key. It opens the
+   Maps search like a person would, skips "Sponsored" entries, reads each place's page (name, category, address,
+   phone, website, rating, position), and pauses between searches (`GOOGLE_BROWSER_GAP`, default 12 s). With the
+   browser on and no Brave key, a web search that the free engines leave empty is also asked of Google itself.
+   At most `GOOGLE_BROWSER_MAX_SEARCHES` (default 25) Google searches per run. If Google shows its "unusual
+   traffic" check, Google is not used again in that run - we never try to get around it. Google's terms do not
+   allow automated searching, so keep this to small volumes on your own PC; the API is the dependable route.
+
 ## Browser fallback (optional, for a PC or worker machine)
 
 Some websites only show their email and phone after JavaScript runs. With `BROWSER_FALLBACK=1` and Playwright installed

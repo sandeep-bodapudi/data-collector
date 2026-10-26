@@ -214,7 +214,7 @@ def _vault(user_id: int) -> dict:
 
 
 # Company-shared keys (Phase 5D). Only key material, never provider/model choices.
-ORG_SHAREABLE = {"ai_api_key", "brave_api_key", "brightdata_api_key", "apify_api_key"}
+ORG_SHAREABLE = {"ai_api_key", "brave_api_key", "brightdata_api_key", "apify_api_key", "google_places_api_key"}
 
 
 def _effective_vault(user_id: int, role: str = "member") -> dict:
@@ -549,7 +549,10 @@ def build_job_spec(d: dict, vault: dict, user_id: int, enforce_budget: bool = Tr
             return None, "Add at least one location.", 400
         if d.get("category") not in places.CATEGORIES:
             return None, "Choose a category.", 400
+        from scraper import google_places as _gp
+
         spec = {"mode": "places", "category": d["category"], "locations": locations[:30],
+                "google_places_key": _gp.key_from(vault),
                 "name_filter": (d.get("name_filter") or "").strip() if isinstance(d.get("name_filter"), str) else "",
                 "names_only": bool(d.get("names_only")),
                 "enrich": (bool(d.get("enrich")) or bool(custom)) and not d.get("names_only"),
@@ -902,6 +905,8 @@ def get_settings():
         brave_key_mask=_mask(v.get("brave_api_key", "")),
         brightdata_key_mask=_mask(v.get("brightdata_api_key", "")),
         apify_key_mask=_mask(v.get("apify_api_key", "")),
+        google_places_key_mask=_mask(v.get("google_places_api_key", "")),
+        google_places_server_key=bool(os.environ.get("GOOGLE_PLACES_API_KEY")),
         org_keys=_org_key_names(current_user.role),
         restricted=_restricted_enabled(),
         li_cookie_mask=_mask(v.get("li_at_cookie", "")), fb_cookie_mask=_mask(v.get("fb_cookie", "")),
@@ -1029,12 +1034,21 @@ def test_paid_key():
     from scraper.connection_health import check_apify_key, check_brightdata_key
 
     name = (request.get_json(force=True, silent=True) or {}).get("name")
+    from scraper import google_places as _gp
+
+    def _check_gplaces(key):
+        good, why = _gp.test_key(key)
+        return {"healthy": good, "error": why}
+
     checks = {"apify": ("apify_api_key", check_apify_key, "Apify"),
-              "brightdata": ("brightdata_api_key", check_brightdata_key, "Bright Data")}
+              "brightdata": ("brightdata_api_key", check_brightdata_key, "Bright Data"),
+              "google_places": ("google_places_api_key", _check_gplaces, "Google Places")}
     if name not in checks:
         return jsonify(ok=False, error="Unknown connector."), 400
     vault_name, fn, label = checks[name]
     key = _effective_vault(current_user.id, current_user.role).get(vault_name, "")
+    if not key and name == "google_places":
+        key = os.environ.get("GOOGLE_PLACES_API_KEY", "")
     if not key:
         return jsonify(ok=False, error=f"Save your {label} key first.")
     try:
@@ -1051,7 +1065,7 @@ def test_paid_key():
 def save_settings():
     d = request.get_json(force=True)
     allowed = {"ai_provider", "ai_model", "ai_base_url", "ai_api_key", "brave_api_key",
-               "brightdata_api_key", "apify_api_key", "apify_actor"}
+               "brightdata_api_key", "apify_api_key", "apify_actor", "google_places_api_key"}
     if _restricted_enabled():
         allowed |= {"li_at_cookie", "fb_cookie"}
     for key, value in d.items():
@@ -1061,7 +1075,7 @@ def save_settings():
         if key == "ai_provider" and value not in ai_extract.PROVIDERS:
             continue
         if key in ("ai_api_key", "brave_api_key", "li_at_cookie", "fb_cookie",
-                   "brightdata_api_key", "apify_api_key") and value == "__keep__":
+                   "brightdata_api_key", "apify_api_key", "google_places_api_key") and value == "__keep__":
             continue  # the browser never sees the saved secret; "__keep__" means "leave it unchanged"
         cred = VaultCredential.query.filter_by(owner_id=current_user.id, name=key).first()
         if not value:
@@ -1071,8 +1085,8 @@ def save_settings():
         if not cred:
             cred = VaultCredential(owner_id=current_user.id, name=key,
                                    platform="ai" if key.startswith("ai_") else ("search" if key == "brave_api_key" else "social"),
-                                   credential_type="api_key" if key in ("ai_api_key", "brave_api_key",
-                                                                        "brightdata_api_key", "apify_api_key") else "setting")
+                                   credential_type="api_key" if key in ("ai_api_key", "brave_api_key", "brightdata_api_key",
+                                                                        "apify_api_key", "google_places_api_key") else "setting")
             db.session.add(cred)
         cred.encrypted_value = encrypt(value)
     db.session.commit()

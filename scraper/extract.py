@@ -71,7 +71,7 @@ CONTACT_SUBPAGES = [
 def _clean_email(e: str) -> str | None:
     if not e:
         return None
-    e = e.strip().strip(".").lower()
+    e = re.sub(r"^(%20|%3c|mailto:)+", "", e.strip(), flags=re.I).strip().strip(".").lower()  # mailto:%20name@x.com (seen live)
     if e.endswith(EMAIL_JUNK_TLDS):
         return None
     if any(e.endswith("@" + d) or e.endswith("." + d) for d in EMAIL_JUNK_DOMAINS):

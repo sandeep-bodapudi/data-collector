@@ -36,7 +36,7 @@ PLANNED = {
 
 # Which vault entry proves a service has a key. Google CSE keeps its key in the environment, not the user vault.
 VAULT_KEY = {"brave": "brave_api_key", "ai": "ai_api_key", "brightdata": "brightdata_api_key", "apify": "apify_api_key",
-             "apify_places": "apify_api_key", "apify_contacts": "apify_api_key"}
+             "apify_places": "apify_api_key", "apify_contacts": "apify_api_key", "google_places": "google_places_api_key"}
 
 
 def key_present(name: str, vault: dict) -> bool:
@@ -46,6 +46,8 @@ def key_present(name: str, vault: dict) -> bool:
         return True
     if name == "google_cse":
         return bool(os.environ.get("GOOGLE_CSE_KEY") and os.environ.get("GOOGLE_CSE_CX"))
+    if name == "google_places":
+        return bool(vault.get("google_places_api_key") or os.environ.get("GOOGLE_PLACES_API_KEY"))
     if name == "brave":
         if vault.get("brave_api_key"):
             return True
@@ -98,11 +100,11 @@ FIELDS_PLACES = [
     {"id": "address", "label": "Address", "sources": _MAP_BASIC},
     {"id": "location", "label": "City, state, postcode, coordinates", "sources": _MAP_BASIC},
     {"id": "maps_link", "label": "Map link", "sources": _MAP_BASIC},
-    {"id": "phone", "label": "Phone", "sources": ["overpass", "page", "apify_places"]},
+    {"id": "phone", "label": "Phone", "sources": ["overpass", "page", "apify_places", "google_places"]},
     {"id": "email", "label": "Email", "sources": ["page", "apify_places"]},
-    {"id": "website", "label": "Website", "sources": ["overpass", "page", "apify_places"]},
-    {"id": "opening_hours", "label": "Opening hours", "sources": ["overpass", "apify_places"]},
-    {"id": "rating", "label": "Rating and review count", "sources": ["apify_places"]},
+    {"id": "website", "label": "Website", "sources": ["overpass", "page", "apify_places", "google_places"]},
+    {"id": "opening_hours", "label": "Opening hours", "sources": ["overpass", "apify_places", "google_places"]},
+    {"id": "rating", "label": "Rating and review count", "sources": ["apify_places", "google_places"]},
 ]
 FIELDS_ENRICH = [
     {"id": "website", "label": "Website", "sources": ["search", "page"]},
@@ -217,6 +219,10 @@ def run_options(mode: str, depth: str, vault: dict, has_sources: bool = False, b
             else:
                 row("brave", "Brave Search key (faster, optional)", "optional",
                     "Free to get. Without it the run uses free engines, which are slower.", "#/settings/keys")
+    if mode == "places" and not key_present("google_places", vault):
+        row("google_places", "Google Maps API key (best map data)", "optional",
+            "Official Google Maps listings with phone, website, hours and rating. Google gives a free monthly allowance.",
+            "#/settings/keys")
     if mode == "places":
         ok = bool(chain["places"])
         row("places", "Map sources", "ready" if ok else "missing",

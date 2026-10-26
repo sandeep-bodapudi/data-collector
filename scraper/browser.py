@@ -111,13 +111,14 @@ class _Service:
             return self._fail_all(f"browser could not start ({type(e).__name__})")
         try:
             try:
-                browser = p.chromium.launch(headless=True, args=["--disable-dev-shm-usage", "--disable-gpu"])
+                browser = p.chromium.launch(headless=True, args=["--disable-dev-shm-usage", "--disable-gpu",
+                                                                 "--blink-settings=imagesEnabled=false"])
             except BaseException as e:  # noqa: BLE001 - e.g. 'playwright install chromium' never run
                 return self._fail_all(f"browser could not start ({type(e).__name__}: {str(e)[:120]})")
             self._failed = None
+            # Images are off (launch setting above). No request interception: routing every request through
+            # Python printed CancelledError tracebacks whenever a page moved on with requests still in flight.
             ctx = browser.new_context(user_agent=USER_AGENT, locale="en-US")
-            ctx.route("**/*", lambda route: route.abort()
-                      if route.request.resource_type in ("image", "media", "font") else route.continue_())
             page = ctx.new_page()
             try:
                 while True:

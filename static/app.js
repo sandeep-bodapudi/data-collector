@@ -2097,6 +2097,14 @@ async function viewSettings(section) {
           <div class="hint">Get a free key at <a href="https://brave.com/search/api/" target="_blank" rel="noopener noreferrer">brave.com/search/api</a>. The free plan allows about one search per second and a monthly quota, so large runs take longer.</div>
         </div>
       </section>
+      <section class="card" id="sec-gplaces">
+        <div class="card-head"><div><h3>${icon("pin")} Map data: Google Maps (Places API)</h3><p>The most complete map listings - phone, website, opening hours and rating - from Google's official API. Works on the server too. Google bills beyond a free monthly allowance; set a daily quota in Google Cloud.</p></div><span id="gplaces-status"></span></div>
+        <div class="card-body">
+          <div class="field"><label class="label" for="gplaces-key">Google Places API key</label><input class="input mono" id="gplaces-key" type="password" autocomplete="off"><div class="hint" id="gplaces-hint"></div></div>
+          <div class="row-flex"><button class="btn btn-primary" id="save-gplaces">Save</button><button class="btn" id="test-gplaces">${icon("check")}Test key</button><span id="gplaces-msg" class="small"></span></div>
+          <div class="hint">Create a key in <a href="https://console.cloud.google.com/google/maps-apis/credentials" target="_blank" rel="noopener noreferrer">Google Cloud</a> with the <b>Places API (New)</b> enabled. Without a key, Places uses OpenStreetMap (and, on a PC with the browser fallback on, Google Maps in the browser).</div>
+        </div>
+      </section>
       <section class="card" id="sec-paid">
         <div class="card-head"><div><h3>${icon("key")} Paid data: Apify and Bright Data</h3><p>Your own accounts, used only by Deep runs. Stored encrypted, never shared. You are billed by them; spend is capped by your admin's monthly budget.</p></div><span id="paid-status"></span></div>
         <div class="card-body">
@@ -2307,6 +2315,7 @@ async function viewSettings(section) {
     ai: () => !!s.ai_key_mask || orgHas("ai_api_key") || (s.ai_provider === "custom" && !!s.ai_base_url),
     apify: () => !!s.apify_key_mask || orgHas("apify_api_key"), apify_places: () => HAS_KEY.apify(), apify_contacts: () => HAS_KEY.apify(),
     brightdata: () => !!s.brightdata_key_mask || orgHas("brightdata_api_key"),
+    google_places: () => !!s.google_places_key_mask || orgHas("google_places_api_key") || !!s.google_places_server_key,
   };
   const connState = (id, c) => {
     if (!c.enabled) return ["plain", "Off (admin)", "Your admin has turned this off in Admin → Connections."];
@@ -2369,6 +2378,38 @@ async function viewSettings(section) {
       b.disabled = false;
     };
   });
+
+  // ---- Google Places key
+  const renderGplaces = () => {
+    const has = !!s.google_places_key_mask, org = orgHas("google_places_api_key"), server = !!s.google_places_server_key;
+    $("#gplaces-key").placeholder = has ? `Saved ${s.google_places_key_mask} - paste to replace` : org ? "Your company shares a key - paste your own to use it instead"
+      : server ? "The server has a key - paste your own to use it instead" : "Paste your Google Places API key";
+    $("#gplaces-hint").innerHTML = has ? '<button type="button" class="btn btn-sm btn-danger" id="rm-gplaces">Remove saved key</button>' : "";
+    $("#gplaces-status").innerHTML = has || org || server ? '<span class="badge done">Ready</span>' : '<span class="badge plain">Not set up</span>';
+    $("#rm-gplaces")?.addEventListener("click", async () => {
+      if (!await confirmDialog("Remove your Google Places key?", "Places runs go back to OpenStreetMap.", "Remove")) return;
+      try { await api("/api/settings", { method: "POST", body: { google_places_api_key: "" } }); s.google_places_key_mask = ""; renderGplaces(); toast("Key removed", "ok"); } catch (e) { toast(e.message, "err"); }
+    });
+  };
+  renderGplaces();
+  $("#save-gplaces").onclick = async () => {
+    const k = $("#gplaces-key").value.trim();
+    if (!k) return toast("Paste a key first.", "err");
+    try {
+      await api("/api/settings", { method: "POST", body: { google_places_api_key: k } });
+      Object.assign(s, await api("/api/settings")); $("#gplaces-key").value = ""; renderGplaces();
+      toast("Google Places key saved", "ok", { label: "Test key", run: () => $("#test-gplaces").click() });
+    } catch (e) { toast(e.message, "err"); }
+  };
+  $("#test-gplaces").onclick = async () => {
+    const b = $("#test-gplaces"), msg = $("#gplaces-msg");
+    b.disabled = true; msg.innerHTML = '<span class="spinner"></span>';
+    try {
+      const r = await api("/api/settings/key-test", { method: "POST", body: { name: "google_places" } });
+      msg.innerHTML = r.ok ? '<span class="badge done">Working</span>' : `<span class="badge error">${esc(r.error)}</span>`;
+    } catch (e) { msg.innerHTML = `<span class="badge error">${esc(e.message)}</span>`; }
+    b.disabled = false;
+  };
 
   // ---- jump between sections; a deep link (#/settings/keys) scrolls straight to one
   const SEC_ID = { connections: "sec-connections", keys: "sec-keys", ai: "sec-ai", sources: "sec-sources", account: "sec-account" };

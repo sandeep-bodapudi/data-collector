@@ -19,6 +19,9 @@ SERVICES: dict[str, dict] = {
     "photon": {"label": "Photon", "kind": "places", "needs_key": False, "free": True, "cost": "free", "default": "1"},
     "nominatim": {"label": "Nominatim", "kind": "places", "needs_key": False, "free": True, "cost": "free", "default": "1"},
     "wikidata": {"label": "Wikidata", "kind": "places", "needs_key": False, "free": True, "cost": "free", "default": "1"},
+    # Official Google Maps data (scraper/google_places.py). Billed by Google beyond a free monthly allowance, so it
+    # needs the person's own key - like Brave, it counts as "key", usable in Standard runs.
+    "google_places": {"label": "Google Maps (Places API)", "kind": "places", "needs_key": True, "free": False, "cost": "key", "default": "1"},
     "ai": {"label": "AI custom fields", "kind": "ai", "needs_key": True, "free": False, "cost": "paid", "default": "1"},
     "social": {"label": "Social enrichment (master)", "kind": "social", "needs_key": False, "free": False, "cost": "paid", "default": "0"},
     "brightdata": {"label": "Bright Data (social)", "kind": "social", "needs_key": True, "free": False, "cost": "paid", "default": "0"},
