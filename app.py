@@ -658,6 +658,9 @@ def build_job_spec(d: dict, vault: dict, user_id: int, enforce_budget: bool = Tr
                 "names_only": names_only,
                 # Opt-in: extra searches with the category word swapped for its usual equivalents (scraper/topic.py).
                 "expand_synonyms": bool(d.get("expand_synonyms")),
+                # Opt-in: list pages ("Top 10 ... in X", directory category pages) from any site are read with the
+                # person's own AI key instead of dropped (scraper/ai_extract.extract_list). Needs an AI key to do anything.
+                "ai_lists": bool(d.get("ai_lists")),
                 "fields": fields, "platforms": platforms,
                 "follow_contact": bool(d.get("follow_contact", True)), "one_per_site": bool(d.get("one_per_site")),
                 "require": d.get("require") if d.get("require") in ("emails", "phones", "any_contact") else "",

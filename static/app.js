@@ -565,6 +565,12 @@ const FIELD_INFO = {
   text_snippet: ["text", "First 500 characters of the page"],
 };
 const DEFAULT_FIELDS = ["emails", "phones", "address"];
+// All 33 districts of Telangana, for the "Generate many searches" panel's one-click fill.
+const TELANGANA_DISTRICTS = ["Adilabad", "Bhadradri Kothagudem", "Hanumakonda", "Hyderabad", "Jagtial", "Jangaon",
+  "Jayashankar Bhupalpally", "Jogulamba Gadwal", "Kamareddy", "Karimnagar", "Khammam", "Komaram Bheem Asifabad",
+  "Mahabubabad", "Mahabubnagar", "Mancherial", "Medak", "Medchal-Malkajgiri", "Mulugu", "Nagarkurnool", "Nalgonda",
+  "Narayanpet", "Nirmal", "Nizamabad", "Peddapalli", "Rajanna Sircilla", "Ranga Reddy", "Sangareddy", "Siddipet",
+  "Suryapet", "Vikarabad", "Wanaparthy", "Warangal", "Yadadri Bhuvanagiri"];
 const PLATFORMS = [["web", "Websites", "globe"], ["linkedin.com", "LinkedIn", "link"], ["facebook.com", "Facebook", "link"], ["instagram.com", "Instagram", "link"], ["twitter.com", "X / Twitter", "link"]];
 // FIELD_SUGGESTIONS now lives in static/fieldSuggestions.js (loaded before this file; see templates/index.html),
 // the same way sheetops.js holds the pure merge/export logic - testable from Node without a browser.
@@ -694,7 +700,7 @@ async function viewNewRun(mode, depth = "standard") {
               <div class="field"><label class="label" for="batch-template">Search pattern <span class="opt">(use <code>{area}</code>)</span></label>
                 <textarea class="input" id="batch-template" rows="5">engineering colleges in {area} contact email phone</textarea></div>
             </div>
-            <div class="row-flex"><button type="button" class="btn btn-primary btn-sm" id="batch-add">Add these searches</button><span class="muted small" id="batch-count"></span></div>
+            <div class="row-flex"><button type="button" class="btn btn-primary btn-sm" id="batch-add">Add these searches</button><button type="button" class="btn btn-sm" id="batch-telangana">Fill in all 33 Telangana districts</button><span class="muted small" id="batch-count"></span></div>
           </div>
         </details>
         <div class="field mt-24"><label class="label">Search on</label>
@@ -739,6 +745,7 @@ async function viewNewRun(mode, depth = "standard") {
         <label class="switch mt-8"><input type="checkbox" id="one_per_site" checked><span class="sw"></span><span><b>One row per website</b><small>Skips duplicate pages from the same site.</small></span></label>
         <label class="switch mt-8"><input type="checkbox" id="names_only"><span class="sw"></span><span><b>Collect company names only (recommended for large searches)</b><small>We will save the names first. You can add websites and contact details later.</small></span></label>
         <label class="switch mt-8"><input type="checkbox" id="expand_synonyms"><span class="sw"></span><span><b>Also search similar wordings</b><small>Searches “training institutes”, “tuition centers” and similar alongside “coaching centers”, so companies that word themselves differently turn up too. Takes noticeably longer.</small></span></label>
+        <label class="switch mt-8"><input type="checkbox" id="ai_lists"><span class="sw"></span><span><b>Read list pages with AI</b><small>“Top 10 institutes in Hyderabad” articles and directory pages usually name many businesses with their phone numbers. Your AI key reads each one (up to 40 pages per run) and adds every business it names; anything not actually written on the page is thrown away. Needs an AI key in Settings; costs a small amount per page on your AI account.</small></span></label>
       </div>
     </div>`;
 
@@ -936,6 +943,10 @@ async function viewNewRun(mode, depth = "standard") {
         ? "Add {area} to the pattern so each line becomes its own search." : `= ${fmtNum(made.length)} search${made.length === 1 ? "" : "es"}`;
     };
     $("#batch-areas").oninput = batchSync; $("#batch-template").oninput = batchSync;
+    $("#batch-telangana").onclick = () => {
+      $("#batch-areas").value = TELANGANA_DISTRICTS.map((d) => `${d}, Telangana`).join("\n");
+      batchSync();
+    };
     $("#batch-add").onclick = () => {
       const { made } = batchExpand();
       if (!made.length) return toast("Add at least one area, and keep {area} in the pattern.", "err");
@@ -987,7 +998,7 @@ async function viewNewRun(mode, depth = "standard") {
       Object.assign(body, {
         queries: queries.items.join("\n"), max_results: $("#max_results").value, region: $("#region").value,
         require: state.require, follow_contact: $("#follow_contact").checked, one_per_site: $("#one_per_site").checked,
-        names_only: $("#names_only").checked, expand_synonyms: $("#expand_synonyms").checked,
+        names_only: $("#names_only").checked, expand_synonyms: $("#expand_synonyms").checked, ai_lists: $("#ai_lists").checked,
         sources: sourceIds,
         fields: $$("input[name=field]:checked", v).map((c) => c.value), platforms: $$("input[name=platform]:checked", v).map((c) => c.value),
       });
@@ -1216,7 +1227,7 @@ async function viewRunDetail(id) {
   const INPUT_LABELS = { queries: "Searches", category: "Category", locations: "Locations", region: "Country", fields: "Details", custom_fields: "AI details",
     platforms: "Search on", max_results: "Max results", require: "Keep only rows with", follow_contact: "Check contact pages", one_per_site: "One row per website",
     enrich: "Check websites", name_filter: "Name contains", file_name: "Sheet name", source_sheet: "From sheet",
-    sourceNames: "Directory sources", expand_synonyms: "Also searched similar wordings" };
+    sourceNames: "Directory sources", expand_synonyms: "Also searched similar wordings", ai_lists: "Read list pages with AI" };
   const spec = run.spec || {};
   $("#tab-input").innerHTML = `<ul class="summary-list">${Object.entries(spec).filter(([k, val]) => INPUT_LABELS[k] && val !== "" && val !== null && !(Array.isArray(val) && !val.length))
     .map(([k, val]) => `<li><span>${INPUT_LABELS[k]}</span><b>${esc(k === "region" ? CFG.regions[val] || val : Array.isArray(val) ? val.join("; ") : typeof val === "boolean" ? (val ? "Yes" : "No") : val)}</b></li>`).join("")}</ul>`;
