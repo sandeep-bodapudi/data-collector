@@ -2080,9 +2080,12 @@ async function viewSettings(section) {
   const srcData = await api("/api/sources");
   const presetData = await api("/api/sources/presets");
   if (stale(tk)) return;
-  const st = { provider: s.ai_provider, replacing: !s.ai_key_mask };
+  // A provider the page doesn't offer (blank after a key change, or one since removed) must never break the page.
+  const st = { provider: CFG.providers[s.ai_provider] ? s.ai_provider : "anthropic", replacing: !s.ai_key_mask };
+  const unreadable = s.unreadable_keys || [];
   v.innerHTML = `
     <div class="page-head"><div><h1>Connections &amp; settings</h1><p>What your runs can use, your own keys, the AI provider, password and appearance.</p></div></div>
+    ${unreadable.length ? `<div class="callout warn" style="margin-bottom:16px">${icon("info")}<div class="grow"><b>Some of your saved keys can no longer be read, so please enter them again.</b> This happens when the server's secret key changes (an admin can stop it happening again by setting SECRET_KEY on the server). Affected: ${esc(unreadable.map((k) => k.replace(/_/g, " ")).join(", "))}.</div></div>` : ""}
     <div class="seg settings-nav" id="settings-nav" role="tablist" aria-label="Jump to a section">${[["connections", "Connections"], ["keys", "Keys"], ["ai", "AI"], ["sources", "Sources"], ["account", "Account"]].map(([k, l]) => `<button type="button" data-sec="${k}">${l}</button>`).join("")}</div>
     <div class="stack" style="max-width:860px">
       <section class="card" id="sec-connections">
@@ -2217,7 +2220,7 @@ async function viewSettings(section) {
       await api("/api/settings", { method: "POST", body: { ai_api_key: "" } });
       s.ai_key_mask = ""; st.replacing = true; renderKey(); renderStatus(); toast("AI key removed", "ok");
     });
-    const p = CFG.providers[st.provider];
+    const p = CFG.providers[st.provider] || {};
     $("#model").placeholder = p.model || "e.g. llama3.1, deepseek-chat";
     $("#model-hint").textContent = p.model ? `Leave empty to use ${p.model}.` : "Required for this provider.";
     $("#url-field").hidden = st.provider !== "custom";
