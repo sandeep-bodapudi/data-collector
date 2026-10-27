@@ -163,6 +163,29 @@ class Fetcher:
                 return None, f"error: {type(e).__name__}"
         return None, "error: exhausted retries"
 
+    # Refusals a scraping service can get past (bot checks, rate limits, pages that are only a JavaScript shell) - not
+    # a 404 or a PDF, which no service would turn into the page we want.
+    _REFUSED = re.compile(r"^(HTTP (403|429|503|520|521|522|523|524)|unreadable page|error: connection failed)")
+
+    def _firecrawl_fallback(self, url: str, note: str) -> tuple[str | None, str]:
+        """When a site refuses a plain request and the person has a Firecrawl key, read the page through Firecrawl
+        (1 credit). Only after robots.txt allowed it, like any other fetch. Never raises."""
+        if not self._REFUSED.match(note or ""):
+            return None, note
+        from . import search
+
+        key = search.firecrawl_key()
+        if not key:
+            return None, note
+        try:
+            html = search.firecrawl_scrape(url, key)
+        except search.OutOfCredit:
+            search._mark_exhausted(key)  # a refused or spent key: stop spending calls on it for this run
+            return None, note
+        except Exception:
+            return None, note
+        return (html, "ok (via Firecrawl)") if html else (None, note)
+
     def get_html(self, url: str) -> tuple[str | None, str]:
         """Return (html, status_note). html is None when not fetched."""
         for _ in range(MAX_META_REDIRECTS + 1):
@@ -171,6 +194,8 @@ class Fetcher:
             if not self.allowed(url):
                 return None, "blocked by robots.txt"
             text, note = self._get_once(url)
+            if text is None:
+                text, note = self._firecrawl_fallback(url, note)
             if text is None:
                 return None, note
             m = META_REFRESH_RE.search(text[:4000])  # the redirect tag, when present, is always near the top
