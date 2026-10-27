@@ -68,8 +68,29 @@ python tests/test_places.py     # place search: finding the area, duplicate merg
 python tests/test_capabilities.py  # run options, depth gate, paid-key test endpoint
 python tests/test_paid_actors.py   # Apify actors: client, normalisers, budget gate, spend (mocked)
 python tests/test_quality.py       # email quality ratings (no network)
+python tests/test_free_connectors.py  # Serper/Tavily/Firecrawl search + blocked-page reading, free/paid AI (mocked)
 node tests/sheetops.test.js     # browser logic: merge & dedupe, CSV/JSON export
 ```
+
+## Free keys (AI, search and scraping)
+
+Everything below is each person's own key, saved encrypted in **Connections & settings** (or shared company-wide by an
+admin), and every one of these services gives a free key. Free allowances change often, so the Settings page links to
+each provider's own page instead of quoting numbers.
+
+- **AI -> "Free or paid AI?"** Free key: Google Gemini, Groq, OpenRouter's free-models router (`openrouter/free`) and
+  Mistral's free Experiment plan. Paid: OpenAI, Anthropic, OpenRouter (all models) or any OpenAI-compatible URL. Free
+  keys have per-minute and daily limits, so big runs go slower or pause; some free plans may use prompts to improve
+  their models, which Settings says next to the choice. People who haven't set AI up start on Free.
+- **Search -> More free search & scraping keys.** Serper (Google results), Tavily and Firecrawl, next to Brave. A run
+  tries Brave, then Serper, Tavily and Firecrawl, then Google CSE, then the free engines (which cloud servers are often
+  refused by). A key that is refused or out of credit (HTTP 401/402/403/429) is skipped for the rest of that run with
+  one message, and the run carries on with the next option ([scraper/search.py](scraper/search.py) `KEYED_SEARCH`).
+  **Test key** runs one real search with the saved key.
+- **Firecrawl also reads blocked pages.** When a website refuses the app's normal visit (HTTP 403/429/503, a bot-check
+  page, or no connection) and the person has a Firecrawl key, the page is read through Firecrawl instead (1 credit per
+  page; never for a 404 or a PDF, and only where robots.txt allows the page). See `Fetcher._firecrawl_fallback` in
+  [scraper/fetch.py](scraper/fetch.py).
 
 ## Standard and Deep runs
 

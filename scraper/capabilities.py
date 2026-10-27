@@ -36,7 +36,8 @@ PLANNED = {
 
 # Which vault entry proves a service has a key. Google CSE keeps its key in the environment, not the user vault.
 VAULT_KEY = {"brave": "brave_api_key", "ai": "ai_api_key", "brightdata": "brightdata_api_key", "apify": "apify_api_key",
-             "apify_places": "apify_api_key", "apify_contacts": "apify_api_key", "google_places": "google_places_api_key"}
+             "apify_places": "apify_api_key", "apify_contacts": "apify_api_key", "google_places": "google_places_api_key",
+             "serper": "serper_api_key", "tavily": "tavily_api_key", "firecrawl": "firecrawl_api_key"}
 
 
 def key_present(name: str, vault: dict) -> bool:
@@ -193,6 +194,7 @@ def run_options(mode: str, depth: str, vault: dict, has_sources: bool = False, b
     usable = {s["id"] for s in services if s["usable"]}
 
     probe = {"mode": mode, "brave_key": vault.get("brave_api_key", ""),
+             "search_keys": {n: vault.get(VAULT_KEY[n], "") for n in ("serper", "tavily", "firecrawl") if vault.get(VAULT_KEY[n])},
              "brightdata_key": vault.get("brightdata_api_key", ""), "apify_key": vault.get("apify_api_key", ""),
              "ai": {"provider": vault.get("ai_provider", ""), "key": vault.get("ai_api_key", ""),
                     "base_url": vault.get("ai_base_url", "")}, "items": []}

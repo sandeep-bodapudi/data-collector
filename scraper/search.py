@@ -5,6 +5,8 @@
    https://programmablesearchengine.google.com/ - create an engine, "Search the entire web", then
    https://developers.google.com/custom-search/v1/introduction for the API key). Good as a reliable top-up once
    Brave's monthly quota or the free engines below run dry for the day.
+   (Between 1 and 2: the person's own Serper / Tavily / Firecrawl keys, if they added any - KEYED_SEARCH below; all
+   three have free plans.)
 3. Otherwise free search engines through the `ddgs` library, tried one by one. These work well from office PCs,
    but datacenter IPs (cloud servers) get blocked often and unpredictably - which engine works varies run to run.
    "bing" is deliberately not in this list: this library doesn't actually have a Bing backend, and passing that
@@ -85,18 +87,39 @@ _thread_keys = threading.local()
 
 
 @contextmanager
-def search_keys(brave: str = ""):
-    """Use this user's Brave key for every search made inside the block, on this thread."""
-    previous = getattr(_thread_keys, "brave", None)
+def search_keys(brave: str = "", extra: dict | None = None):
+    """Use this user's search keys for every search made inside the block, on this thread. `extra` holds the other
+    keyed search services (KEYED_SEARCH: serper, tavily, firecrawl) by name."""
+    previous = (getattr(_thread_keys, "brave", None), getattr(_thread_keys, "extra", None))
     _thread_keys.brave = brave or ""
+    _thread_keys.extra = {k: v for k, v in (extra or {}).items() if k in KEYED_SEARCH_NAMES and v}
     try:
         yield
     finally:
-        _thread_keys.brave = previous
+        _thread_keys.brave, _thread_keys.extra = previous
 
 
 def _brave_key() -> str:
     return getattr(_thread_keys, "brave", None) or ""
+
+
+KEYED_SEARCH_NAMES = ("serper", "tavily", "firecrawl")  # tried in this order after Brave; see KEYED_SEARCH below
+
+
+def _extra_key(name: str) -> str:
+    return (getattr(_thread_keys, "extra", None) or {}).get(name, "")
+
+
+def keyed_search_set() -> bool:
+    """Any official, key-based search is usable on this thread (Brave or one of KEYED_SEARCH) - the free engines'
+    IP-based blocking doesn't apply, so pacing can be shorter and "no engine answered" warnings don't fit."""
+    return brave_key_set() or any(_extra_key(n) and not brave_exhausted(_extra_key(n)) for n in KEYED_SEARCH_NAMES)
+
+
+def firecrawl_key() -> str:
+    """This user's Firecrawl key on this thread, if set and not out of credit - also used to fetch blocked pages."""
+    key = _extra_key("firecrawl")
+    return "" if not key or brave_exhausted(key) else key
 
 
 def brave_key_set() -> bool:
@@ -156,6 +179,89 @@ def _google_cse(query: str, region: str, max_results: int, api_key: str, cx: str
     return out[:max_results]
 
 
+# ---------------------------------------------------------------- other keyed search services with free plans
+# Each person can add their own key for any of these in Settings -> Keys. They are tried after Brave and before the
+# free engines (which cloud servers often get refused by). Free plans when this was written - they change, so each
+# card in Settings links to the provider's own pricing page: Serper 2,500 one-time free searches; Tavily 1,000 free
+# credits a month; Firecrawl a monthly free allowance of credits (2 per 10 search results, 1 per page scraped).
+# Responses are read defensively: these APIs have shipped more than one shape over time, and a shape we don't
+# recognise just gives no results (and the Settings "Test key" button shows that straight away).
+SERPER_URL = "https://google.serper.dev/search"
+TAVILY_URL = "https://api.tavily.com/search"
+FIRECRAWL_SEARCH_URL = "https://api.firecrawl.dev/v2/search"
+FIRECRAWL_SCRAPE_URL = "https://api.firecrawl.dev/v2/scrape"
+
+
+class OutOfCredit(Exception):
+    """The service answered 401/402/403/429: a wrong key, no credit left, or rate-limited."""
+
+
+def _check(r: requests.Response) -> None:
+    if r.status_code in (401, 402, 403, 429):
+        raise OutOfCredit(f"HTTP {r.status_code}")
+    r.raise_for_status()
+
+
+def _serper(query: str, region: str, max_results: int, key: str) -> list[dict]:
+    body = {"q": query, "num": min(max(max_results, 10), 100)}
+    if region != "wt-wt":
+        body["gl"] = region.split("-")[0].lower()
+    r = requests.post(SERPER_URL, headers={"X-API-KEY": key, "Content-Type": "application/json"}, json=body, timeout=30)
+    _check(r)
+    items = r.json().get("organic") or []
+    return [{"title": i.get("title", ""), "href": i.get("link", "") or i.get("url", ""),
+             "body": i.get("snippet", "") or i.get("description", "")} for i in items if isinstance(i, dict)][:max_results]
+
+
+def _tavily(query: str, region: str, max_results: int, key: str) -> list[dict]:
+    body = {"query": query, "max_results": min(max_results, 20), "search_depth": "basic"}  # basic = 1 credit
+    r = requests.post(TAVILY_URL, headers={"Authorization": f"Bearer {key}", "Content-Type": "application/json"},
+                      json=body, timeout=30)
+    _check(r)
+    items = r.json().get("results") or []
+    return [{"title": i.get("title", ""), "href": i.get("url", ""), "body": i.get("content", "")}
+            for i in items if isinstance(i, dict)]
+
+
+def _firecrawl_search(query: str, region: str, max_results: int, key: str) -> list[dict]:
+    body = {"query": query, "limit": min(max_results, 100)}
+    if region != "wt-wt":
+        body["country"] = region.split("-")[0].upper()
+    r = requests.post(FIRECRAWL_SEARCH_URL, headers={"Authorization": f"Bearer {key}", "Content-Type": "application/json"},
+                      json=body, timeout=60)
+    _check(r)
+    data = r.json().get("data") or []
+    items = (data.get("web") or []) if isinstance(data, dict) else data  # v2: {"data": {"web": [...]}}; v1: {"data": [...]}
+    return [{"title": i.get("title", ""), "href": i.get("url", ""), "body": i.get("description", "") or i.get("snippet", "")}
+            for i in items if isinstance(i, dict)]
+
+
+def firecrawl_scrape(url: str, key: str, timeout: int = 60) -> str | None:
+    """A page's HTML through Firecrawl, for sites that refuse a plain request (bot checks, pages built by JavaScript).
+    1 credit per page. None when it can't be read; raises OutOfCredit when the key is refused or spent."""
+    r = requests.post(FIRECRAWL_SCRAPE_URL, headers={"Authorization": f"Bearer {key}", "Content-Type": "application/json"},
+                      json={"url": url, "formats": ["html"]}, timeout=timeout)
+    _check(r)
+    data = r.json().get("data") or {}
+    return (data.get("html") or data.get("rawHtml") or None) if isinstance(data, dict) else None
+
+
+KEYED_SEARCH = {  # name -> (label, function), tried in KEYED_SEARCH_NAMES order after Brave
+    "serper": ("Serper", _serper),
+    "tavily": ("Tavily", _tavily),
+    "firecrawl": ("Firecrawl", _firecrawl_search),
+}
+
+
+def test_keyed_search(name: str, key: str) -> int:
+    """One real search with this key, for Settings' "Test key" button. Returns how many results came back."""
+    _, fn = KEYED_SEARCH[name]
+    try:
+        return len(fn("digital marketing institutes in Hyderabad", "in-en", 5, key))
+    except OutOfCredit as e:
+        raise requests.HTTPError(f"the key was refused or is out of credit ({e})")
+
+
 def _enabled(name: str) -> bool:
     try:
         from .config import is_enabled
@@ -194,6 +300,23 @@ def web_search(query: str, region: str, max_results: int, say, engines=None) -> 
             say(f"  Brave API failed ({e}); trying other options")
     elif key and brave_exhausted(key):
         say("  skipped Brave (quota exhausted earlier this run); trying other options")
+
+    for name in KEYED_SEARCH_NAMES:
+        label, fn = KEYED_SEARCH[name]
+        k = _extra_key(name)
+        if not k or brave_exhausted(k) or not _enabled(name):
+            continue
+        try:
+            hits = fn(query, region, max_results, k)
+            if hits:
+                return hits
+            say(f"  {label} returned no results; trying other options")
+        except OutOfCredit as e:
+            if _mark_exhausted(k):  # said once per run, not on every search
+                say(f"  {label} refused the search ({e}): its key is wrong or its free credit is used up. Continuing "
+                    f"without {label} for the rest of this run - check the key in Connections & settings → Keys.")
+        except (requests.RequestException, ValueError) as e:
+            say(f"  {label} failed ({type(e).__name__}); trying other options")
 
     g_allowed = _enabled("google_cse")
     if not g_allowed:
