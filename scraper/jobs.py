@@ -16,6 +16,7 @@ from . import (ai_extract, apify_actors, browser, discover, extract, google_brow
                quality, search, sources)
 from . import topic as topic_words
 from .excel import SECRET_KEYS
+from . import fetch
 from .fetch import WORKERS, Fetcher, domain_of
 from .search import SearchBlocked, web_search
 
@@ -27,6 +28,46 @@ REGIONS = {
 JOBS: dict[str, "Job"] = {}
 RESULT_TTL = 2 * 3600  # seconds a finished job's rows are kept for the browser to collect
 MAX_EXPANDED_QUERIES = 40  # cap on extra synonym searches added to one run, however many queries it has
+# "Read list pages with AI": at most this many list pages per run are sent to the person's own AI key (one AI call
+# each). A cost cap, not a quality one - raise it with AI_LIST_MAX_PAGES on a deployment that wants bigger runs.
+MAX_AI_LIST_PAGES = int(os.environ.get("AI_LIST_MAX_PAGES", "40"))
+
+
+def _ai_lists_on(spec: dict) -> bool:
+    """The person asked for list pages to be read with AI, and their AI connector can actually run."""
+    return bool(spec.get("ai_lists")) and ai_extract.ai_available(spec.get("ai", {}))
+
+
+def _listing_on_topic(h: dict, url: str, query: str) -> bool:
+    """Only spend an AI call on a list page whose title or address is about what was asked for - a "Top 10 hotels"
+    page that turned up for a coaching search is skipped, not read. Synonyms count (wide=True), as for names-only."""
+    topic, _ = _topic_place_words(query)
+    topic = topic_words.drop_noise(topic)
+    if not topic:
+        return True
+    return topic_words.topic_hit(list(dict.fromkeys(topic)), f"{h.get('title', '') or ''} {url}", wide=True)
+
+
+def _listing_items(job: "Job", html: str, hit: dict) -> list[dict]:
+    """The rows on one listing page: a saved directory source's recipe, a dedicated per-site parser, or - for any
+    other site, when the person turned it on - their AI reading the page (see ai_extract.extract_list)."""
+    if hit.get("recipe"):
+        return sources.extract_items(html, hit["url"], hit["recipe"])
+    if not hit.get("ai"):
+        return listings.extract_listing(html, hit["url"])
+    if not job.spec.get("ai_lists"):
+        return []  # AI reading was switched off mid-run after a key problem - skip the pages still queued
+    text = extract.parse(html, hit["url"])["_text"]
+    try:
+        items = ai_extract.extract_list(text, hit["url"], hit.get("query", ""), job.spec.get("ai", {}))
+    except ai_extract.AIError as e:
+        msg = f"Reading list pages with AI stopped: {e}. Check Connections & settings → AI provider."
+        if msg not in job.problems:
+            job.problems.append(msg)
+            job.say("  " + msg)
+        job.spec["ai_lists"] = False  # don't repeat a failing (and possibly billed) call on every other page
+        return []
+    return [{**it, "href": it["website"], "ai": True} for it in items]
 
 
 def public_spec(spec: dict) -> dict:
@@ -803,6 +844,10 @@ def _search(job: Job) -> tuple[list[dict], list[dict]]:
 
     results, listing_hits, seen = [], [], set()
     searched, answered = 0, 0
+    ai_lists, ai_pages, ai_over = _ai_lists_on(spec), 0, 0
+    if spec.get("ai_lists") and not ai_lists:
+        job.say("“Read list pages with AI” is on, but no AI key is set up - list pages will be skipped. "
+                "Add one in Connections & settings → AI provider.")
     for q in expanded_queries:
         if job.cancelled.is_set():
             break
@@ -856,6 +901,14 @@ def _search(job: Job) -> tuple[list[dict], list[dict]]:
                 # not one row for the directory page itself.
                 if domain_of(url) in listings.LISTING_PARSERS:
                     listing_hits.append({"url": url, "query": q})
+                elif ai_lists and not fetch.is_skipped(url) and _listing_on_topic(h, url, q):
+                    # Any other list page ("Top 10 digital marketing institutes in Hyderabad", a Sulekha category
+                    # page...) is read by the person's AI instead of dropped, up to MAX_AI_LIST_PAGES per run.
+                    if ai_pages < MAX_AI_LIST_PAGES:
+                        listing_hits.append({"url": url, "query": q, "ai": True})
+                        ai_pages += 1
+                    else:
+                        ai_over += 1
                 continue
             if not _keep_hit(h, url, q, area_confirmed, wide=wide):
                 off_topic += 1
@@ -877,6 +930,9 @@ def _search(job: Job) -> tuple[list[dict], list[dict]]:
         job.problems.append("No search engine answered any of these searches. Free engines usually refuse requests "
                             "from cloud servers, so on the hosted app a search key is needed: add a free Brave "
                             "Search key in Connections & settings \u2192 Keys, or ask your admin to share one.")
+    if ai_pages:
+        job.say(f"Found {ai_pages} list page{'s' if ai_pages != 1 else ''} to read with AI"
+                + (f" ({ai_over} more skipped - the per-run limit is {MAX_AI_LIST_PAGES})" if ai_over else "") + ".")
     return results, listing_hits
 
 
@@ -894,7 +950,7 @@ def _expand_listings(job: Job, fetcher: Fetcher, listing_hits: list[dict], known
             job.say(f"  could not read listing page {hit['url']}: {note}")
             continue
         recipe = hit.get("recipe")
-        items = sources.extract_items(html, hit["url"], recipe) if recipe else listings.extract_listing(html, hit["url"])
+        items = _listing_items(job, html, hit)
         added = 0
         for it in items:
             key = it["name"].lower()
@@ -904,6 +960,11 @@ def _expand_listings(job: Job, fetcher: Fetcher, listing_hits: list[dict], known
             row = {"Name": it["name"], "Address": it.get("address", ""), "Website": it["href"], "_query": hit.get("query", "")}
             if recipe and recipe.get("profile"):
                 row["_profile_ok"] = True  # the person's source asked for each entry's own page to be read
+            if it.get("ai"):
+                # Read by AI and checked against the page: the details are the page's own. A website the page names
+                # is the organisation's own site (not a directory profile link), so it's kept and used directly.
+                row.update({"Phone Numbers": it.get("phone", ""), "Emails": it.get("email", ""),
+                            "_site_stated": bool(it.get("website"))})
             rows.append(row)
             added += 1
         if items:
@@ -984,8 +1045,12 @@ def _enrich_listed_rows(job: Job, fetcher: Fetcher, rows: list[dict], spec: dict
     web search for whatever's left (capped at MAX_DISCOVER, same as Places, so one huge run can't hammer the free
     engines for hundreds of names at once)."""
     for r in rows:
-        r["_listing_url"] = r.get("Website", "")  # the directory's own profile link - kept as a fallback only
-        r["Website"], r["Search Location"] = "", r.get("Address", "") or "India"
+        if r.pop("_site_stated", False):
+            r["_listing_url"] = ""  # the list page named this organisation's own website - use it, no guessing
+        else:
+            r["_listing_url"] = r.get("Website", "")  # the directory's own profile link - kept as a fallback only
+            r["Website"] = ""
+        r["Search Location"] = r.get("Address", "") or "India"
     _read_profiles(job, fetcher, rows)  # the directory's own profile pages come first: they carry the phone/email
     _guess_websites(job, fetcher, rows)
     if not job.cancelled.is_set():
@@ -1167,10 +1232,8 @@ def _run_web_names(job: Job):
             job.say(f"  could not read listing page {hit['url']}: {note}")
             job.done += 1
             continue
-        recipe = hit.get("recipe")
         try:
-            items = sources.extract_items(html, hit["url"], recipe) if recipe \
-                else listings.extract_listing(html, hit["url"])
+            items = _listing_items(job, html, hit)
         except Exception:
             items = []
         origin = domain_of(hit["url"])
