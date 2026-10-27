@@ -899,8 +899,18 @@ def export_xlsx():
 @login_required
 def get_settings():
     v = _vault(current_user.id)
+    # A saved value that can't be decrypted comes back as "" (models.VaultCredential.value) - this happens to every
+    # saved key when SECRET_KEY changes, e.g. a Render deploy without SECRET_KEY set. A blank or no-longer-offered
+    # provider used to reach the browser as-is and crash the whole Settings page ("reading 'model'"). Fall back to the
+    # default provider, and name the unreadable keys so the page can ask for them again instead of looking "set".
+    provider = v.get("ai_provider", "anthropic")
+    if provider not in ai_extract.PROVIDERS:
+        provider = "anthropic"
+    unreadable = sorted(c.name for c in VaultCredential.query.filter_by(owner_id=current_user.id).all()
+                        if c.encrypted_value and not v.get(c.name))
     return jsonify(
-        ai_provider=v.get("ai_provider", "anthropic"), ai_model=v.get("ai_model", ""), ai_base_url=v.get("ai_base_url", ""),
+        ai_provider=provider, ai_model=v.get("ai_model", ""), ai_base_url=v.get("ai_base_url", ""),
+        unreadable_keys=unreadable,
         ai_key_mask=_mask(v.get("ai_api_key", "")),
         brave_key_mask=_mask(v.get("brave_api_key", "")),
         brightdata_key_mask=_mask(v.get("brightdata_api_key", "")),
