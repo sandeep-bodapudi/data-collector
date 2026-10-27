@@ -9,14 +9,20 @@ import requests
 
 MAX_PAGE_CHARS = 60_000  # cost control: only the first ~60k characters of each page are sent
 
-# provider id -> label, default model, base URL (OpenAI-compatible providers only)
+# provider id -> label, default model, base URL (OpenAI-compatible providers only), and tier:
+#   "free" - the provider gives a free API key with a standing free allowance (daily/per-minute limits apply, and some
+#            free plans may use prompts to improve their models - Settings says so next to the choice)
+#   "paid" - billed to the person's own account
+# Free allowances change often; Settings links to each provider's own page rather than quoting numbers that go stale.
 PROVIDERS = {
-    "anthropic":  {"label": "Anthropic (Claude)",            "model": "claude-opus-5-5",           "base_url": None},
-    "openai":     {"label": "OpenAI (ChatGPT)",              "model": "gpt-4.1-mini",              "base_url": None},
-    "gemini":     {"label": "Google Gemini",                 "model": "gemini-2.5-flash",          "base_url": None},
-    "openrouter": {"label": "OpenRouter (many models)",      "model": "openrouter/auto",           "base_url": "https://openrouter.ai/api/v1"},
-    "groq":       {"label": "Groq",                          "model": "llama-3.1-8b-instant",      "base_url": "https://api.groq.com/openai/v1"},
-    "custom":     {"label": "Other (OpenAI-compatible URL)", "model": "",                          "base_url": None},
+    "gemini":          {"label": "Google Gemini",                   "model": "gemini-2.5-flash",     "base_url": None,                            "tier": "free"},
+    "groq":            {"label": "Groq",                            "model": "llama-3.1-8b-instant", "base_url": "https://api.groq.com/openai/v1", "tier": "free"},
+    "openrouter_free": {"label": "OpenRouter (free models only)",   "model": "openrouter/free",      "base_url": "https://openrouter.ai/api/v1",   "tier": "free"},
+    "mistral":         {"label": "Mistral (free Experiment plan)",  "model": "mistral-small-latest", "base_url": "https://api.mistral.ai/v1",     "tier": "free"},
+    "anthropic":       {"label": "Anthropic (Claude)",              "model": "claude-opus-5-5",      "base_url": None,                            "tier": "paid"},
+    "openai":          {"label": "OpenAI (ChatGPT)",                "model": "gpt-4.1-mini",         "base_url": None,                            "tier": "paid"},
+    "openrouter":      {"label": "OpenRouter (all models)",         "model": "openrouter/auto",      "base_url": "https://openrouter.ai/api/v1",   "tier": "paid"},
+    "custom":          {"label": "Other (OpenAI-compatible URL)",   "model": "",                     "base_url": None,                            "tier": "paid"},
 }
 
 

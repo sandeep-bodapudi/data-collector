@@ -2073,14 +2073,30 @@ async function viewMerge(preselected) {
   render();
 }
 /* ================================================================ SETTINGS */
-const PROVIDER_ORDER = ["openai", "gemini", "anthropic", "openrouter", "groq", "custom"];
+const PROVIDER_ORDER = ["gemini", "groq", "openrouter_free", "mistral", "openai", "anthropic", "openrouter", "custom"];
 const PROVIDER_HELP = {
   anthropic: ["console.anthropic.com", "https://console.anthropic.com/settings/keys"],
   openai: ["platform.openai.com", "https://platform.openai.com/api-keys"],
   gemini: ["aistudio.google.com", "https://aistudio.google.com/app/apikey"],
   openrouter: ["openrouter.ai", "https://openrouter.ai/settings/keys"],
+  openrouter_free: ["openrouter.ai", "https://openrouter.ai/settings/keys"],
   groq: ["console.groq.com", "https://console.groq.com/keys"],
+  mistral: ["console.mistral.ai", "https://console.mistral.ai/api-keys"],
   custom: null,
+};
+// Keyed search services with free plans (scraper/search.py KEYED_SEARCH). Free allowances change; each links to the
+// provider's own page, which is the source of truth.
+const SEARCH_SERVICES = [
+  { id: "serper", label: "Serper", what: "Google search results", site: "serper.dev", url: "https://serper.dev/",
+    free: "Free searches come as a one-time allowance when you sign up." },
+  { id: "tavily", label: "Tavily", what: "web search built for AI tools", site: "tavily.com", url: "https://tavily.com/",
+    free: "Free plan with a monthly allowance of searches." },
+  { id: "firecrawl", label: "Firecrawl", what: "web search, and reads pages that block normal visits", site: "firecrawl.dev", url: "https://www.firecrawl.dev/",
+    free: "Free plan with monthly credits. Also used to read a website that refuses the app's normal visit (1 credit per page)." },
+];
+const TIER_HINT = {
+  free: "These give you a free API key. Free keys have per-minute and daily limits, so big runs go slower or pause until the limit resets. Some free plans may use what you send to improve their models, so avoid them for private data.",
+  paid: "Billed to your own account with that provider, usually a small amount per page read. Faster, with higher limits.",
 };
 async function viewSettings(section) {
   const tk = routeToken();
@@ -2091,9 +2107,12 @@ async function viewSettings(section) {
   const srcData = await api("/api/sources");
   const presetData = await api("/api/sources/presets");
   if (stale(tk)) return;
-  const st = { provider: s.ai_provider, replacing: !s.ai_key_mask };
+  // A provider the page doesn't offer (blank after a key change, or one since removed) must never break the page.
+  const st = { provider: CFG.providers[s.ai_provider] ? s.ai_provider : "anthropic", replacing: !s.ai_key_mask };
+  const unreadable = s.unreadable_keys || [];
   v.innerHTML = `
     <div class="page-head"><div><h1>Connections &amp; settings</h1><p>What your runs can use, your own keys, the AI provider, password and appearance.</p></div></div>
+    ${unreadable.length ? `<div class="callout warn" style="margin-bottom:16px">${icon("info")}<div class="grow"><b>Some of your saved keys can no longer be read, so please enter them again.</b> This happens when the server's secret key changes (an admin can stop it happening again by setting SECRET_KEY on the server). Affected: ${esc(unreadable.map((k) => k.replace(/_/g, " ")).join(", "))}.</div></div>` : ""}
     <div class="seg settings-nav" id="settings-nav" role="tablist" aria-label="Jump to a section">${[["connections", "Connections"], ["keys", "Keys"], ["ai", "AI"], ["sources", "Sources"], ["account", "Account"]].map(([k, l]) => `<button type="button" data-sec="${k}">${l}</button>`).join("")}</div>
     <div class="stack" style="max-width:860px">
       <section class="card" id="sec-connections">
@@ -2106,6 +2125,17 @@ async function viewSettings(section) {
           <div class="field" id="brave-field"></div>
           <div class="row-flex"><button class="btn btn-primary" id="save-brave">Save</button><button class="btn" id="test-brave">${icon("check")}Test key</button><span id="brave-msg" class="small"></span></div>
           <div class="hint">Get a free key at <a href="https://brave.com/search/api/" target="_blank" rel="noopener noreferrer">brave.com/search/api</a>. The free plan allows about one search per second and a monthly quota, so large runs take longer.</div>
+        </div>
+      </section>
+      <section class="card" id="sec-freekeys">
+        <div class="card-head"><div><h3>${icon("search")} More free search &amp; scraping keys</h3><p>Each of these gives a free API key. Add any you like: a run tries Brave first, then these in order, before the free search engines that cloud servers often get refused by. When one runs out of free credit, the run carries on with the next.</p></div></div>
+        <div class="card-body stack" id="freekeys">${SEARCH_SERVICES.map((x) => `
+          <div class="field" data-svc="${x.id}">
+            <span class="label">${esc(x.label)} <span class="opt">- ${esc(x.what)}</span></span>
+            <div data-keyslot></div>
+            <div class="row-flex mt-8"><button class="btn btn-primary btn-sm" data-save>Save</button><button class="btn btn-sm" data-test>${icon("check")}Test key</button><span class="small" data-msg></span></div>
+            <div class="hint">Free key at <a href="${x.url}" target="_blank" rel="noopener noreferrer">${esc(x.site)}</a>. ${esc(x.free)}</div>
+          </div>`).join("")}
         </div>
       </section>
       <section class="card" id="sec-gplaces">
@@ -2129,9 +2159,11 @@ async function viewSettings(section) {
       <section class="card" id="sec-ai">
         <div class="card-head"><div><h3>${icon("sparkle")} AI provider</h3><p>Bring your own key. It's used only for your runs, never shared, and stored encrypted.</p></div><span id="ai-status"></span></div>
         <div class="card-body">
+          <div class="field"><span class="label">Free or paid AI?</span>
+            <div class="seg" id="ai-tier" role="tablist" aria-label="Free or paid AI">${[["free", "Free key"], ["paid", "Paid"]].map(([k, l]) => `<button type="button" data-tier="${k}">${l}</button>`).join("")}</div>
+            <div class="hint" id="tier-hint"></div></div>
           <div class="field"><span class="label">Provider</span>
-            <div class="provider-grid" id="providers">${PROVIDER_ORDER.filter((k) => CFG.providers[k]).map((k) => [k, CFG.providers[k]]).map(([k, p]) => `
-              <label class="option radio"><input type="radio" name="provider" value="${k}" ${k === st.provider ? "checked" : ""}><span><b>${esc(p.label)}</b><small>${p.model ? `Default: ${esc(p.model)}` : "Any OpenAI-compatible API"}</small></span><span class="box"></span></label>`).join("")}</div></div>
+            <div class="provider-grid" id="providers"></div></div>
           <div class="field" id="key-field"></div>
           <div class="callout info mt-8" id="org-note" hidden>${icon("info")}<div class="grow">Your company shares an AI key — your runs will use it unless you add your own key above.</div></div>
           <div class="grid grid-2">
@@ -2228,7 +2260,7 @@ async function viewSettings(section) {
       await api("/api/settings", { method: "POST", body: { ai_api_key: "" } });
       s.ai_key_mask = ""; st.replacing = true; renderKey(); renderStatus(); toast("AI key removed", "ok");
     });
-    const p = CFG.providers[st.provider];
+    const p = CFG.providers[st.provider] || {};
     $("#model").placeholder = p.model || "e.g. llama3.1, deepseek-chat";
     $("#model-hint").textContent = p.model ? `Leave empty to use ${p.model}.` : "Required for this provider.";
     $("#url-field").hidden = st.provider !== "custom";
@@ -2239,8 +2271,27 @@ async function viewSettings(section) {
     const orgNote = $("#org-note");
     if (orgNote) orgNote.hidden = !(!s.ai_key_mask && orgAi);
   };
+  // Free or paid first, then only that kind of provider is listed. Someone who has set AI up starts on the kind their
+  // provider is; someone who hasn't starts on Free (the default provider is a paid one, which isn't a choice they made).
+  const tierOf = (k) => (CFG.providers[k] || {}).tier || "paid";
+  st.tier = s.ai_key_mask || (s.org_keys || []).includes("ai_api_key") ? tierOf(st.provider) : "free";
+  const renderProviders = () => {
+    $$("#ai-tier button").forEach((b) => b.classList.toggle("active", b.dataset.tier === st.tier));
+    $("#tier-hint").textContent = TIER_HINT[st.tier];
+    const keys = PROVIDER_ORDER.filter((k) => CFG.providers[k] && tierOf(k) === st.tier);
+    if (!keys.includes(st.provider)) st.provider = keys[0];
+    $("#providers").innerHTML = keys.map((k) => {
+      const p = CFG.providers[k];
+      return `<label class="option radio"><input type="radio" name="provider" value="${k}" ${k === st.provider ? "checked" : ""}><span><b>${esc(p.label)}</b><small>${p.model ? `Default: ${esc(p.model)}` : "Any OpenAI-compatible API"}</small></span><span class="box"></span></label>`;
+    }).join("");
+  };
+  $("#ai-tier").addEventListener("click", (e) => {
+    const b = e.target.closest("button[data-tier]");
+    if (!b || b.dataset.tier === st.tier) return;
+    st.tier = b.dataset.tier; renderProviders(); renderKey();
+  });
   $("#providers").addEventListener("change", (e) => { if (e.target.name === "provider") { st.provider = e.target.value; renderKey(); } });
-  renderKey(); renderStatus();
+  renderProviders(); renderKey(); renderStatus();
 
   $("#save-ai").onclick = async () => {
     const body = { ai_provider: st.provider, ai_model: $("#model").value, ai_base_url: st.provider === "custom" ? $("#base_url").value : "" };
@@ -2319,9 +2370,52 @@ async function viewSettings(section) {
   };
   renderBrave();
 
+  // ---- Serper / Tavily / Firecrawl: same save / test / remove pattern as Brave, one block per service
+  const masks = () => s.search_key_masks || {};
+  const renderFreeKey = (box) => {
+    const id = box.dataset.svc, label = SEARCH_SERVICES.find((x) => x.id === id).label, mask = masks()[id];
+    const shared = (s.org_keys || []).includes(`${id}_api_key`);
+    box.querySelector("[data-keyslot]").innerHTML = mask
+      ? `<div class="saved-key">${icon("key")}<span class="grow">${esc(mask)}</span><button class="btn btn-sm btn-danger" data-remove>Remove</button></div>`
+      : `<input class="input mono" type="password" autocomplete="off" aria-label="${esc(label)} API key" placeholder="Paste your ${esc(label)} API key">`
+        + (shared ? `<div class="hint">Your company shares a ${esc(label)} key - runs use it unless you add your own.</div>` : "");
+  };
+  $$("#freekeys [data-svc]").forEach((box) => {
+    const id = box.dataset.svc, label = SEARCH_SERVICES.find((x) => x.id === id).label, field = `${id}_api_key`;
+    const msg = box.querySelector("[data-msg]");
+    renderFreeKey(box);
+    box.addEventListener("click", async (e) => {
+      if (e.target.closest("[data-remove]")) {
+        if (!await confirmDialog(`Remove your ${label} key?`, "Runs will carry on with your other search options.", "Remove")) return;
+        await api("/api/settings", { method: "POST", body: { [field]: "" } });
+        Object.assign(s, await api("/api/settings")); renderFreeKey(box); renderConnectionsAgain(); toast(`${label} key removed`, "ok");
+      } else if (e.target.closest("[data-save]")) {
+        const key = box.querySelector("input")?.value.trim();
+        if (!key && !masks()[id]) return toast(`Paste your ${label} key first.`, "err");
+        try {
+          await api("/api/settings", { method: "POST", body: { [field]: key || "__keep__" } });
+          Object.assign(s, await api("/api/settings")); renderFreeKey(box); renderConnectionsAgain();
+          toast(`${label} key saved`, "ok", { label: "Test key", run: () => box.querySelector("[data-test]").click() });
+        } catch (err) { toast(err.message, "err"); }
+      } else if (e.target.closest("[data-test]")) {
+        const b = box.querySelector("[data-test]");
+        b.disabled = true; msg.innerHTML = '<span class="spinner"></span>';
+        try {
+          const r = await api("/api/settings/search-test", { method: "POST", body: { name: id } });
+          msg.innerHTML = r.ok ? `<span class="badge done">Working - ${r.results} results</span>` : `<span class="badge error">${esc(r.error)}</span>`;
+        } catch (err) { msg.innerHTML = `<span class="badge error">${esc(err.message)}</span>`; }
+        b.disabled = false;
+      }
+    });
+  });
+  const renderConnectionsAgain = () => api("/api/connections/status").then((cs) => !stale(tk) && renderConnections(cs)).catch(() => {});
+
   // ---- connections overview: one honest status per service, from the same data the run screen uses
   const orgHas = (n) => (s.org_keys || []).includes(n);
   const HAS_KEY = {
+    serper: () => !!masks().serper || orgHas("serper_api_key"),
+    tavily: () => !!masks().tavily || orgHas("tavily_api_key"),
+    firecrawl: () => !!masks().firecrawl || orgHas("firecrawl_api_key"),
     brave: () => !!s.brave_key_mask || orgHas("brave_api_key"),
     ai: () => !!s.ai_key_mask || orgHas("ai_api_key") || (s.ai_provider === "custom" && !!s.ai_base_url),
     apify: () => !!s.apify_key_mask || orgHas("apify_api_key"), apify_places: () => HAS_KEY.apify(), apify_contacts: () => HAS_KEY.apify(),

@@ -378,6 +378,25 @@ ok("the test reads the first page and the first entry's own page", t["ok"] and t
    and t["profile"] and "040-12345678" in t["profile"]["phones"][0], t)
 appmod.Fetcher = _fetch_mod.Fetcher
 
+# ---- Settings must survive saved values that can't be decrypted (SECRET_KEY changed on a deploy) -------------
+# Real failure: the Settings page showed "This page could not be loaded - Cannot read properties of undefined
+# (reading 'model')" because an unreadable saved ai_provider came back as "" and the page looked up provider "".
+from models import User, db as _db2  # noqa: E402
+
+with app.app_context():
+    boss = User.query.filter(User.username.ilike("boss")).first()
+    for name in ("ai_provider", "ai_api_key"):
+        cred = VaultCredential.query.filter_by(owner_id=boss.id, name=name).first() \
+            or VaultCredential(owner_id=boss.id, name=name, platform="ai")
+        cred.encrypted_value = "written-with-an-old-secret-key"  # not decryptable with the current key
+        _db2.session.add(cred)
+    _db2.session.commit()
+s = c.get("/api/settings").get_json()
+ok("an unreadable saved provider falls back to a real one instead of ''", s["ai_provider"] == "anthropic", s.get("ai_provider"))
+ok("unreadable keys are named so the page can ask for them again",
+   {"ai_provider", "ai_api_key"} <= set(s.get("unreadable_keys", [])), s.get("unreadable_keys"))
+ok("an unreadable key isn't shown as saved", not s["ai_key_mask"], s.get("ai_key_mask"))
+
 
 print(f"\n{len(failures)} failure(s)" if failures else "\nAll tests passed")
 sys.exit(1 if failures else 0)

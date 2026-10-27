@@ -14,6 +14,11 @@ from __future__ import annotations
 SERVICES: dict[str, dict] = {
     "brave": {"label": "Brave Search", "kind": "search", "needs_key": True, "free": False, "cost": "key", "default": "1"},
     "google_cse": {"label": "Google CSE", "kind": "search", "needs_key": True, "free": False, "cost": "key", "default": "1"},
+    # Keyed search services with a free plan, each person's own key (scraper/search.py KEYED_SEARCH) - tried after
+    # Brave and before the free engines, which cloud servers often get refused by.
+    "serper": {"label": "Serper (Google results)", "kind": "search", "needs_key": True, "free": False, "cost": "key", "default": "1"},
+    "tavily": {"label": "Tavily Search", "kind": "search", "needs_key": True, "free": False, "cost": "key", "default": "1"},
+    "firecrawl": {"label": "Firecrawl (search + blocked pages)", "kind": "search", "needs_key": True, "free": False, "cost": "key", "default": "1"},
     "ddgs": {"label": "Free engines (DDGS)", "kind": "search", "needs_key": False, "free": True, "cost": "free", "default": "1"},
     "overpass": {"label": "Overpass", "kind": "places", "needs_key": False, "free": True, "cost": "free", "default": "1"},
     "photon": {"label": "Photon", "kind": "places", "needs_key": False, "free": True, "cost": "free", "default": "1"},
@@ -32,7 +37,7 @@ SERVICES: dict[str, dict] = {
     "apify": {"label": "Apify actors (social)", "kind": "social", "needs_key": True, "free": False, "cost": "paid", "default": "0"},
 }
 
-FREE_SEARCH_ORDER = ["brave", "google_cse", "ddgs"]
+FREE_SEARCH_ORDER = ["brave", "serper", "tavily", "firecrawl", "google_cse", "ddgs"]
 FREE_PLACES_ORDER = ["overpass", "photon", "nominatim", "wikidata"]
 SOCIAL_PROVIDER_ORDER = ["brightdata", "apify"]
 

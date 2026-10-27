@@ -410,11 +410,12 @@ def _run_with_context(job: Job) -> None:
 
 
 def _keyed(job: Job, fn):
-    """Worker threads don't inherit the job's Brave key, so each one sets it before it searches."""
-    key = getattr(job, "spec", {}).get("brave_key", "")
+    """Worker threads don't inherit the job's search keys, so each one sets them before it searches or fetches."""
+    spec = getattr(job, "spec", {})
+    key, extra = spec.get("brave_key", ""), spec.get("search_keys") or {}
 
     def run(*args):
-        with search.search_keys(key):
+        with search.search_keys(key, extra):
             return fn(*args)
     return run
 
@@ -450,6 +451,9 @@ def preflight(spec: dict) -> dict:
             continue
         if name == "google_cse" and not (os.environ.get("GOOGLE_CSE_KEY") and os.environ.get("GOOGLE_CSE_CX")):
             notes.append("skipped google_cse (no key)")
+            continue
+        if name in search.KEYED_SEARCH_NAMES and not (spec.get("search_keys") or {}).get(name):
+            notes.append(f"skipped {name} (no key)")
             continue
         search_eff.append(name)
     if not search_eff and search_flaky:
@@ -561,7 +565,7 @@ def _run(job: Job):
         if mode == "social" and not eff.get("social"):
             job.say("  social providers unavailable (disabled, no key, or last check failed); "
                     "running free lookup only")
-        with search.search_keys(job.spec.get("brave_key", "")):
+        with search.search_keys(job.spec.get("brave_key", ""), job.spec.get("search_keys") or {}):
             if job.spec["mode"] == "places":
                 _run_places(job)
             elif job.spec["mode"] == "enrich":
@@ -854,7 +858,7 @@ def _search(job: Job) -> tuple[list[dict], list[dict]]:
         except SearchBlocked as e:
             job.problems.append(str(e))
             hits = []
-        if not hits and browser.enabled() and not (spec.get("brave_key") or search.brave_key_set()):
+        if not hits and browser.enabled() and not (spec.get("brave_key") or search.keyed_search_set()):
             # PC only: the free engines gave nothing, so ask Google itself in the browser (scraper/google_browser.py).
             got = _google_session(job).search(q, int(spec.get("max_results") or 20))
             if got:
@@ -920,7 +924,7 @@ def _search(job: Job) -> tuple[list[dict], list[dict]]:
             job.say("  skipped as unrelated: " + "; ".join(dropped_titles) + (" …" if off_topic > len(dropped_titles) else ""))
         if q != expanded_queries[-1]:
             time.sleep(_current_gap())  # measured-safe pacing; shorter automatically once an official search key is set
-    if searched and not answered and not job.cancelled.is_set() and not (spec.get("brave_key") or search.brave_key_set()):
+    if searched and not answered and not job.cancelled.is_set() and not (spec.get("brave_key") or search.keyed_search_set()):
         # Seen in production: every free engine refuses a cloud server's address, so even "IT companies in Hyderabad"
         # came back empty and the run used to end as a quiet "done, 0 rows". Say what actually happened instead.
         job.problems.append("No search engine answered any of these searches. Free engines usually refuse requests "
@@ -1468,13 +1472,13 @@ def _current_gap() -> float:
     try:
         from .config import is_enabled
 
-        brave_ok = is_enabled("brave") and (search.brave_key_set())
+        brave_ok = search.keyed_search_set()  # Brave, Serper, Tavily or Firecrawl - each skips itself when switched off
         cse_ok = is_enabled("google_cse") and (os.environ.get("GOOGLE_CSE_KEY") and os.environ.get("GOOGLE_CSE_CX"))
         if brave_ok or cse_ok:
             return min(search_gap, keyed_gap)  # never slower than the no-key pacing, only ever faster
     except Exception:
         pass
-    if search.brave_key_set() or (os.environ.get("GOOGLE_CSE_KEY") and os.environ.get("GOOGLE_CSE_CX")):
+    if search.keyed_search_set() or (os.environ.get("GOOGLE_CSE_KEY") and os.environ.get("GOOGLE_CSE_CX")):
         return min(search_gap, keyed_gap)  # never slower than the no-key pacing, only ever faster
     return search_gap
 

@@ -214,7 +214,10 @@ def _vault(user_id: int) -> dict:
 
 
 # Company-shared keys (Phase 5D). Only key material, never provider/model choices.
-ORG_SHAREABLE = {"ai_api_key", "brave_api_key", "brightdata_api_key", "apify_api_key", "google_places_api_key"}
+# Keyed search services with free plans (scraper/search.py KEYED_SEARCH): service name -> its key in the vault.
+SEARCH_KEY_FIELDS = {"serper": "serper_api_key", "tavily": "tavily_api_key", "firecrawl": "firecrawl_api_key"}
+ORG_SHAREABLE = {"ai_api_key", "brave_api_key", "brightdata_api_key", "apify_api_key", "google_places_api_key",
+                 *SEARCH_KEY_FIELDS.values()}
 
 
 def _effective_vault(user_id: int, role: str = "member") -> dict:
@@ -442,7 +445,8 @@ def index():
         fields=extract.STANDARD_FIELDS,
         categories=list(places.CATEGORIES),
         regions=REGIONS,
-        providers={k: {"label": v["label"], "model": v["model"]} for k, v in ai_extract.PROVIDERS.items()},
+        providers={k: {"label": v["label"], "model": v["model"], "tier": v.get("tier", "paid")}
+                   for k, v in ai_extract.PROVIDERS.items()},
         restricted=_restricted_enabled(),
         company=COMPANY_NAME,
     )
@@ -540,6 +544,7 @@ def build_job_spec(d: dict, vault: dict, user_id: int, enforce_budget: bool = Tr
         "custom_fields": custom, "max_results": max_results,
         "file_name": _clean_name(d.get("file_name"), ""),
         "ai": ai, "allow_restricted": restricted, "brave_key": vault.get("brave_api_key", ""),
+        "search_keys": {name: vault.get(field, "") for name, field in SEARCH_KEY_FIELDS.items() if vault.get(field)},
         "li_at_cookie": vault.get("li_at_cookie", "") if restricted else "",
         "fb_cookie": vault.get("fb_cookie", "") if restricted else "",
     }
@@ -902,10 +907,21 @@ def export_xlsx():
 @login_required
 def get_settings():
     v = _vault(current_user.id)
+    # A saved value that can't be decrypted comes back as "" (models.VaultCredential.value) - this happens to every
+    # saved key when SECRET_KEY changes, e.g. a Render deploy without SECRET_KEY set. A blank or no-longer-offered
+    # provider used to reach the browser as-is and crash the whole Settings page ("reading 'model'"). Fall back to the
+    # default provider, and name the unreadable keys so the page can ask for them again instead of looking "set".
+    provider = v.get("ai_provider", "anthropic")
+    if provider not in ai_extract.PROVIDERS:
+        provider = "anthropic"
+    unreadable = sorted(c.name for c in VaultCredential.query.filter_by(owner_id=current_user.id).all()
+                        if c.encrypted_value and not v.get(c.name))
     return jsonify(
-        ai_provider=v.get("ai_provider", "anthropic"), ai_model=v.get("ai_model", ""), ai_base_url=v.get("ai_base_url", ""),
+        ai_provider=provider, ai_model=v.get("ai_model", ""), ai_base_url=v.get("ai_base_url", ""),
+        unreadable_keys=unreadable,
         ai_key_mask=_mask(v.get("ai_api_key", "")),
         brave_key_mask=_mask(v.get("brave_api_key", "")),
+        search_key_masks={name: _mask(v.get(field, "")) for name, field in SEARCH_KEY_FIELDS.items()},
         brightdata_key_mask=_mask(v.get("brightdata_api_key", "")),
         apify_key_mask=_mask(v.get("apify_api_key", "")),
         google_places_key_mask=_mask(v.get("google_places_api_key", "")),
@@ -1030,6 +1046,27 @@ def test_brave_key():
     return jsonify(ok=True, results=len(hits))
 
 
+@app.post("/api/settings/search-test")
+@login_required
+def test_search_key():
+    """One real search with the person's saved Serper, Tavily or Firecrawl key. Never returns the key."""
+    name = (request.get_json(force=True, silent=True) or {}).get("name")
+    if name not in SEARCH_KEY_FIELDS:
+        return jsonify(ok=False, error="Unknown search service."), 400
+    label = search.KEYED_SEARCH[name][0]
+    key = _effective_vault(current_user.id, current_user.role).get(SEARCH_KEY_FIELDS[name], "")
+    if not key:
+        return jsonify(ok=False, error=f"Save your {label} key first.")
+    try:
+        n = search.test_keyed_search(name, key)
+    except Exception as e:  # a refused key or spent credit is a readable message, never a crash or the key
+        why = str(e) if "refused" in str(e) else f"could not reach {label} ({type(e).__name__})"
+        return jsonify(ok=False, error=f"{label}: {why}.")
+    if not n:
+        return jsonify(ok=False, error=f"{label} accepted the key but returned no results for a test search.")
+    return jsonify(ok=True, results=n)
+
+
 @app.post("/api/settings/key-test")
 @roles_required("admin", "member")
 def test_paid_key():
@@ -1068,17 +1105,19 @@ def test_paid_key():
 def save_settings():
     d = request.get_json(force=True)
     allowed = {"ai_provider", "ai_model", "ai_base_url", "ai_api_key", "brave_api_key",
-               "brightdata_api_key", "apify_api_key", "apify_actor", "google_places_api_key"}
+               "brightdata_api_key", "apify_api_key", "apify_actor", "google_places_api_key"} | set(SEARCH_KEY_FIELDS.values())
     if _restricted_enabled():
         allowed |= {"li_at_cookie", "fb_cookie"}
+    secret_fields = {"ai_api_key", "brave_api_key", "li_at_cookie", "fb_cookie", "brightdata_api_key", "apify_api_key",
+                     "google_places_api_key"} | set(SEARCH_KEY_FIELDS.values())
+    search_fields = {"brave_api_key"} | set(SEARCH_KEY_FIELDS.values())
     for key, value in d.items():
         if key not in allowed:
             continue
         value = (value or "").strip()
         if key == "ai_provider" and value not in ai_extract.PROVIDERS:
             continue
-        if key in ("ai_api_key", "brave_api_key", "li_at_cookie", "fb_cookie",
-                   "brightdata_api_key", "apify_api_key", "google_places_api_key") and value == "__keep__":
+        if key in secret_fields and value == "__keep__":
             continue  # the browser never sees the saved secret; "__keep__" means "leave it unchanged"
         cred = VaultCredential.query.filter_by(owner_id=current_user.id, name=key).first()
         if not value:
@@ -1087,9 +1126,8 @@ def save_settings():
             continue
         if not cred:
             cred = VaultCredential(owner_id=current_user.id, name=key,
-                                   platform="ai" if key.startswith("ai_") else ("search" if key == "brave_api_key" else "social"),
-                                   credential_type="api_key" if key in ("ai_api_key", "brave_api_key", "brightdata_api_key",
-                                                                        "apify_api_key", "google_places_api_key") else "setting")
+                                   platform="ai" if key.startswith("ai_") else ("search" if key in search_fields else "social"),
+                                   credential_type="api_key" if key in secret_fields - {"li_at_cookie", "fb_cookie"} else "setting")
             db.session.add(cred)
         cred.encrypted_value = encrypt(value)
     db.session.commit()
