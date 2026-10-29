@@ -575,7 +575,7 @@ const PLATFORMS = [["web", "Websites", "globe"], ["linkedin.com", "LinkedIn", "l
 // FIELD_SUGGESTIONS now lives in static/fieldSuggestions.js (loaded before this file; see templates/index.html),
 // the same way sheetops.js holds the pure merge/export logic - testable from Node without a browser.
 const CAT_GROUPS = [
-  ["Religious", ["Hindu temples", "Churches", "Mosques", "Gurudwaras", "Buddhist / Jain temples", "All places of worship"]],
+  ["Religious", ["Hindu temples", "Venkateswara Swamy Temples", "Churches", "Mosques", "Gurudwaras", "Buddhist / Jain temples", "All places of worship"]],
   ["Health", ["Hospitals", "Clinics & doctors", "Pharmacies", "Veterinary clinics"]],
   ["Education", ["Schools", "Colleges & universities", "Engineering colleges"]],
   ["Food & stay", ["Restaurants", "Cafes", "Hotels"]],

@@ -35,6 +35,7 @@ HEADERS = {"User-Agent": "OneBridgeDataCollector/2.0 (internal business research
 # Category label -> list of OSM tag filters (any match counts).
 CATEGORIES = {
     "Hindu temples": ['[amenity=place_of_worship][religion=hindu]'],
+    "Venkateswara Swamy Temples": ['[amenity=place_of_worship][religion=hindu]'],
     "Churches": ['[amenity=place_of_worship][religion=christian]'],
     "Mosques": ['[amenity=place_of_worship][religion=muslim]'],
     "Gurudwaras": ['[amenity=place_of_worship][religion=sikh]'],
